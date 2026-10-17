@@ -1,0 +1,25 @@
+[package]
+name = "tilewright-render-wgpu"
+description = "Private Vulkan and D3D12 wgpu renderer for Tilewright"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = ["crates-io"]
+
+[dependencies]
+tilewright-render-api.workspace = true
+tilewright-render-resources.workspace = true
+tilewright-scene.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+tilewright-render-testkit.workspace = true
+naga.workspace = true
+
+[lints]
+workspace = true

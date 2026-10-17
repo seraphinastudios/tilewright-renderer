@@ -7,7 +7,6 @@
   "linux_backend": "Vulkan",
   "windows_backend": "D3D12",
   "sdl_major": 3,
-  "devcontainer_contract": "atrinik/devcontainer:toolchains.json",
   "release_automation": {
     "node": "24.18.1",
     "semantic_release": "25.0.9",

@@ -1,0 +1,24 @@
+[package]
+name = "tilewright-render"
+description = "Renderer diagnostics, corpus, and offscreen proof CLI for Tilewright"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+tilewright-render-api.workspace = true
+tilewright-render-sdl3 = { workspace = true, optional = true }
+tilewright-render-testkit.workspace = true
+tilewright-render-wgpu.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+sdl3 = ["dep:tilewright-render-sdl3"]
+
+[lints]
+workspace = true

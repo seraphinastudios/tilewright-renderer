@@ -18,8 +18,8 @@ install -d "${output}"
 target_directory=$(cargo metadata --locked --offline --no-deps --format-version 1 \
   | jq -r '.target_directory')
 
-archive="atrinik-renderer-${version}.tar.gz"
-git archive --format=tar --prefix="atrinik-renderer-${version}/" HEAD \
+archive="tilewright-renderer-${version}.tar.gz"
+git archive --format=tar --prefix="tilewright-renderer-${version}/" HEAD \
   | gzip -n >"${output}/${archive}"
 
 prepare_options=()
@@ -32,14 +32,14 @@ fi
 python3 tools/crate_prepare.py prepare "${prepare_options[@]}" \
   --source-tag "${source_tag}" --output "$(realpath "${output}")" \
   --archives "$(realpath "${output}")"
-cargo build --locked --release --package atrinik-render --features sdl3
-cp "${target_directory}/release/atrinik-render" "${output}/"
+cargo build --locked --release --package tilewright-render --features sdl3
+cp "${target_directory}/release/tilewright-render" "${output}/"
 tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
   -cf - corpus | gzip -n >"${output}/corpus.tar.gz"
 cp LICENSE PROVENANCE.md THIRD_PARTY_NOTICES.md "${output}/"
 
 SYFT_CHECK_FOR_APP_UPDATE=false syft dir:. \
-  --source-name atrinik-renderer --source-version "${version}" \
+  --source-name tilewright-renderer --source-version "${version}" \
   --output "cyclonedx-json=${output}/sbom.cdx.json"
 
 jq -n \
@@ -50,7 +50,7 @@ jq -n \
     tools:{rust:$rust},backends:["Vulkan","D3D12"],sdl_major:3}' \
   >"${output}/provenance.json"
 
-checksums=$(mktemp /tmp/atrinik-renderer-checksums.XXXXXX)
+checksums=$(mktemp /tmp/tilewright-renderer-checksums.XXXXXX)
 trap 'rm -f -- "${checksums}"' EXIT
 (
   cd "${output}"
@@ -60,8 +60,8 @@ trap 'rm -f -- "${checksums}"' EXIT
 mv "${checksums}" "${output}/SHA256SUMS"
 
 crate_version=$(cargo metadata --locked --offline --no-deps --format-version 1 \
-  | jq -er '.packages[] | select(.name == "atrinik-render-wgpu") | .version')
-if [[ -f ${output}/atrinik-render-wgpu-${crate_version}.crate ]]; then
-  tar -tf "${output}/atrinik-render-wgpu-${crate_version}.crate" \
-    | grep -Fx "atrinik-render-wgpu-${crate_version}/src/shader.wgsl" >/dev/null
+  | jq -er '.packages[] | select(.name == "tilewright-render-wgpu") | .version')
+if [[ -f ${output}/tilewright-render-wgpu-${crate_version}.crate ]]; then
+  tar -tf "${output}/tilewright-render-wgpu-${crate_version}.crate" \
+    | grep -Fx "tilewright-render-wgpu-${crate_version}/src/shader.wgsl" >/dev/null
 fi

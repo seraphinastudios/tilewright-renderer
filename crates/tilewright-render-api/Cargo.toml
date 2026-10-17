@@ -1,0 +1,17 @@
+[package]
+name = "tilewright-render-api"
+description = "Renderer-neutral target, lifecycle, and frame contracts for Tilewright"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = ["crates-io"]
+
+[dependencies]
+tilewright-render-resources.workspace = true
+tilewright-scene.workspace = true
+
+[lints]
+workspace = true

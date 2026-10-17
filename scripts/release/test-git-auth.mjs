@@ -23,7 +23,7 @@ const releaseRoot = dirname(require.resolve("semantic-release"));
 assert.equal(JSON.parse(readFileSync(join(releaseRoot, "package.json"))).version, "25.0.9");
 const {default: getGitAuthUrl} = await import(pathToFileURL(join(releaseRoot, "lib/get-git-auth-url.js")));
 const {verifyAuth} = await import(pathToFileURL(join(releaseRoot, "lib/git.js")));
-const fixture = mkdtempSync(join(tmpdir(), "atrinik-release-git-auth-"));
+const fixture = mkdtempSync(join(tmpdir(), "tilewright-release-git-auth-"));
 try {
   const bin = join(fixture, "bin");
   mkdirSync(bin);
@@ -37,7 +37,7 @@ process.exit(accepted ? 0 : 1);
   const env = {PATH: bin + ":" + process.env.PATH, HOME: fixture, GIT_CONFIG_NOSYSTEM: "1",
     GITHUB_ACTION: "release_fixture", GH_TOKEN: "fixture-installation-token"};
   const context = {cwd: fixture, env, branch: {name: "main"},
-    options: {repositoryUrl: "https://github.com/atrinik/renderer"}};
+    options: {repositoryUrl: "https://github.com/seraphinastudios/tilewright-renderer"}};
   const broken = await getGitAuthUrl(context);
   // GH_TOKEN alone formats an installation token as a username, which GitHub
   // rejects even though the same token works with the REST API.

@@ -1,9 +1,10 @@
-# Atrinik renderer repository guide
+# Tilewright renderer repository guide
 
 ## Ownership and architecture
 
-- This repository owns the fresh MIT shared Rust GPU renderer for the connected
-  client, native editor, deterministic offscreen tools, and world imagery.
+- This repository owns the MIT shared Rust GPU renderer for isometric and
+  top-down tile worlds: game clients, the Tilewright editor, deterministic
+  offscreen tools, and world imagery.
 - Renderer APIs consume bounded renderer-owned scenes, resources, targets,
   cameras, clocks, and materials; they remain source-neutral. `scene` and
   `render-api` must not depend on SDL3, wgpu, protocol, consumers, or content
@@ -44,18 +45,11 @@
 
 ## Licensing, performance, and validation
 
-- New Rust/WGSL/tests/docs/fixtures are MIT. Do not link, bundle, or depend on
-  GPL/AGPL source as MIT. Historical Classic destination reuse follows the
-  [local provenance record](PROVENANCE.md) and
-  [canonical grant registry](https://github.com/atrinik/atrinik/blob/main/docs/PROVENANCE.md).
-  At an exact source revision, prove every copyrightable portion is separable,
-  within a recorded grant's past-contribution scope, and original work solely
-  authored by its grantor. Present-day blame, majority authorship, a later
-  edit, or an agent-assisted commit cannot fill a coverage gap. Admitted
-  material may be inspected as implementation reference, copied, adapted,
-  ported, translated, and MIT-relicensed in this destination. Record the exact
-  source, destination, transformation, and registry revision; uncovered
-  material fails closed. The Classic repository remains GPL-distributed.
+- New Rust/WGSL/tests/docs/fixtures are MIT. Do not link, bundle, depend on,
+  copy, or adapt GPL/AGPL source. Independent implementation is the default;
+  any reuse of outside material needs an MIT-compatible license and an exact
+  record (source, revision, destination, transformation, notice) in
+  [PROVENANCE.md](PROVENANCE.md) and `THIRD_PARTY_NOTICES.md`.
 - Authored inputs retain exact licenses. Fixture/package manifests record
   source, author, license, digest, transformation, and notice. Shaders are
   executable renderer code authored/reviewed/versioned here, never delivered
@@ -65,8 +59,7 @@
   locked graph remains the exact build input. Every performance change defines
   representative before/after budgets for CPU/GPU time, uploads, allocations,
   caches, queues, and recovery. Bound metrics and keep disabled instrumentation cheap.
-- `atrinik/atrinik#168` is the program roadmap; local issues/milestones own
-  delivery. Do not copy the M1-M6 schedule here.
+- Local issues and milestones own delivery.
 - Run the real aggregate contract:
 
   ```sh
@@ -88,10 +81,9 @@
   Fix actionable introduced risks, or record an explicit maintainer acceptance
   of existing risk, before merge. This adds no required human approval gate;
   preserve all other validation and security checks.
-- Wrapper replacement adapters are not available yet. Use repository
-  validation and released consumer contracts, not unaudited source copies or
-  Classic runtime fallbacks. Commits/PR titles use Conventional Commits;
-  semantic-release owns coherent releases/tags.
+- Use repository validation and released consumer contracts, not unaudited
+  source copies. Commits/PR titles use Conventional Commits; semantic-release
+  owns coherent releases/tags.
 
 ## Registry delivery
 

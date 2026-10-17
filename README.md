@@ -1,39 +1,28 @@
-# Atrinik renderer
+# Tilewright renderer
 
-This independently releasable MIT Rust workspace is the shared GPU renderer
-for Atrinik clients, editors, previewers, and deterministic offscreen tools. It
-defines a renderer-neutral scene and API, explicit resource-provider boundary,
-software reference implementation, private wgpu backend, thin SDL3 presentation
-bridge, UI seam, conformance corpus, and `atrinik-render` proof CLI.
+Tilewright renderer is an MIT-licensed Rust GPU renderer for isometric and
+top-down tile worlds. Game clients, editors, previewers, and deterministic
+offscreen tools share it. The workspace defines a renderer-neutral scene and
+API, an explicit resource-provider boundary, a software reference
+implementation, a private wgpu backend, a thin SDL3 presentation bridge, a UI
+seam, a conformance corpus, and the `tilewright-render` proof CLI.
+
+Tilewright is maintained by Seraphina Studios alongside
+[tilewright-world](https://github.com/seraphinastudios/tilewright-world), the
+world format and toolkit, and
+[tilewright-editor](https://github.com/seraphinastudios/tilewright-editor).
 
 ## Development model
 
-This renderer is part of Atrinik's agentic next-generation reimplementation and
-improvement of the human-developed Classic presentation. The current foundation
-is independently implemented MIT-licensed Rust/wgpu code rather than a
-mechanical C translation or source port, and is developed primarily through
-Codex-driven workflows under maintainer direction, review, provenance controls,
-tests, and repository validation.
-“Agentic” describes the project's primary current software-development
-workflow; it does not mean that every line or commit is agent-written. Direct
-human-written code contributions are welcome under the same controls.
+Development is primarily agent-driven, under maintainer direction, review,
+provenance controls, tests, and repository validation. Direct human-written
+code contributions are welcome under the same controls. See
+[provenance](PROVENANCE.md) for the reuse record.
 
-Future exact historical reuse is evidence-gated by the
-[local provenance record](PROVENANCE.md) and
-[canonical grant registry](https://github.com/atrinik/atrinik/blob/main/docs/PROVENANCE.md):
-admitted destination material may be consulted and MIT-relicensed, while every
-uncovered portion remains excluded and the Classic repository remains
-GPL-distributed.
-
-The source art and world imagery displayed by the renderer are human-authored
-external inputs, not part of the renderer's MIT-licensed code. Atrinik's pixel
-art, graphics, animations, maps, and visual design retain exact creator,
-upstream, license, and notice records. Deterministic rendering, projections,
-transforms, composed frames, and test output are not generative art, and
-renderer tooling must not silently synthesize creative game assets. See the
-[canonical project authorship statement](https://github.com/atrinik/atrinik/issues/331)
-and the [replacement roadmap](https://github.com/atrinik/atrinik/issues/168)
-for the project-wide identity and implementation direction.
+Art, maps, and other game content drawn by the renderer are supplied by each
+game with its own credits and licenses; they are not part of the renderer's
+MIT-licensed code. Projections, transforms, composed frames, and test output
+are deterministic program output.
 
 No public scene or renderer API exposes SDL3 or wgpu handles. Consumer-specific
 state, filesystem/network discovery, game rules, protocol messages, event loops,
@@ -48,11 +37,11 @@ is `Renderer validation`.
 ```sh
 cargo build --locked --workspace
 cargo test --locked --workspace --all-targets
-cargo run --locked --package atrinik-render -- --version
-cargo run --locked --package atrinik-render -- probe
-cargo run --locked --package atrinik-render -- corpus
+cargo run --locked --package tilewright-render -- --version
+cargo run --locked --package tilewright-render -- probe
+cargo run --locked --package tilewright-render -- corpus
 SDL_VIDEO_DRIVER=x11 xvfb-run -a -s '-screen 0 1024x768x24' \
-  cargo run --locked --package atrinik-render --features sdl3 -- window
+  cargo run --locked --package tilewright-render --features sdl3 -- window
 tools/validate.sh
 ```
 
@@ -69,9 +58,9 @@ Output is a small header followed by 64×64 RGBA8 bytes. The path must not
 exist; persistence is same-directory, durable, and no-clobber.
 
 ```sh
-cargo run --locked --package atrinik-render -- offscreen /tmp/atrinik-proof.rgba
-test "$(wc -c </tmp/atrinik-proof.rgba)" -eq 16404
-rm /tmp/atrinik-proof.rgba
+cargo run --locked --package tilewright-render -- offscreen /tmp/tilewright-proof.rgba
+test "$(wc -c </tmp/tilewright-proof.rgba)" -eq 16407
+rm /tmp/tilewright-proof.rgba
 ```
 
 See [architecture and limits](docs/ARCHITECTURE.md), [GPU lifecycle](docs/GPU-LIFECYCLE.md),

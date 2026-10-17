@@ -34,7 +34,7 @@ concurrency:
 
 jobs:
   automatic-verify:
-    if: github.repository == 'atrinik/renderer' && github.repository_id == '1327106998' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'automatic'
+    if: github.repository == 'seraphinastudios/tilewright-renderer' && github.repository_id == '1327106998' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'automatic'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -58,7 +58,7 @@ jobs:
 
   automatic-publish:
     needs: automatic-verify
-    if: github.repository == 'atrinik/renderer' && github.repository_id == '1327106998' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'automatic'
+    if: github.repository == 'seraphinastudios/tilewright-renderer' && github.repository_id == '1327106998' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'automatic'
     environment: crates-io-release
     runs-on: ubuntu-24.04
     timeout-minutes: 15
