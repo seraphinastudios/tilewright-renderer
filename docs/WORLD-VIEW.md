@@ -35,7 +35,9 @@ The output path must not exist; the write is atomic and never overwrites.
   never turns a valid view into an invalid one. Object IDs are nonzero and
   unique. Ground objects take no `offset`, `z`, `scale`, `rotation` or
   `glow`, and isometric ground keeps the 1 × 1 footprint. A glow radius is at
-  most the width and height of every frame of its object.
+  most the width and height of every frame of its object. Every quad an object
+  produces, after zoom, scale, rotation, glow padding and terrain bending,
+  spans at most 8,191 px on each axis.
 
 ## Fields
 

@@ -91,7 +91,9 @@ knows nothing about any game or content format.
   animation frame is validated before culling or frame selection, so a view's
   validity never depends on the camera or clock: semantic IDs are nonzero and
   unique, frames carry full resource identities within the scene's dimension
-  limit, and a glow radius stays within every frame. Ground objects reject the
+  limit, every quad an object produces (after scale, rotation, glow padding
+  and terrain bending) spans at most that limit less one pixel, and a glow
+  radius stays within every frame. Ground objects reject the
   offset, `z`, scale, rotation and glow they cannot apply, and isometric
   ground covers one tile.
 

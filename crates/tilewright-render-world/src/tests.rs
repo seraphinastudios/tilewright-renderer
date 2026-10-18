@@ -675,3 +675,71 @@ fn height_lookups_never_overflow() {
     assert_eq!(field.get(1, 3_000_000_000), None);
     assert_eq!(field.get(i64::MIN, 0), None);
 }
+
+#[test]
+fn quad_spans_are_validated_before_culling() {
+    let limits = SceneLimits {
+        maximum_dimension: 256,
+        ..SceneLimits::default()
+    };
+    let art = |tile, side| {
+        WorldObject::new(
+            SemanticId(1),
+            tile,
+            3,
+            Anchor::Standing,
+            texture(2, side, side),
+        )
+    };
+    for tile in [[0, 0], [40, 40]] {
+        let mut view = iso_view(vec![art(tile, 31)], HeightField::empty());
+        view.camera.zoom = 8.0;
+        // 31 px art at 8× spans 248 px, within 256 less the 1 px margin.
+        assert!(compile(&view, limits).is_ok(), "{tile:?}");
+        // 32 px spans 256 px; in view or culled, the view is invalid.
+        view.objects = vec![art(tile, 32)];
+        assert_eq!(compile(&view, limits), Err(Error::InvalidValue), "{tile:?}");
+        // Rotation widens the bounding box: 248 px at 45° spans 351 px.
+        view.objects = vec![art(tile, 31)];
+        view.objects[0].rotation_degrees = 45.0;
+        assert_eq!(compile(&view, limits), Err(Error::InvalidValue), "{tile:?}");
+        // Glow padding counts too: 28 px art with a 2 px halo spans 256 px.
+        view.objects = vec![art(tile, 28)];
+        view.objects[0].glow = Some(GlowEffect {
+            color: [1.0; 4],
+            radius_px: 2.0,
+            pulse_millis: 0,
+        });
+        assert_eq!(compile(&view, limits), Err(Error::InvalidValue), "{tile:?}");
+        // So does a frame the clock does not select yet.
+        view.objects = vec![art(tile, 31)];
+        view.objects[0].animation = Animation {
+            frames: vec![texture(2, 31, 31), texture(3, 32, 32)],
+            frame_millis: 100,
+            phase_millis: 0,
+        };
+        assert_eq!(compile(&view, limits), Err(Error::InvalidValue), "{tile:?}");
+    }
+}
+
+#[test]
+fn bent_ground_spans_do_not_depend_on_position() {
+    let limits = SceneLimits {
+        maximum_dimension: 256,
+        ..SceneLimits::default()
+    };
+    // A 1,200-unit step stretches each quarter-tile cell past 255 px.
+    for tile in [[0, 0], [40, 40]] {
+        let heights = HeightField {
+            origin: tile,
+            width: 2,
+            height: 1,
+            heights: vec![Some(0), Some(1_200)],
+        };
+        let mut view = iso_view(vec![ground(1, tile)], heights);
+        view.stretch.rule = CornerRule::Max;
+        assert_eq!(compile(&view, limits), Err(Error::InvalidValue), "{tile:?}");
+        view.heights.heights[1] = Some(100);
+        assert!(compile(&view, limits).is_ok(), "{tile:?}");
+    }
+}

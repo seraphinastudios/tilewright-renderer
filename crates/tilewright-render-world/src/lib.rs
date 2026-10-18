@@ -283,7 +283,9 @@ impl std::error::Error for Error {}
 ///
 /// Every object is validated, including objects the camera culls and
 /// animation frames the clock does not select, so whether a view compiles
-/// never depends on what is in view.
+/// never depends on what is in view. Every quad an object produces must span
+/// at most [`SceneLimits::maximum_dimension`] less one pixel on each axis,
+/// measured from its own geometry before culling.
 ///
 /// # Errors
 /// Returns [`Error::InvalidValue`] for an invalid view and [`Error::Scene`]
@@ -302,7 +304,7 @@ pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Err
         })
         .ok_or(Error::Scene(tilewright_scene::Error::LimitExceeded))?;
     validate(view, limits)?;
-    let projector = Projector::new(view);
+    let projector = Projector::new(view, limits);
     let mut entries: Vec<Entry<'_>> = Vec::with_capacity(draws);
     for (index, object) in view.objects.iter().enumerate() {
         let sequence = u32::try_from(index).map_err(|_| Error::InvalidValue)?;
@@ -330,15 +332,26 @@ pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Err
     let mut quads = Vec::new();
     for (order, entry) in entries.iter().enumerate() {
         let painter_order = u32::try_from(order).map_err(|_| Error::InvalidValue)?;
-        let part_base: u16 = if entry.repeat { 0x8000 } else { 0 };
+        let animation = &entry.object.animation;
+        let shown = animation.frame(view.clock_millis);
         projector.emit(
             view,
             entry.object,
+            shown,
             painter_order,
-            part_base,
             entry.repeat,
-            &mut quads,
+            Some(&mut quads),
         )?;
+        if !entry.repeat {
+            // Frames of other sizes give other quads at another clock, so
+            // check those quads too, without drawing them.
+            let mut sizes = HashSet::from([(shown.width, shown.height)]);
+            for frame in &animation.frames {
+                if sizes.insert((frame.width, frame.height)) {
+                    projector.emit(view, entry.object, *frame, painter_order, false, None)?;
+                }
+            }
+        }
         if quads.len() > limits.maximum_quads {
             return Err(Error::Scene(tilewright_scene::Error::LimitExceeded));
         }
@@ -497,10 +510,44 @@ struct Projector {
     stretch: Stretch,
     clock_millis: u64,
     sampling: Sampling,
+    /// Largest span a quad may have on either axis, checked before culling.
+    maximum_span: f64,
+}
+
+/// Pixels a quad's span must stay below the scene's dimension limit, so the
+/// `f32` rounding of its corners in view cannot push it over that limit.
+const SPAN_MARGIN_PX: f64 = 1.0;
+
+/// The bounding-box span of a `width` × `height` rectangle rotated by
+/// `rotation` radians.
+fn rotated_span(width: f64, height: f64, rotation: f64) -> [f64; 2] {
+    if rotation == 0.0 {
+        return [width, height];
+    }
+    let (sin, cos) = rotation.sin_cos();
+    [
+        (width * cos).abs() + (height * sin).abs(),
+        (width * sin).abs() + (height * cos).abs(),
+    ]
+}
+
+fn span_of(points: &[[f64; 2]; 4]) -> [f64; 2] {
+    let (min_x, max_x, min_y, max_y) = points.iter().fold(
+        (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
+        |(min_x, max_x, min_y, max_y), point| {
+            (
+                min_x.min(point[0]),
+                max_x.max(point[0]),
+                min_y.min(point[1]),
+                max_y.max(point[1]),
+            )
+        },
+    );
+    [max_x - min_x, max_y - min_y]
 }
 
 impl Projector {
-    fn new(view: &WorldView) -> Self {
+    fn new(view: &WorldView, limits: SceneLimits) -> Self {
         let projection = view.camera.projection;
         let mut projector = Self {
             projection,
@@ -514,6 +561,7 @@ impl Projector {
             stretch: view.stretch,
             clock_millis: view.clock_millis,
             sampling: view.camera.sampling,
+            maximum_span: f64::from(limits.maximum_dimension) - SPAN_MARGIN_PX,
         };
         projector.camera_world = projector.world(view.camera.center[0], view.camera.center[1], 0.0);
         projector
@@ -612,16 +660,18 @@ impl Projector {
     }
 
     #[allow(clippy::too_many_lines)]
+    /// Emits the object's quads for one animation frame into `quads`, or
+    /// only checks them when `quads` is `None`.
     fn emit(
         &self,
         view: &WorldView,
         object: &WorldObject,
+        texture: TextureRef,
         painter_order: u32,
-        part_base: u16,
         repeat: bool,
-        quads: &mut Vec<Quad>,
+        mut quads: Option<&mut Vec<Quad>>,
     ) -> Result<(), Error> {
-        let texture = object.animation.frame(self.clock_millis);
+        let part_base: u16 = if repeat { 0x8000 } else { 0 };
         let tile_height = view
             .heights
             .get(object.tile[0], object.tile[1])
@@ -645,9 +695,21 @@ impl Projector {
         };
         let art_w = f64::from(texture.width);
         let art_h = f64::from(texture.height);
-        // Corners that overflow to infinity are an invalid view, not a quad
-        // to cull, so they are rejected before visibility is checked.
-        let mut push = |quad: Quad| {
+        // Every quad is checked before culling, so whether a view compiles
+        // never depends on what is in view. `span` is the quad's size from
+        // its local geometry, independent of where it lies; spans over the
+        // scene's dimension limit and corners that overflow to infinity are
+        // an invalid view, not quads to cull. A quad whose corners collapse
+        // onto a line covers no pixels and is dropped.
+        let mut push = |quad: Quad, corners: [[f64; 2]; 4], span: [f64; 2]| {
+            if !span.iter().all(|extent| *extent <= self.maximum_span) {
+                return Err(Error::InvalidValue);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let quad = Quad {
+                positions: corners.map(|point| point.map(|value| value as f32)),
+                ..quad
+            };
             if !quad
                 .positions
                 .iter()
@@ -656,7 +718,10 @@ impl Projector {
             {
                 return Err(Error::InvalidValue);
             }
-            if self.visible(&quad) {
+            if let Some(quads) = quads.as_deref_mut()
+                && self.visible(&quad)
+                && !collapsed(&quad)
+            {
                 quads.push(quad);
             }
             Ok(())
@@ -685,6 +750,19 @@ impl Projector {
                         let (u, v) = lattice[index];
                         self.screen(self.world(u, v, heights[index]))
                     });
+                    // The same corners relative to the first, from the
+                    // tile's own geometry, so spans do not depend on where
+                    // the tile lies.
+                    let ppu = f64::from(self.stretch.pixels_per_unit);
+                    let local: [[f64; 2]; 4] = std::array::from_fn(|index| {
+                        let (u, v) = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)][index];
+                        [
+                            (u - v) * f64::from(tile_width) / 2.0 * self.zoom,
+                            ((u + v) * f64::from(diamond_height) / 2.0
+                                - (heights[index] - heights[0]) * ppu)
+                                * self.zoom,
+                        ]
+                    });
                     let center_x = art_w / 2.0;
                     let center_y = art_h - (f64::from(diamond_height) - 1.0) / 2.0;
                     // Bent tiles map their art onto a diamond one art pixel larger than the
@@ -692,7 +770,7 @@ impl Projector {
                     // hairline gaps where the art's stepped edges no longer interlock.
                     let half_w = f64::from(tile_width) / 2.0 - SEAM_BLEED_PX;
                     let half_h = f64::from(diamond_height) / 2.0 - SEAM_BLEED_PX / 2.0;
-                    let map = |image: [f64; 2]| {
+                    let map = |corners: [[f64; 2]; 4], image: [f64; 2]| {
                         let across = (image[0] - center_x) / half_w;
                         let down = (image[1] - center_y) / half_h + 1.0;
                         let east = f64::midpoint(across, down);
@@ -720,10 +798,8 @@ impl Projector {
                         ));
                         let left = snap(center[0] - center_x * self.zoom);
                         let top = snap(center[1] - center_y * self.zoom);
-                        push(Quad {
-                            positions: rect(left, top, art_w * self.zoom, art_h * self.zoom),
-                            ..base
-                        })?;
+                        let (width, height) = (art_w * self.zoom, art_h * self.zoom);
+                        push(base, rect(left, top, width, height), [width, height])?;
                     } else {
                         let steps = 4_u16;
                         for row in 0..steps {
@@ -741,17 +817,17 @@ impl Projector {
                                     image(column, row + 1),
                                 ];
                                 #[allow(clippy::cast_possible_truncation)]
-                                push(Quad {
-                                    part: part_base + row * steps + column,
-                                    positions: cell.map(|point| {
-                                        let screen = map(point);
-                                        [screen[0] as f32, screen[1] as f32]
-                                    }),
-                                    uvs: cell.map(|point| {
-                                        [(point[0] / art_w) as f32, (point[1] / art_h) as f32]
-                                    }),
-                                    ..base
-                                })?;
+                                push(
+                                    Quad {
+                                        part: part_base + row * steps + column,
+                                        uvs: cell.map(|point| {
+                                            [(point[0] / art_w) as f32, (point[1] / art_h) as f32]
+                                        }),
+                                        ..base
+                                    },
+                                    cell.map(|point| map(corners, point)),
+                                    span_of(&cell.map(|point| map(local, point))),
+                                )?;
                             }
                         }
                     }
@@ -764,15 +840,13 @@ impl Projector {
                         f64::from(tile_height),
                     ));
                     let size = f64::from(tile_size) * self.zoom;
-                    push(Quad {
-                        positions: rect(
-                            snap(origin[0]),
-                            snap(origin[1]),
-                            size * f64::from(object.footprint[0]),
-                            size * f64::from(object.footprint[1]),
-                        ),
-                        ..base
-                    })?;
+                    let width = size * f64::from(object.footprint[0]);
+                    let height = size * f64::from(object.footprint[1]);
+                    push(
+                        base,
+                        rect(snap(origin[0]), snap(origin[1]), width, height),
+                        [width, height],
+                    )?;
                 }
             }
             return Ok(());
@@ -805,19 +879,21 @@ impl Projector {
         let left = snap(anchor[0] - width / 2.0 + f64::from(object.offset_px[0]) * self.zoom);
         let top = snap(anchor[1] + f64::from(object.offset_px[1]) * self.zoom - height);
         let rotation = f64::from(object.rotation_degrees).to_radians();
-        let rotate = |corners: [[f32; 2]; 4]| -> [[f32; 2]; 4] {
+        let rotate = |corners: [[f64; 2]; 4]| -> [[f64; 2]; 4] {
             if rotation == 0.0 {
                 return corners;
             }
             let center = [left + width / 2.0, top + height / 2.0];
             let (sin, cos) = rotation.sin_cos();
+            // Rotate the corners as `f32` would hold them, about the exact
+            // centre.
             #[allow(clippy::cast_possible_truncation)]
             corners.map(|point| {
-                let dx = f64::from(point[0]) - center[0];
-                let dy = f64::from(point[1]) - center[1];
+                let dx = f64::from(point[0] as f32) - center[0];
+                let dy = f64::from(point[1] as f32) - center[1];
                 [
-                    (center[0] + dx * cos - dy * sin) as f32,
-                    (center[1] + dx * sin + dy * cos) as f32,
+                    center[0] + dx * cos - dy * sin,
+                    center[1] + dx * sin + dy * cos,
                 ]
             })
         };
@@ -835,15 +911,10 @@ impl Projector {
             let pad_y = radius * f64::from(object.scale[1]) * self.zoom;
             let extend_u = radius / art_w;
             let extend_v = radius / art_h;
+            let (glow_width, glow_height) = (width + 2.0 * pad_x, height + 2.0 * pad_y);
             #[allow(clippy::cast_possible_truncation)]
             let glow_quad = Quad {
                 part: part_base + 1,
-                positions: rotate(rect(
-                    left - pad_x,
-                    top - pad_y,
-                    width + 2.0 * pad_x,
-                    height + 2.0 * pad_y,
-                )),
                 uvs: [
                     [-extend_u as f32, -extend_v as f32],
                     [(1.0 + extend_u) as f32, -extend_v as f32],
@@ -866,13 +937,20 @@ impl Projector {
                 pickable: false,
                 ..base
             };
-            push(glow_quad)?;
+            push(
+                glow_quad,
+                rotate(rect(left - pad_x, top - pad_y, glow_width, glow_height)),
+                rotated_span(glow_width, glow_height, rotation),
+            )?;
         }
-        push(Quad {
-            part: part_base + 2,
-            positions: rotate(rect(left, top, width, height)),
-            ..base
-        })
+        push(
+            Quad {
+                part: part_base + 2,
+                ..base
+            },
+            rotate(rect(left, top, width, height)),
+            rotated_span(width, height, rotation),
+        )
     }
 
     fn visible(&self, quad: &Quad) -> bool {
@@ -900,16 +978,26 @@ fn snap(value: f64) -> f64 {
     (value + 0.5).floor()
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn rect(left: f64, top: f64, width: f64, height: f64) -> [[f32; 2]; 4] {
+fn rect(left: f64, top: f64, width: f64, height: f64) -> [[f64; 2]; 4] {
     let right = left + width;
     let bottom = top + height;
-    [
-        [left as f32, top as f32],
-        [right as f32, top as f32],
-        [right as f32, bottom as f32],
-        [left as f32, bottom as f32],
-    ]
+    [[left, top], [right, top], [right, bottom], [left, bottom]]
+}
+
+/// Whether a quad's corners lie on one line, so it covers no pixels.
+fn collapsed(quad: &Quad) -> bool {
+    let (min_x, max_x, min_y, max_y) = quad.positions.iter().fold(
+        (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+        |(min_x, max_x, min_y, max_y), point| {
+            (
+                min_x.min(point[0]),
+                max_x.max(point[0]),
+                min_y.min(point[1]),
+                max_y.max(point[1]),
+            )
+        },
+    );
+    max_x - min_x <= 0.0 || max_y - min_y <= 0.0
 }
 
 #[cfg(test)]
