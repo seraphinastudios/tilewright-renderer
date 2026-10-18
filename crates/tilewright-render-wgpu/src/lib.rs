@@ -172,8 +172,10 @@ impl WgpuRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let (depth_view, depth_allocated) = self.ensure_surface_depth();
-        let prepared = self.prepare_sprites(request.scene, request.resources.as_ref())?;
+        // The device must be able to hold the vertex stream before any
+        // resource is loaded or the cache changes.
         self.check_vertex_stream(request.scene)?;
+        let prepared = self.prepare_sprites(request.scene, request.resources.as_ref())?;
         let vertices = vertices(request.scene);
         let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
         let pipeline = self.ensure_surface_pipeline(configuration.format);
@@ -380,8 +382,10 @@ impl WgpuRenderer {
         scene: &SceneBundle,
         resources: &dyn ResourceProvider,
     ) -> Result<(Vec<u8>, SemanticPlanes, FrameWork), Error> {
-        let prepared = self.prepare_sprites(scene, resources)?;
+        // The device must be able to hold the vertex stream before any
+        // resource is loaded or the cache changes.
         self.check_vertex_stream(scene)?;
+        let prepared = self.prepare_sprites(scene, resources)?;
         let vertices = vertices(scene);
         let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
         let allocated = self.ensure_offscreen_target()?;
@@ -1199,6 +1203,66 @@ mod tests {
         ReferenceRenderer, iso_world_scene, offscreen_target, synthetic_provider, synthetic_scene,
         top_down_world_scene, world_provider,
     };
+
+    #[test]
+    fn oversized_vertex_streams_fail_before_loading_resources() {
+        use tilewright_render_resources::{
+            Error as ResourceError, ResourceBlob, ResourceProvider, ResourceRequest,
+        };
+        use tilewright_scene::{
+            Digest256, Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId,
+            Viewport,
+        };
+        struct Refusing;
+        impl ResourceProvider for Refusing {
+            fn load(&self, _request: ResourceRequest) -> Result<ResourceBlob, ResourceError> {
+                Err(ResourceError::NotFound)
+            }
+        }
+        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(4, 4)) else {
+            eprintln!("skipping GPU vertex limit test: no supported adapter");
+            return;
+        };
+        // One quad more than a 256 MiB buffer of 432-byte quads holds.
+        let count = (256_u32 << 20) / 432 + 1;
+        let quads = (0..count).map(|index| Quad {
+            semantic_id: SemanticId(index + 1),
+            part: 0,
+            resource_id: ResourceId(1),
+            resource_revision: 1,
+            resource_digest: Digest256([1; 32]),
+            positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            depth: 0,
+            painter_order: index,
+            color: [1.0; 4],
+            grayscale: 0.0,
+            glow: None,
+            pickable: true,
+            sampling: Sampling::Nearest,
+            layer: Layer::World,
+        });
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale_milli: 1_000,
+        };
+        let limits = SceneLimits {
+            maximum_quads: usize::MAX,
+            maximum_raster_samples: u64::MAX,
+            ..SceneLimits::default()
+        };
+        let scene = SceneBundle::from_quads(1, 0, viewport, [0.0; 4], quads, limits).unwrap();
+        // The refusing provider would fail any load; the limit comes first.
+        let result = renderer.render(RenderRequest {
+            scene: &scene,
+            resources: std::sync::Arc::new(Refusing),
+        });
+        assert_eq!(
+            result.err(),
+            Some(tilewright_render_api::Error::LimitExceeded)
+        );
+    }
 
     #[test]
     fn vertex_buffers_stay_within_the_device_buffer_limit() {
