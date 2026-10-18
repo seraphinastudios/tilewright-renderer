@@ -47,8 +47,9 @@ pub enum Layer {
     Interface,
 }
 
-/// An axis-aligned textured rectangle. Converted into a [`Quad`] whose
-/// corners run top-left, top-right, bottom-right, bottom-left.
+/// An axis-aligned textured rectangle with a positive width and height.
+/// Converted into a [`Quad`] whose corners run top-left, top-right,
+/// bottom-right, bottom-left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sprite {
     pub semantic_id: SemanticId,
@@ -218,7 +219,9 @@ impl SceneBundle {
     /// Builds a scene from axis-aligned sprites.
     ///
     /// # Errors
-    /// Returns a validation error as [`SceneBundle::from_quads`] does.
+    /// Returns [`Error::InvalidValue`] for a sprite whose width or height is
+    /// not positive, and otherwise a validation error as
+    /// [`SceneBundle::from_quads`] does.
     pub fn new(
         revision: u64,
         clock_millis: u64,
@@ -227,14 +230,21 @@ impl SceneBundle {
         sprites: impl IntoIterator<Item = Sprite>,
         limits: SceneLimits,
     ) -> Result<Self, Error> {
-        Self::from_quads(
-            revision,
-            clock_millis,
-            viewport,
-            clear_color,
-            sprites.into_iter().map(Quad::from),
-            limits,
-        )
+        // Sprites are rectangles with positive sides; a negative width or
+        // height would otherwise become a valid mirrored quad.
+        let mut invalid = false;
+        let quads = sprites.into_iter().map_while(|sprite| {
+            let sized = [sprite.width, sprite.height]
+                .iter()
+                .all(|side| side.is_finite() && *side > 0.0);
+            invalid |= !sized;
+            sized.then(|| Quad::from(sprite))
+        });
+        let scene = Self::from_quads(revision, clock_millis, viewport, clear_color, quads, limits);
+        if invalid {
+            return Err(Error::InvalidValue);
+        }
+        scene
     }
 
     /// Builds a scene from quads, validating every value and ordering them
@@ -523,6 +533,29 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn sprites_need_positive_sides() {
+        for (width, height) in [(-1.0, 1.0), (1.0, -1.0), (0.0, 1.0), (f32::NAN, 1.0)] {
+            let mirrored = Sprite {
+                width,
+                height,
+                ..sprite(0, 0)
+            };
+            assert_eq!(
+                SceneBundle::new(
+                    1,
+                    0,
+                    viewport(),
+                    [0.0; 4],
+                    [sprite(1, 0), mirrored],
+                    SceneLimits::default()
+                ),
+                Err(super::Error::InvalidValue),
+                "{width} × {height}"
+            );
+        }
     }
 
     #[test]
