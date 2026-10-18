@@ -245,13 +245,15 @@ pub fn for_each_quad_pixel(
         let max_x = points.iter().map(|point| point.0).max().unwrap_or(0);
         let min_y = points.iter().map(|point| point.1).min().unwrap_or(0);
         let max_y = points.iter().map(|point| point.1).max().unwrap_or(0);
+        // Only pixels whose centres fall inside the triangle's box can be
+        // covered; a triangle wholly outside the target scans nothing.
+        let (Some((first_x, last_x)), Some((first_y, last_y))) = (
+            centre_range(min_x, max_x, width),
+            centre_range(min_y, max_y, height),
+        ) else {
+            continue;
+        };
         let half = SUBPIXEL_STEPS / 2;
-        let first_x = (min_x - half).div_euclid(SUBPIXEL_STEPS).max(0);
-        let last_x = (max_x - half).div_euclid(SUBPIXEL_STEPS) + 1;
-        let first_y = (min_y - half).div_euclid(SUBPIXEL_STEPS).max(0);
-        let last_y = (max_y - half).div_euclid(SUBPIXEL_STEPS) + 1;
-        let last_x = last_x.min(i64::from(width) - 1);
-        let last_y = last_y.min(i64::from(height) - 1);
         let area_f = area as f64;
         for y in first_y..=last_y {
             let center_y = y * SUBPIXEL_STEPS + half;
@@ -277,6 +279,20 @@ pub fn for_each_quad_pixel(
             }
         }
     }
+}
+
+/// The pixels, within a target `size` pixels long, whose centres lie in the
+/// fixed-point interval `[low, high]`.
+fn centre_range(low: i64, high: i64, size: u32) -> Option<(i64, i64)> {
+    let half = SUBPIXEL_STEPS / 2;
+    // The first centre at or after `low` and the last at or before `high`.
+    let first = (low - half + SUBPIXEL_STEPS - 1)
+        .div_euclid(SUBPIXEL_STEPS)
+        .max(0);
+    let last = (high - half)
+        .div_euclid(SUBPIXEL_STEPS)
+        .min(i64::from(size) - 1);
+    (first <= last).then_some((first, last))
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -552,6 +568,23 @@ mod tests {
                 "##..###.", "###.###.", "###.###.", "###..###", "###.....", "..#.....",
             ]
         );
+    }
+
+    #[test]
+    fn triangles_scan_only_pixel_centres_inside_their_box() {
+        let step = super::SUBPIXEL_STEPS;
+        // A box at x ∈ [-1, 0] holds no pixel centre of the target.
+        assert_eq!(super::centre_range(-step, 0, 1), None);
+        assert_eq!(super::centre_range(-step, 0, 8_192), None);
+        // Centres lying exactly on either end are included.
+        assert_eq!(
+            super::centre_range(step / 2, step * 3 + step / 2, 8),
+            Some((0, 3))
+        );
+        assert_eq!(super::centre_range(step / 2 + 1, step * 3, 8), Some((1, 2)));
+        // Ranges clip to the target.
+        assert_eq!(super::centre_range(-step * 10, step * 100, 4), Some((0, 3)));
+        assert_eq!(super::centre_range(step * 9, step * 10, 4), None);
     }
 
     #[test]

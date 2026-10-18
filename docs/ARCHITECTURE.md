@@ -43,9 +43,10 @@ bottom-left) with matching texture coordinates. It carries a color tint with
 alpha, a greyscale amount, an optional glow, sampling, a pickable flag, and the
 legacy effect fields. Axis-aligned quads use half-open rectangle coverage.
 Every other quad is split into the triangles (0, 1, 2) and (0, 2, 3), snapped
-to 1/256 px, and filled with an exact integer edge test whose top-left tie rule
-gives each pixel on a shared edge to exactly one triangle, as GPU rasterisers
-do. The CPU reference and the GPU picking planes share this rasteriser, so
+to 1/256 px, and filled with an exact integer edge test. Only pixel centres
+inside each triangle's clipped bounding box are tested, and the top-left tie
+rule gives each pixel on a shared edge to exactly one triangle, as GPU
+rasterisers do. The CPU reference and the GPU picking planes share this rasteriser, so
 semantic, depth, and coverage planes match exactly on every backend and cover
 the pixels the GPU colours. The GPU backend submits positions already rounded
 to the same 1/256 px grid, so drivers with different snapping and rounding
