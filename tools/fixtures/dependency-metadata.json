@@ -5,6 +5,7 @@
       "dependencies":[
         {"name":"tilewright-render-wgpu","source":null,"kind":null},
         {"name":"png","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null},
+        {"name":"rustix","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null},
         {"name":"serde_json","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null},
         {"name":"tempfile","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null}
       ]
@@ -36,6 +37,7 @@
     {"id":"registry+https://github.com/rust-lang/crates.io-index#sdl3@0.18.8","name":"sdl3","version":"0.18.8","license":"MIT","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#sha2@0.11.1","name":"sha2","version":"0.11.1","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#png@0.18.1","name":"png","version":"0.18.1","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.4","name":"rustix","version":"1.1.4","license":"Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#serde_json@1.0.154","name":"serde_json","version":"1.0.154","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#tempfile@3.28.0","name":"tempfile","version":"3.28.0","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#wgpu@30.2.0","name":"wgpu","version":"30.2.0","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
@@ -54,6 +56,7 @@
         "deps": [
           {"pkg":"path+file:///renderer#tilewright-render-wgpu@0.1.0"},
           {"pkg":"registry+https://github.com/rust-lang/crates.io-index#png@0.18.1"},
+          {"pkg":"registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.4"},
           {"pkg":"registry+https://github.com/rust-lang/crates.io-index#serde_json@1.0.154"},
           {"pkg":"registry+https://github.com/rust-lang/crates.io-index#tempfile@3.28.0"}
         ]

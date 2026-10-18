@@ -339,10 +339,112 @@ mod tests {
             );
             let error = view_file::load(&view).err().unwrap_or_default();
             assert!(
-                error.contains("must be relative") || error.contains("leaves the view"),
+                error.contains("must be relative")
+                    || error.contains("leaves the view")
+                    || error.contains("symbolic link"),
                 "{path}: {error}"
             );
         }
+    }
+
+    /// On Unix, texture paths are opened beneath the view's directory without
+    /// following links and without waiting on FIFOs, so swapping a path
+    /// component or the file while loading cannot escape or stall.
+    #[cfg(unix)]
+    #[test]
+    fn texture_opens_follow_no_links_and_never_block() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let digest = view_file::hex(&Sha256::digest(
+            fs::read(directory.path().join("square.png")).unwrap(),
+        ));
+        fs::create_dir(directory.path().join("art")).unwrap();
+        fs::copy(
+            directory.path().join("square.png"),
+            directory.path().join("art/square.png"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("art", directory.path().join("alias")).unwrap();
+        let entry =
+            |path: &str| format!("[{{\"id\": 7, \"path\": \"{path}\", \"sha256\": \"{digest}\"}}]");
+        set_textures(&view, &entry("art/square.png"));
+        assert!(view_file::load(&view).is_ok());
+        // Even a link that stays inside the directory is not followed.
+        set_textures(&view, &entry("alias/square.png"));
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("symbolic link"), "{error}");
+
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            directory.path().join("pipe.png"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        set_textures(&view, &entry("pipe.png"));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = view.clone();
+        std::thread::spawn(move || sender.send(view_file::load(&path).err()));
+        let error = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("opening a FIFO texture must not block")
+            .unwrap();
+        assert!(error.contains("not a regular file"), "{error}");
+    }
+
+    #[test]
+    fn texture_files_share_one_encoded_byte_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        // A 1 × 1 PNG padded with an ancillary chunk reads as many bytes as
+        // it holds but decodes to almost nothing, so only the file budget
+        // stops a view from listing it again and again.
+        let mut padded = view_file::encode_png(1, 1, &[1, 2, 3, 255]).unwrap();
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&4096_u32.to_be_bytes());
+        chunk.extend_from_slice(b"tEXt");
+        chunk.resize(8 + 4096, b'a');
+        let crc = crc32(&chunk[4..]);
+        chunk.extend_from_slice(&crc.to_be_bytes());
+        // Insert the chunk before IEND, the last 12 bytes.
+        let end = padded.split_off(padded.len() - 12);
+        padded.extend_from_slice(&chunk);
+        padded.extend_from_slice(&end);
+        fs::write(directory.path().join("padded.png"), &padded).unwrap();
+        let digest = view_file::hex(&Sha256::digest(&padded));
+        let entries: Vec<String> = (1..=4)
+            .map(|id| {
+                format!("{{\"id\": {id}, \"path\": \"padded.png\", \"sha256\": \"{digest}\"}}")
+            })
+            .collect();
+        set_textures(&view, &format!("[{}]", entries.join(", ")));
+        let text = fs::read_to_string(&view).unwrap();
+        fs::write(&view, text.replace("\"texture\": 7", "\"texture\": 1")).unwrap();
+        let size = u64::try_from(padded.len()).unwrap();
+        assert!(view_file::load_within(&view, usize::MAX, 4 * size).is_ok());
+        let error = view_file::load_within(&view, usize::MAX, 4 * size - 1)
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("textures[3]") && error.contains("together may hold at most"),
+            "{error}"
+        );
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
     }
 
     #[test]
@@ -361,8 +463,8 @@ mod tests {
             .map(|index| png_entry(directory.path(), &format!("t{index}.png"), 7 + index, 64))
             .collect();
         set_textures(&view, &format!("[{}]", entries.join(", ")));
-        assert!(view_file::load_within(&view, 3 * (12 + 64 * 64 * 4)).is_ok());
-        let error = view_file::load_within(&view, 3 * (12 + 64 * 64 * 4) - 1)
+        assert!(view_file::load_within(&view, 3 * (12 + 64 * 64 * 4), u64::MAX).is_ok());
+        let error = view_file::load_within(&view, 3 * (12 + 64 * 64 * 4) - 1, u64::MAX)
             .err()
             .unwrap();
         assert!(error.contains("textures[2]"), "{error}");
@@ -403,24 +505,6 @@ mod tests {
     }
 
     #[test]
-    fn bounded_reads_limit_the_bytes_actually_read() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("ten.bin");
-        fs::write(&path, [7; 10]).unwrap();
-        assert_eq!(view_file::read_bounded(&path, 10).unwrap(), [7; 10]);
-        assert!(view_file::read_bounded(&path, 9).is_err());
-        assert!(view_file::read_bounded(directory.path(), 10).is_err());
-        // Procfs reports a zero size for files that hold more, like a file
-        // that grows after its size is checked; the read must still stop.
-        #[cfg(target_os = "linux")]
-        {
-            let error =
-                view_file::read_bounded(std::path::Path::new("/proc/self/status"), 16).unwrap_err();
-            assert!(error.contains("within 16 bytes"), "{error}");
-        }
-    }
-
-    #[test]
     fn unsigned_fields_accept_their_full_range() {
         let directory = tempfile::tempdir().unwrap();
         let view = write_view(directory.path(), None);
@@ -451,6 +535,24 @@ mod tests {
         fs::write(&view, text.replace("\"rank\": 0", "\"rank\": 70000")).unwrap();
         let error = view_file::load(&view).err().unwrap();
         assert!(error.contains("out of range"), "{error}");
+    }
+
+    #[test]
+    fn bounded_reads_limit_the_bytes_actually_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ten.bin");
+        fs::write(&path, [7; 10]).unwrap();
+        assert_eq!(view_file::read_bounded(&path, 10).unwrap(), [7; 10]);
+        assert!(view_file::read_bounded(&path, 9).is_err());
+        assert!(view_file::read_bounded(directory.path(), 10).is_err());
+        // Procfs reports a zero size for files that hold more, like a file
+        // that grows after its size is checked; the read must still stop.
+        #[cfg(target_os = "linux")]
+        {
+            let error =
+                view_file::read_bounded(std::path::Path::new("/proc/self/status"), 16).unwrap_err();
+            assert!(error.contains("within 16 bytes"), "{error}");
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@
     "tilewright-render-testkit": ["sha2", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-world", "tilewright-scene"],
     "tilewright-render-wgpu": ["bytemuck", "naga", "pollster", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-testkit", "tilewright-scene", "wgpu"],
     "tilewright-render-sdl3": ["sdl3", "tilewright-render-api", "tilewright-render-wgpu", "wgpu"],
-    "tilewright-render": ["png", "serde_json", "sha2", "tempfile", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-sdl3", "tilewright-render-testkit", "tilewright-render-wgpu", "tilewright-render-world", "tilewright-scene"]
+    "tilewright-render": ["png", "rustix", "serde_json", "sha2", "tempfile", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-sdl3", "tilewright-render-testkit", "tilewright-render-wgpu", "tilewright-render-world", "tilewright-scene"]
   },
   "forbidden_source_patterns": ["github.com/seraphinastudios/game", "github.com/seraphinastudios/tilewright-editor", "github.com/seraphinastudios/tilewright-world"],
   "forbidden_package_prefixes": ["tilewright-cli", "tilewright-editor", "tilewright-jsonc", "tilewright-pack", "tilewright-source"]

@@ -14,13 +14,18 @@ The output path must not exist; the write is atomic and never overwrites.
 
 - Every texture is listed explicitly with a path relative to the view file
   and the SHA-256 of the file's bytes. Paths are `/`-separated with no empty,
-  `.` or `..` components, and must stay inside the view's directory once
-  symbolic links are resolved. A mismatch fails before anything is drawn.
-  Nothing else is read from disk and nothing is fetched.
+  `.` or `..` components. On Unix they are opened one directory at a time
+  beneath the view's directory without following symbolic links, and files
+  are opened without waiting on FIFOs, so a path can neither leave the
+  directory nor stall even if the directory changes while the view loads.
+  Elsewhere a path must stay inside the directory once symbolic links are
+  resolved. A mismatch fails before anything is drawn. Nothing else is read
+  from disk and nothing is fetched.
 - Unknown keys are errors, so a misspelled field fails rather than being
   silently ignored.
-- View files are capped at 64 MiB and texture files at 16 MiB; reads stop at
-  the cap even if a file grows while it is read. A view lists at most 4,096
+- View files are capped at 64 MiB, and texture files at 16 MiB each and
+  256 MiB together; reads stop at the cap even if a file grows while it is
+  read. A view lists at most 4,096
   textures and 131,072 draws: one per object plus one per double-drawn repeat,
   counted before off-screen objects are culled. Each image is at most 8,192 px
   per side and decodes to at most 16 MiB; all textures together decode to at

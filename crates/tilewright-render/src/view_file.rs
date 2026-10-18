@@ -7,13 +7,7 @@
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::HashMap,
-    fs,
-    io::Read as _,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, fs, io::Read as _, path::Path, sync::Arc};
 use tilewright_render_resources::{
     DEFAULT_MAXIMUM_RESOURCE_BYTES, DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES,
 };
@@ -28,6 +22,8 @@ use tilewright_scene::{Digest256, ResourceId, Sampling, SemanticId};
 const MAXIMUM_VIEW_BYTES: u64 = 64 * 1024 * 1024;
 /// Largest accepted texture file.
 const MAXIMUM_TEXTURE_BYTES: u64 = 16 * 1024 * 1024;
+/// Most bytes all of a view's texture files may hold together.
+const MAXIMUM_TEXTURE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 /// Most textures one view may list, matching the renderer's texture cache.
 const MAXIMUM_TEXTURES: usize = 4_096;
 
@@ -113,24 +109,20 @@ fn reject_unknown(object: &Map<String, Value>, allowed: &[&str], context: &str) 
     }
 }
 
-/// Reads a regular file of at most `maximum` bytes. The size and type are
-/// checked on the open handle and the read itself stops after `maximum + 1`
-/// bytes, so the limit holds even if the file is replaced or grows while it
-/// is read.
+/// Reads a regular file of at most `maximum` bytes. The file is opened once,
+/// without blocking on FIFOs or devices; its type and size are checked on
+/// that handle and the read stops after `maximum + 1` bytes, so the limit
+/// holds even if the file is replaced or grows while it is read.
 pub(crate) fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
-    let failure = |error: std::io::Error| format!("cannot read {}: {error}", path.display());
-    let rejected = || {
-        format!(
-            "{} is not a regular file within {maximum} bytes",
-            path.display()
-        )
-    };
-    // Checking the path first avoids opening FIFOs or devices, which may block.
-    if !fs::metadata(path).map_err(failure)?.is_file() {
-        return Err(rejected());
-    }
-    let file = fs::File::open(path).map_err(failure)?;
+    let file = open_nonblocking(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    read_handle(file, maximum, &path.display().to_string())
+}
+
+fn read_handle(file: fs::File, maximum: u64, name: &str) -> Result<Vec<u8>> {
+    let failure = |error: std::io::Error| format!("cannot read {name}: {error}");
     let metadata = file.metadata().map_err(failure)?;
+    let rejected = || format!("{name} is not a regular file within {maximum} bytes");
     if !metadata.is_file() || metadata.len() > maximum {
         return Err(rejected());
     }
@@ -142,6 +134,23 @@ pub(crate) fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
         return Err(rejected());
     }
     Ok(bytes)
+}
+
+/// Opens a path for reading without waiting for a FIFO writer.
+#[cfg(unix)]
+fn open_nonblocking(path: &Path) -> std::io::Result<fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    Ok(fs::File::from(rustix::fs::open(
+        path,
+        flags,
+        Mode::empty(),
+    )?))
+}
+
+#[cfg(not(unix))]
+fn open_nonblocking(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -238,10 +247,9 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-/// Resolves a texture path written in a view: relative, `/`-separated, with
-/// no empty, `.` or `..` components, and still inside `base` once symbolic
-/// links are resolved.
-fn confined(base: &Path, relative: &str) -> Result<PathBuf> {
+/// Splits a texture path written in a view into its components: relative,
+/// `/`-separated, with no empty, `.` or `..` components.
+fn components(relative: &str) -> Result<Vec<&str>> {
     let components: Vec<&str> = relative.split('/').collect();
     if relative.is_empty()
         || relative.contains('\\')
@@ -254,18 +262,77 @@ fn confined(base: &Path, relative: &str) -> Result<PathBuf> {
             "texture path \"{relative}\" must be relative to the view, without . or .. components"
         ));
     }
-    let joined = components
+    Ok(components)
+}
+
+/// Opens a texture beneath the view's directory `base`. On Unix each
+/// component is opened relative to the previous directory handle without
+/// following symbolic links, and the file without blocking, so the path
+/// cannot leave `base` or stall even if the directory changes concurrently.
+#[cfg(unix)]
+fn open_confined(base: &Path, relative: &str) -> Result<fs::File> {
+    use rustix::{
+        fs::{Mode, OFlags, open, openat},
+        io::Errno,
+    };
+    let components = components(relative)?;
+    let failure = |error: Errno| {
+        // `O_NOFOLLOW` reports a symbolic link as ELOOP (EMLINK on BSDs), and
+        // as ENOTDIR together with `O_DIRECTORY`.
+        if error == Errno::LOOP || error == Errno::MLINK || error == Errno::NOTDIR {
+            format!(
+                "texture path \"{relative}\" may not pass through a symbolic link or a non-directory"
+            )
+        } else {
+            format!(
+                "cannot open \"{relative}\": {}",
+                std::io::Error::from(error)
+            )
+        }
+    };
+    let (file, parents) = components
+        .split_last()
+        .ok_or_else(|| failure(Errno::INVAL))?;
+    let mut directory = open(
+        base,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(failure)?;
+    for parent in parents {
+        directory = openat(
+            &directory,
+            *parent,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(failure)?;
+    }
+    let file = openat(
+        &directory,
+        *file,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(failure)?;
+    Ok(fs::File::from(file))
+}
+
+/// Opens a texture that, once symbolic links are resolved, stays inside the
+/// view's directory `base`.
+#[cfg(not(unix))]
+fn open_confined(base: &Path, relative: &str) -> Result<fs::File> {
+    let joined = components(relative)?
         .iter()
         .fold(base.to_path_buf(), |path, component| path.join(component));
     let resolved = fs::canonicalize(&joined)
         .map_err(|error| format!("cannot resolve {}: {error}", joined.display()))?;
-    if resolved.starts_with(base) {
-        Ok(resolved)
-    } else {
-        Err(format!(
+    if !resolved.starts_with(base) {
+        return Err(format!(
             "texture path \"{relative}\" leaves the view's directory"
-        ))
+        ));
     }
+    fs::File::open(&resolved).map_err(|error| format!("cannot open \"{relative}\": {error}"))
 }
 
 /// Reads a view and its textures with the renderer's default budgets.
@@ -273,13 +340,18 @@ pub fn load(path: &Path) -> Result<LoadedView> {
     load_within(
         path,
         usize::try_from(DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES).unwrap_or(usize::MAX),
+        MAXIMUM_TEXTURE_FILE_BYTES,
     )
 }
 
 /// Reads a view whose decoded textures together fit in `texture_budget`
-/// bytes.
+/// bytes and whose texture files together hold at most `file_budget` bytes.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn load_within(path: &Path, texture_budget: usize) -> Result<LoadedView> {
+pub(crate) fn load_within(
+    path: &Path,
+    texture_budget: usize,
+    file_budget: u64,
+) -> Result<LoadedView> {
     let bytes = read_bounded(path, MAXIMUM_VIEW_BYTES)?;
     let document: Value =
         serde_json::from_slice(&bytes).map_err(|error| format!("invalid view JSON: {error}"))?;
@@ -424,6 +496,7 @@ pub(crate) fn load_within(path: &Path, texture_budget: usize) -> Result<LoadedVi
         .map_err(|error| format!("cannot resolve {}: {error}", base.display()))?;
     // Decoded textures share the renderer's working-set budget.
     let mut remaining = texture_budget;
+    let mut encoded_remaining = file_budget;
     for (index, entry) in entries.iter().enumerate() {
         let context = format!("textures[{index}]");
         let object = as_object(entry, &context)?;
@@ -435,9 +508,19 @@ pub(crate) fn load_within(path: &Path, texture_budget: usize) -> Result<LoadedVi
         let expected = field(object, "sha256", &context)?
             .as_str()
             .ok_or_else(|| format!("{context}: sha256 must be a string"))?;
-        let texture_path =
-            confined(&base, relative).map_err(|error| format!("{context}: {error}"))?;
-        let file = read_bounded(&texture_path, MAXIMUM_TEXTURE_BYTES)?;
+        let handle =
+            open_confined(&base, relative).map_err(|error| format!("{context}: {error}"))?;
+        // Texture files share one encoded-byte budget, so repeated or padded
+        // files cannot make the loader read and hash without bound.
+        let file = read_handle(
+            handle,
+            MAXIMUM_TEXTURE_BYTES.min(encoded_remaining),
+            &format!("{context} ({relative})"),
+        )
+        .map_err(|error| {
+            format!("{error}; texture files together may hold at most {file_budget} bytes")
+        })?;
+        encoded_remaining -= u64::try_from(file.len()).unwrap_or(u64::MAX);
         if hex(&Sha256::digest(&file)) != expected.to_ascii_lowercase() {
             return Err(format!("{context}: sha256 does not match {relative}"));
         }
