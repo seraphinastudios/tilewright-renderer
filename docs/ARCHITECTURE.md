@@ -98,8 +98,9 @@ knows nothing about any game or content format.
   limit, every quad an object produces (after scale, rotation, glow padding
   and terrain bending) spans at most that limit less one pixel, and a glow
   radius stays within every frame. Ground objects reject the
-  offset, `z`, scale, rotation and glow they cannot apply, and isometric
-  ground covers one tile.
+  offset, `z`, scale, rotation and glow they cannot apply, isometric ground
+  covers one tile, and no ground sits on a tile the height field marks as
+  having none.
 
 Lighting and weather are not part of this version.
 

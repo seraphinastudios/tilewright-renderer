@@ -62,7 +62,8 @@ pub enum Anchor {
     /// top-down ground shifts up by its tile's height without bending.
     ///
     /// Ground keeps the neutral offset, `z`, scale and rotation and has no
-    /// glow; isometric ground covers exactly one tile. [`compile`] rejects
+    /// glow; isometric ground covers exactly one tile, and no ground sits on
+    /// a tile the height field marks as having none. [`compile`] rejects
     /// other values rather than ignoring them.
     Ground,
     /// Art standing on the tile: its bottom centre sits at the front of the
@@ -188,7 +189,8 @@ pub struct HeightField {
     pub origin: [i64; 2],
     pub width: u32,
     pub height: u32,
-    /// Row-major; `None` means no ground on that tile.
+    /// Row-major; `None` means no ground on that tile, so ground objects may
+    /// not be placed there. Tiles outside the field count as height 0.
     pub heights: Vec<Option<i32>>,
 }
 
@@ -207,17 +209,27 @@ impl HeightField {
     /// The height of a tile, if the field has ground there.
     #[must_use]
     pub fn get(&self, x: i64, y: i64) -> Option<i32> {
+        self.index(x, y)
+            .and_then(|index| self.heights.get(index).copied().flatten())
+    }
+
+    /// Whether the field covers the tile and marks it as having no ground.
+    fn is_hole(&self, x: i64, y: i64) -> bool {
+        self.index(x, y)
+            .and_then(|index| self.heights.get(index))
+            .is_some_and(Option::is_none)
+    }
+
+    fn index(&self, x: i64, y: i64) -> Option<usize> {
         let column = x.checked_sub(self.origin[0])?;
         let row = y.checked_sub(self.origin[1])?;
         if column < 0 || row < 0 || column >= i64::from(self.width) || row >= i64::from(self.height)
         {
             return None;
         }
-        let index = row
-            .checked_mul(i64::from(self.width))?
+        row.checked_mul(i64::from(self.width))?
             .checked_add(column)
-            .and_then(|index| usize::try_from(index).ok())?;
-        self.heights.get(index).copied().flatten()
+            .and_then(|index| usize::try_from(index).ok())
     }
 }
 
@@ -423,10 +435,12 @@ fn validate(view: &WorldView, limits: SceneLimits) -> Result<(), Error> {
             && (1..=limits.maximum_dimension).contains(&frame.width)
             && (1..=limits.maximum_dimension).contains(&frame.height)
     };
-    // Ground art ignores placement effects, so it must not request them.
+    // Ground art ignores placement effects, so it must not request them, and
+    // it cannot sit on a tile the height field marks as having no ground.
     let ground_ok = |object: &WorldObject| {
         object.anchor != Anchor::Ground
-            || (object.offset_px == [0.0, 0.0]
+            || (!view.heights.is_hole(object.tile[0], object.tile[1])
+                && object.offset_px == [0.0, 0.0]
                 && object.z == 0
                 && object.scale == [1.0, 1.0]
                 && object.rotation_degrees == 0.0

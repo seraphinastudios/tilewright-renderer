@@ -780,3 +780,33 @@ fn double_draw_is_for_opaque_art() {
         assert!(compiles(object).is_ok());
     }
 }
+
+#[test]
+fn ground_cannot_fill_height_field_holes() {
+    let field = HeightField {
+        origin: [0, 0],
+        width: 2,
+        height: 1,
+        heights: vec![Some(4), None],
+    };
+    // The explicit hole at [1, 0] has no ground to draw.
+    let holed = iso_view(vec![ground(1, [0, 0]), ground(2, [1, 0])], field.clone());
+    assert_eq!(
+        compile(&holed, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+    // Standing art may still stand there, and tiles outside the field count
+    // as height 0, like a view with no field at all.
+    let mut tree = WorldObject::new(
+        SemanticId(2),
+        [1, 0],
+        3,
+        Anchor::Standing,
+        texture(2, 16, 16),
+    );
+    let standing = iso_view(vec![ground(1, [0, 0]), tree.clone()], field.clone());
+    assert!(compile(&standing, SceneLimits::default()).is_ok());
+    tree.tile = [5, 5];
+    let outside = iso_view(vec![ground(1, [0, 0]), ground(3, [5, 5]), tree], field);
+    assert!(compile(&outside, SceneLimits::default()).is_ok());
+}
