@@ -944,3 +944,24 @@ fn every_emitted_quad_is_counted_before_culling() {
         assert!(compile(&flat, limits(1)).is_ok(), "{tile:?}");
     }
 }
+
+#[test]
+fn animation_phase_holds_across_the_whole_clock() {
+    let mut object = WorldObject::new(
+        SemanticId(1),
+        [0, 0],
+        3,
+        Anchor::Standing,
+        texture(20, 16, 16),
+    );
+    object.animation = Animation {
+        frames: vec![texture(20, 16, 16), texture(21, 16, 16)],
+        frame_millis: 3,
+        phase_millis: 1,
+    };
+    let mut view = iso_view(vec![object], HeightField::empty());
+    // (2⁶⁴ − 1 + 1) / 3 is odd, so the second frame shows; a wrapped sum
+    // would give 0 and the first.
+    view.clock_millis = u64::MAX;
+    assert_eq!(quads_of(&view, 1)[0].resource_id, ResourceId(21));
+}

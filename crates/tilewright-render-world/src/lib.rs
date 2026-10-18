@@ -101,8 +101,10 @@ impl Animation {
         let index = if self.frame_millis == 0 || count <= 1 {
             0
         } else {
-            (clock_millis.wrapping_add(u64::from(self.phase_millis)) / u64::from(self.frame_millis))
-                % count
+            // Widened so a clock near `u64::MAX` keeps its phase.
+            (u128::from(clock_millis) + u128::from(self.phase_millis))
+                / u128::from(self.frame_millis)
+                % u128::from(count)
         };
         self.frames[usize::try_from(index).unwrap_or(0)]
     }
