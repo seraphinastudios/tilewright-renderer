@@ -20,12 +20,20 @@ The output path must not exist; the write is atomic and never overwrites.
 - Unknown keys are errors, so a misspelled field fails rather than being
   silently ignored.
 - View files are capped at 64 MiB and texture files at 16 MiB. A view lists
-  at most 4,096 textures. Each image is at most 8,192 px per side and decodes
-  to at most 16 MiB; all textures together decode to at most 256 MiB. Sizes
-  are checked from the PNG header before decoding. The GPU device may impose
-  a lower bound, which is reported as an error.
+  at most 4,096 textures and 131,072 draws: one per object plus one per
+  double-drawn repeat, counted before off-screen objects are culled. Each
+  image is at most 8,192 px per side and decodes to at most 16 MiB; all
+  textures together decode to at most 256 MiB. Sizes are checked from the PNG
+  header before decoding. The GPU device may impose a lower bound, which is
+  reported as an error.
 - PNG input may be RGBA, RGB, greyscale, greyscale with alpha, or indexed;
   16-bit channels are reduced to 8 bits.
+- Every object is validated whether or not it is in view, and every animation
+  frame whether or not the clock selects it, so panning or advancing the clock
+  never turns a valid view into an invalid one. Object IDs are nonzero and
+  unique. Ground objects take no `offset`, `z`, `scale`, `rotation` or
+  `glow`, and isometric ground keeps the 1 × 1 footprint. A glow radius is at
+  most the width and height of every frame of its object.
 
 ## Fields
 

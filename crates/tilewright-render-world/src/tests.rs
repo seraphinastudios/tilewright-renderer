@@ -453,3 +453,161 @@ fn coordinates_and_tile_widths_are_bounded() {
         Err(crate::Error::InvalidValue)
     );
 }
+
+#[test]
+fn draws_are_bounded_before_culling() {
+    let limits = SceneLimits {
+        maximum_quads: 2,
+        ..SceneLimits::default()
+    };
+    // Both objects are far outside the viewport, so neither emits a quad.
+    let mut view = iso_view(
+        vec![ground(1, [40, 40]), ground(2, [41, 40])],
+        HeightField::empty(),
+    );
+    assert!(compile(&view, limits).unwrap().quads().is_empty());
+    view.objects[0].double_draw = true;
+    assert_eq!(
+        compile(&view, limits),
+        Err(Error::Scene(tilewright_scene::Error::LimitExceeded))
+    );
+    view.objects[0].double_draw = false;
+    view.objects.push(ground(3, [42, 40]));
+    assert_eq!(
+        compile(&view, limits),
+        Err(Error::Scene(tilewright_scene::Error::LimitExceeded))
+    );
+}
+
+#[test]
+fn every_animation_frame_is_validated() {
+    let valid = texture(2, 16, 16);
+    let frames = [
+        TextureRef {
+            id: ResourceId(0),
+            ..valid
+        },
+        TextureRef {
+            revision: 0,
+            ..valid
+        },
+        TextureRef {
+            digest: Digest256([0; 32]),
+            ..valid
+        },
+        TextureRef {
+            width: SceneLimits::default().maximum_dimension + 1,
+            ..valid
+        },
+    ];
+    for frame in frames {
+        let mut object = WorldObject::new(SemanticId(1), [0, 0], 3, Anchor::Standing, valid);
+        // The clock selects only the first frame; the second is never drawn.
+        object.animation = Animation {
+            frames: vec![valid, frame],
+            frame_millis: 100,
+            phase_millis: 0,
+        };
+        assert_eq!(
+            compile(
+                &iso_view(vec![object], HeightField::empty()),
+                SceneLimits::default()
+            ),
+            Err(Error::InvalidValue),
+            "{frame:?}"
+        );
+    }
+}
+
+#[test]
+fn semantic_ids_are_validated_whether_or_not_they_are_in_view() {
+    let offscreen = ground(0, [40, 40]);
+    assert_eq!(
+        compile(
+            &iso_view(vec![ground(1, [0, 0]), offscreen], HeightField::empty()),
+            SceneLimits::default()
+        ),
+        Err(Error::InvalidValue)
+    );
+    assert_eq!(
+        compile(
+            &iso_view(
+                vec![ground(1, [0, 0]), ground(1, [40, 40])],
+                HeightField::empty()
+            ),
+            SceneLimits::default()
+        ),
+        Err(Error::Scene(tilewright_scene::Error::DuplicateSemanticId))
+    );
+}
+
+#[test]
+fn ground_rejects_effects_it_cannot_apply() {
+    let edits: [fn(&mut WorldObject); 6] = [
+        |object| object.offset_px = [1.0, 0.0],
+        |object| object.z = 4,
+        |object| object.scale = [2.0, 1.0],
+        |object| object.rotation_degrees = 15.0,
+        |object| {
+            object.glow = Some(GlowEffect {
+                color: [1.0; 4],
+                radius_px: 2.0,
+                pulse_millis: 0,
+            });
+        },
+        |object| object.footprint = [2, 1],
+    ];
+    for edit in edits {
+        let mut tile = ground(1, [0, 0]);
+        edit(&mut tile);
+        assert_eq!(
+            compile(
+                &iso_view(vec![tile.clone()], HeightField::empty()),
+                SceneLimits::default()
+            ),
+            Err(Error::InvalidValue),
+            "{tile:?}"
+        );
+    }
+    // Top-down ground stretches across its footprint.
+    let mut view = iso_view(Vec::new(), HeightField::empty());
+    view.camera.projection = Projection::TopDown { tile_size: 32 };
+    let mut wide = WorldObject::new(SemanticId(1), [0, 0], 0, Anchor::Ground, texture(1, 32, 32));
+    wide.footprint = [2, 1];
+    view.objects = vec![wide];
+    let rect = compile(&view, SceneLimits::default()).unwrap().quads()[0]
+        .aligned_rect()
+        .unwrap();
+    assert_eq!(rect.right - rect.left, 64.0);
+}
+
+#[test]
+fn glow_radius_stays_within_every_frame() {
+    let lamp = |radius_px, frames: &[TextureRef]| {
+        let mut object = WorldObject::new(
+            SemanticId(1),
+            [0, 0],
+            3,
+            Anchor::Standing,
+            texture(3, 20, 10),
+        );
+        object.animation.frames.extend_from_slice(frames);
+        object.glow = Some(GlowEffect {
+            color: [1.0; 4],
+            radius_px,
+            pulse_millis: 0,
+        });
+        iso_view(vec![object], HeightField::empty())
+    };
+    // The 20 × 10 frame's halo reaches the full 10 px on both axes.
+    let halo = quads_of(&lamp(10.0, &[]), 1)[0];
+    assert_eq!(halo.glow.unwrap().radius_uv, [0.5, 1.0]);
+    // A radius past the art, in the shown frame or in one the clock never
+    // selects, is rejected instead of being truncated.
+    for view in [lamp(10.5, &[]), lamp(10.0, &[texture(4, 30, 8)])] {
+        assert_eq!(
+            compile(&view, SceneLimits::default()),
+            Err(Error::InvalidValue)
+        );
+    }
+}

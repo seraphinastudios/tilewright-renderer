@@ -9,7 +9,7 @@
 //! top-down), terrain stretching, draw order, animation frame selection and
 //! object effects, and produces textured quads for any renderer backend.
 
-use std::fmt;
+use std::{collections::HashSet, fmt};
 use tilewright_scene::{
     Digest256, Glow, Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId,
     Viewport,
@@ -41,6 +41,10 @@ pub struct Camera {
 }
 
 /// A texture the consumer has already resolved into a resource identity.
+///
+/// The ID, revision and digest are nonzero, and each side is between 1 and
+/// [`SceneLimits::maximum_dimension`] pixels. [`compile`] checks every
+/// animation frame, whether or not the clock selects it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TextureRef {
     pub id: ResourceId,
@@ -56,6 +60,10 @@ pub enum Anchor {
     /// Ground art covering the tile: a diamond in isometric projection, the
     /// tile square in top-down. Isometric ground bends with terrain heights;
     /// top-down ground shifts up by its tile's height without bending.
+    ///
+    /// Ground keeps the neutral offset, `z`, scale and rotation and has no
+    /// glow; isometric ground covers exactly one tile. [`compile`] rejects
+    /// other values rather than ignoring them.
     Ground,
     /// Art standing on the tile: its bottom centre sits at the front of the
     /// object's footprint, raised by the tile's height and the object's `z`.
@@ -98,7 +106,8 @@ impl Animation {
 pub struct GlowEffect {
     /// Halo colour; alpha is the peak strength.
     pub color: [f32; 4],
-    /// Radius in art pixels.
+    /// Radius in art pixels, at most the width and height of every
+    /// animation frame.
     pub radius_px: f32,
     /// Pulse period in milliseconds; 0 is steady.
     pub pulse_millis: u32,
@@ -107,10 +116,12 @@ pub struct GlowEffect {
 /// One object to draw.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorldObject {
+    /// Picking identity: nonzero and unique within a view.
     pub semantic_id: SemanticId,
     /// Head tile in plane coordinates.
     pub tile: [i64; 2],
-    /// Tiles covered along x and y; at least 1 × 1.
+    /// Tiles covered along x and y; at least 1 × 1, and exactly 1 × 1 for
+    /// isometric ground.
     pub footprint: [u16; 2],
     /// Position in the profile's render-layer order.
     pub layer_rank: u16,
@@ -267,13 +278,29 @@ impl std::error::Error for Error {}
 
 /// Compiles a view into an ordered scene.
 ///
+/// Every object is validated, including objects the camera culls and
+/// animation frames the clock does not select, so whether a view compiles
+/// never depends on what is in view.
+///
 /// # Errors
 /// Returns [`Error::InvalidValue`] for an invalid view and [`Error::Scene`]
-/// when the produced scene exceeds its limits.
+/// for a repeated semantic ID or when the view or the produced scene exceeds
+/// its limits. A view holds at most [`SceneLimits::maximum_quads`] draws: one
+/// per object plus one per double-drawn repeat, counted before culling.
 pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Error> {
-    validate(view)?;
+    // Bound ordering work by the scene budget before allocating anything.
+    let draws = view
+        .objects
+        .iter()
+        .try_fold(0_usize, |count, object| {
+            count
+                .checked_add(1 + usize::from(object.double_draw))
+                .filter(|count| *count <= limits.maximum_quads)
+        })
+        .ok_or(Error::Scene(tilewright_scene::Error::LimitExceeded))?;
+    validate(view, limits)?;
     let projector = Projector::new(view);
-    let mut entries: Vec<Entry<'_>> = Vec::with_capacity(view.objects.len());
+    let mut entries: Vec<Entry<'_>> = Vec::with_capacity(draws);
     for (index, object) in view.objects.iter().enumerate() {
         let sequence = u32::try_from(index).map_err(|_| Error::InvalidValue)?;
         entries.push(Entry {
@@ -363,8 +390,27 @@ fn unit(values: &[f32]) -> bool {
 /// `f64`.
 pub const MAXIMUM_TILE_COORDINATE: i64 = 1 << 40;
 
-fn validate(view: &WorldView) -> Result<(), Error> {
+#[allow(clippy::float_cmp)]
+fn validate(view: &WorldView, limits: SceneLimits) -> Result<(), Error> {
     let camera = &view.camera;
+    let isometric = matches!(camera.projection, Projection::Isometric { .. });
+    let texture_ok = |frame: &TextureRef| {
+        frame.id.0 != 0
+            && frame.revision != 0
+            && frame.digest.0.iter().any(|byte| *byte != 0)
+            && (1..=limits.maximum_dimension).contains(&frame.width)
+            && (1..=limits.maximum_dimension).contains(&frame.height)
+    };
+    // Ground art ignores placement effects, so it must not request them.
+    let ground_ok = |object: &WorldObject| {
+        object.anchor != Anchor::Ground
+            || (object.offset_px == [0.0, 0.0]
+                && object.z == 0
+                && object.scale == [1.0, 1.0]
+                && object.rotation_degrees == 0.0
+                && object.glow.is_none()
+                && (!isometric || object.footprint == [1, 1]))
+    };
     let coordinate =
         |value: i64| (-MAXIMUM_TILE_COORDINATE..=MAXIMUM_TILE_COORDINATE).contains(&value);
     // Bent isometric tiles divide by half the tile width less the seam bleed,
@@ -393,15 +439,13 @@ fn validate(view: &WorldView) -> Result<(), Error> {
         && usize::try_from(cells).is_ok_and(|cells| cells == heights.heights.len())
         && heights.origin.iter().all(|value| coordinate(*value))
         && view.objects.iter().all(|object| {
-            object.tile.iter().all(|value| coordinate(*value))
+            let frames = &object.animation.frames;
+            object.semantic_id.0 != 0
+                && object.tile.iter().all(|value| coordinate(*value))
                 && object.footprint[0] >= 1
                 && object.footprint[1] >= 1
-                && !object.animation.frames.is_empty()
-                && object
-                    .animation
-                    .frames
-                    .iter()
-                    .all(|frame| frame.width > 0 && frame.height > 0)
+                && !frames.is_empty()
+                && frames.iter().all(texture_ok)
                 && finite(&object.offset_px)
                 && object
                     .scale
@@ -411,13 +455,27 @@ fn validate(view: &WorldView) -> Result<(), Error> {
                 && unit(&[object.alpha, object.grayscale])
                 && unit(&object.tint)
                 && object.glow.is_none_or(|glow| {
-                    unit(&glow.color) && glow.radius_px.is_finite() && glow.radius_px >= 0.0
+                    unit(&glow.color)
+                        && glow.radius_px.is_finite()
+                        && glow.radius_px >= 0.0
+                        && frames.iter().all(|frame| {
+                            f64::from(glow.radius_px) <= f64::from(frame.width.min(frame.height))
+                        })
                 })
+                && ground_ok(object)
         });
-    if valid {
+    if !valid {
+        return Err(Error::InvalidValue);
+    }
+    let mut identities = HashSet::with_capacity(view.objects.len());
+    if view
+        .objects
+        .iter()
+        .all(|object| identities.insert(object.semantic_id))
+    {
         Ok(())
     } else {
-        Err(Error::InvalidValue)
+        Err(Error::Scene(tilewright_scene::Error::DuplicateSemanticId))
     }
 }
 
@@ -781,7 +839,9 @@ impl Projector {
                         glow.color[2],
                         (f64::from(glow.color[3]) * strength * f64::from(object.alpha)) as f32,
                     ],
-                    radius_uv: [extend_u.min(1.0) as f32, extend_v.min(1.0) as f32],
+                    // Validation keeps the radius within the art, so this
+                    // is the full radius.
+                    radius_uv: [extend_u as f32, extend_v as f32],
                 }),
                 pickable: false,
                 ..base

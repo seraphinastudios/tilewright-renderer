@@ -81,6 +81,14 @@ knows nothing about any game or content format.
 - **Pixel grid.** Axis-aligned art snaps its top-left corner to whole pixels,
   rounding halves up, so pixel centres sample texel centres and every backend
   picks the same texels. Quads entirely outside the viewport are culled.
+- **Validation.** Draws (objects plus double-draw repeats) are counted against
+  the scene's quad budget before anything is ordered. Every object and every
+  animation frame is validated before culling or frame selection, so a view's
+  validity never depends on the camera or clock: semantic IDs are nonzero and
+  unique, frames carry full resource identities within the scene's dimension
+  limit, and a glow radius stays within every frame. Ground objects reject the
+  offset, `z`, scale, rotation and glow they cannot apply, and isometric
+  ground covers one tile.
 
 Lighting and weather are not part of this version.
 
