@@ -421,6 +421,39 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_fields_accept_their_full_range() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let text = fs::read_to_string(&view).unwrap();
+        let maximum = u64::MAX;
+        let text = text
+            .replace(
+                "\"format\": \"tilewright.view/1\",",
+                &format!(
+                    "\"format\": \"tilewright.view/1\", \"revision\": {maximum}, \"clock_millis\": {maximum},"
+                ),
+            )
+            .replace("\"id\": 7,", &format!("\"id\": {maximum},"))
+            .replace("\"texture\": 7", &format!("\"texture\": {maximum}"));
+        fs::write(&view, text).unwrap();
+        let loaded = view_file::load(&view).unwrap();
+        assert_eq!(loaded.view.revision, maximum);
+        assert_eq!(loaded.view.clock_millis, maximum);
+        assert_eq!(loaded.view.objects[0].animation.frames[0].id.0, maximum);
+        // Signed fields still take negative values, and ranges still apply.
+        let text = fs::read_to_string(&view).unwrap();
+        fs::write(&view, text.replace("\"tile\": [0, 0]", "\"tile\": [-3, 0]")).unwrap();
+        assert_eq!(
+            view_file::load(&view).unwrap().view.objects[0].tile,
+            [-3, 0]
+        );
+        let text = fs::read_to_string(&view).unwrap();
+        fs::write(&view, text.replace("\"rank\": 0", "\"rank\": 70000")).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("out of range"), "{error}");
+    }
+
+    #[test]
     fn output_persistence_is_atomic_and_no_clobber() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("frame.rgba");

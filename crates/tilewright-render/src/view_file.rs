@@ -68,8 +68,14 @@ fn integer(value: &Value, context: &str) -> Result<i64> {
         .ok_or_else(|| format!("{context}: expected an integer"))
 }
 
-fn bounded<T: TryFrom<i64>>(value: &Value, context: &str) -> Result<T> {
-    T::try_from(integer(value, context)?).map_err(|_| format!("{context}: out of range"))
+/// An integer of type `T`, read across the full signed and unsigned 64-bit
+/// range so `u64` identities above `i64::MAX` are accepted.
+fn bounded<T: TryFrom<i64> + TryFrom<u64>>(value: &Value, context: &str) -> Result<T> {
+    let out_of_range = || format!("{context}: out of range");
+    match value.as_u64() {
+        Some(unsigned) => T::try_from(unsigned).map_err(|_| out_of_range()),
+        None => T::try_from(integer(value, context)?).map_err(|_| out_of_range()),
+    }
 }
 
 fn optional<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
