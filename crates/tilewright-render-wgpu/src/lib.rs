@@ -15,14 +15,16 @@ use tilewright_render_api::{
     TargetDescriptor, TargetKind, TargetLimits,
 };
 use tilewright_render_resources::{
-    DEFAULT_MAXIMUM_RESOURCE_BYTES, DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES, ResourceProvider,
-    ResourceRequest, Rgba8Image, add_working_set_bytes, for_each_quad_pixel, sample_quad_rgba8,
-    shade_quad_rgba8, subpixel_position,
+    DEFAULT_MAXIMUM_RESOURCE_BYTES, DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES,
+    MAXIMUM_SCENE_TEXTURES, ResourceBlob, ResourceProvider, ResourceRequest, Rgba8Image,
+    add_working_set_bytes, for_each_quad_pixel, sample_quad_rgba8, shade_quad_rgba8,
+    subpixel_position,
 };
 use tilewright_scene::{Digest256, Layer, Quad, ResourceId, Sampling, SceneBundle};
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const MAXIMUM_CACHED_TEXTURES: usize = 4_096;
+/// The cache holds at most one scene's distinct textures.
+const MAXIMUM_CACHED_TEXTURES: usize = MAXIMUM_SCENE_TEXTURES;
 type TextureKey = (ResourceId, u64, Digest256);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -534,8 +536,8 @@ impl WgpuRenderer {
         if distinct.len() > MAXIMUM_CACHED_TEXTURES {
             return Err(Error::LimitExceeded);
         }
-        // Decode every missing texture before the cache changes, so the
-        // scene's whole working set is known and bounded first.
+        // Decode every missing texture before uploading any, so the scene's
+        // whole working set is known and bounded first.
         let mut working_set_bytes = 0_u64;
         for key in &distinct {
             if let Some(cached) = self.textures.get(key) {
@@ -546,34 +548,45 @@ impl WgpuRenderer {
         }
         let mut decoded = Vec::new();
         let mut requested = HashSet::new();
+        let mut staged_bytes = 0_u64;
+        let mut evicted = false;
         for quad in scene.quads() {
             let key = key_of(quad);
-            if !self.textures.contains_key(&key) && requested.insert(key) {
-                let image = self.decode_texture(key, resources)?;
-                working_set_bytes =
-                    add_working_set_bytes(working_set_bytes, image.pixels().len() as u64)
-                        .map_err(|_| Error::LimitExceeded)?;
-                decoded.push((key, image));
+            if self.textures.contains_key(&key) || !requested.insert(key) {
+                continue;
             }
+            let blob = load_blob(key, resources)?;
+            // Cached and staged textures share one CPU budget. Before
+            // decoding one that would not fit beside them, evict the cached
+            // textures this scene does not use; the working-set bound then
+            // keeps what remains within the budget.
+            let incoming = blob.bytes().len() as u64;
+            if !evicted && decoding_needs_room(self.texture_bytes, staged_bytes, incoming) {
+                self.evict_unused(&distinct);
+                evicted = true;
+            }
+            let image = Arc::new(
+                Rgba8Image::decode(
+                    &blob,
+                    self.limits.maximum_dimension,
+                    self.limits.maximum_pixels,
+                )
+                .map_err(|error| Error::Resource(error.to_string()))?,
+            );
+            let bytes = image.pixels().len() as u64;
+            working_set_bytes = add_working_set_bytes(working_set_bytes, bytes)
+                .map_err(|_| Error::LimitExceeded)?;
+            staged_bytes += bytes;
+            decoded.push((key, image));
         }
-        let missing_bytes = decoded
-            .iter()
-            .map(|(_, image)| image.pixels().len() as u64)
-            .sum::<u64>();
-        // Evict only textures this scene does not use. Afterwards the cache
-        // holds exactly the scene's working set, within both bounds.
+        // The entry bound works the same way.
         if texture_cache_must_evict(
             self.textures.len(),
             self.texture_bytes,
             decoded.len(),
-            missing_bytes,
+            staged_bytes,
         ) {
-            self.textures.retain(|key, _| distinct.contains(key));
-            self.texture_bytes = self
-                .textures
-                .values()
-                .map(|cached| cached.image.pixels().len() as u64)
-                .sum();
+            self.evict_unused(&distinct);
         }
         let mut uploads = HashMap::with_capacity(decoded.len());
         for (key, image) in decoded {
@@ -602,27 +615,14 @@ impl WgpuRenderer {
         Ok(prepared)
     }
 
-    fn decode_texture(
-        &self,
-        key: TextureKey,
-        resources: &dyn ResourceProvider,
-    ) -> Result<Arc<Rgba8Image>, Error> {
-        let blob = resources
-            .load(ResourceRequest {
-                id: key.0,
-                revision: key.1,
-                digest: key.2,
-                maximum_bytes: DEFAULT_MAXIMUM_RESOURCE_BYTES,
-            })
-            .map_err(|error| Error::Resource(error.to_string()))?;
-        Ok(Arc::new(
-            Rgba8Image::decode(
-                &blob,
-                self.limits.maximum_dimension,
-                self.limits.maximum_pixels,
-            )
-            .map_err(|error| Error::Resource(error.to_string()))?,
-        ))
+    /// Drops cached textures that `used` does not name.
+    fn evict_unused(&mut self, used: &HashSet<TextureKey>) {
+        self.textures.retain(|key, _| used.contains(key));
+        self.texture_bytes = self
+            .textures
+            .values()
+            .map(|cached| cached.image.pixels().len() as u64)
+            .sum();
     }
 
     fn upload_texture(&mut self, key: TextureKey, image: Arc<Rgba8Image>) -> Result<u64, Error> {
@@ -1077,6 +1077,24 @@ fn vertices(scene: &SceneBundle) -> Vec<Vertex> {
     output
 }
 
+/// Whether decoding `incoming` more bytes beside `cached` and `staged` ones
+/// would pass the CPU texture budget.
+fn decoding_needs_room(cached: u64, staged: u64, incoming: u64) -> bool {
+    cached.saturating_add(staged).saturating_add(incoming)
+        > DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES
+}
+
+fn load_blob(key: TextureKey, resources: &dyn ResourceProvider) -> Result<ResourceBlob, Error> {
+    resources
+        .load(ResourceRequest {
+            id: key.0,
+            revision: key.1,
+            digest: key.2,
+            maximum_bytes: DEFAULT_MAXIMUM_RESOURCE_BYTES,
+        })
+        .map_err(|error| Error::Resource(error.to_string()))
+}
+
 /// Bytes to allocate for a vertex stream of `required` bytes: the next power
 /// of two, capped at the device's largest buffer (kept 4-byte aligned).
 /// Streams larger than that buffer are rejected.
@@ -1207,6 +1225,17 @@ mod tests {
         assert!(!texture_cache_must_evict(1, BYTES - 1, 1, 1));
         assert!(texture_cache_must_evict(1, BYTES - 1, 1, 2));
         assert!(texture_cache_must_evict(1, u64::MAX, 1, 1));
+    }
+
+    #[test]
+    fn staged_decodes_share_the_budget_with_the_cache() {
+        use super::{DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES as BYTES, decoding_needs_room};
+        // A nearly full cache must make room before a disjoint scene decodes
+        // its own nearly full working set.
+        assert!(decoding_needs_room(BYTES - 1, 0, 16));
+        assert!(decoding_needs_room(BYTES / 2, BYTES / 2, 1));
+        assert!(!decoding_needs_room(BYTES / 2, BYTES / 4, BYTES / 4));
+        assert!(decoding_needs_room(u64::MAX, 1, 1));
     }
 
     #[test]

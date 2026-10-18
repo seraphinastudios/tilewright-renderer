@@ -16,9 +16,9 @@ use tilewright_render_api::{
     TargetKind, TargetLimits,
 };
 use tilewright_render_resources::{
-    DEFAULT_MAXIMUM_RESOURCE_BYTES, Error as ResourceError, ResourceBlob, ResourceProvider,
-    ResourceRequest, Rgba8Image, add_working_set_bytes, for_each_quad_pixel, glow_rgba8,
-    sample_quad_rgba8, shade_quad_rgba8,
+    DEFAULT_MAXIMUM_RESOURCE_BYTES, Error as ResourceError, MAXIMUM_SCENE_TEXTURES, ResourceBlob,
+    ResourceProvider, ResourceRequest, Rgba8Image, add_working_set_bytes, for_each_quad_pixel,
+    glow_rgba8, sample_quad_rgba8, shade_quad_rgba8,
 };
 use tilewright_scene::{
     Digest256, Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, Sprite,
@@ -172,9 +172,27 @@ impl Renderer for ReferenceRenderer {
             coverage: vec![0; pixel_count],
             metrics: RecoveryMetrics::default(),
         };
+        // The same per-scene texture bound as every other renderer, checked
+        // before any resource is loaded.
+        let distinct = request
+            .scene
+            .quads()
+            .iter()
+            .map(|quad| {
+                (
+                    quad.resource_id,
+                    quad.resource_revision,
+                    quad.resource_digest,
+                )
+            })
+            .collect::<std::collections::HashSet<_>>();
+        if distinct.len() > MAXIMUM_SCENE_TEXTURES {
+            return Err(RenderError::LimitExceeded);
+        }
         let mut uploaded_bytes = 0_u64;
         let mut resource_requests = 0_u64;
-        let mut images: HashMap<(ResourceId, u64, Digest256), Arc<Rgba8Image>> = HashMap::new();
+        let mut images: HashMap<(ResourceId, u64, Digest256), Arc<Rgba8Image>> =
+            HashMap::with_capacity(distinct.len());
         for quad in request.scene.quads() {
             let key = (
                 quad.resource_id,
@@ -513,6 +531,44 @@ mod tests {
         fn load(&self, _request: ResourceRequest) -> Result<ResourceBlob, ResourceError> {
             Err(self.0)
         }
+    }
+
+    #[test]
+    fn reference_rejects_scenes_naming_too_many_textures_before_loading() {
+        use tilewright_scene::{Layer, Quad, Sampling, SemanticId, Viewport};
+        let quads = (0..=4_096_u32).map(|index| Quad {
+            semantic_id: SemanticId(index + 1),
+            part: 0,
+            resource_id: ResourceId(u64::from(index) + 1),
+            resource_revision: 1,
+            resource_digest: Digest256([1; 32]),
+            positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            depth: 0,
+            painter_order: index,
+            color: [1.0; 4],
+            grayscale: 0.0,
+            glow: None,
+            pickable: true,
+            sampling: Sampling::Nearest,
+            layer: Layer::World,
+        });
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale_milli: 1_000,
+        };
+        let scene =
+            SceneBundle::from_quads(1, 0, viewport, [0.0; 4], quads, SceneLimits::default())
+                .unwrap();
+        // A provider that fails every load shows nothing was requested.
+        let result = ReferenceRenderer::new(offscreen_target(4, 4))
+            .unwrap()
+            .render(RenderRequest {
+                scene: &scene,
+                resources: Arc::new(FailingProvider(ResourceError::NotFound)),
+            });
+        assert_eq!(result.err(), Some(Error::LimitExceeded));
     }
 
     #[test]
