@@ -13,7 +13,8 @@ The output path must not exist; the write is atomic and never overwrites.
 ## Inputs and trust
 
 - Every texture is listed explicitly with a path relative to the view file
-  and the SHA-256 of the file's bytes. Paths are at most 4,096 bytes,
+  and the SHA-256 of the file's bytes as 64 hexadecimal digits in either case,
+  checked for form before the file is opened. Paths are at most 4,096 bytes,
   `/`-separated, with no empty, `.` or `..` components. On Unix the view's directory is opened once, and the
   view file and each texture are opened through that handle, one directory at
   a time without following symbolic links and without waiting on FIFOs, so a

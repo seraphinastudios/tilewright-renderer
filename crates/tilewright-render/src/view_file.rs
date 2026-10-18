@@ -729,9 +729,13 @@ pub(crate) fn load_within(
         let relative = field(object, "path", &context)?
             .as_str()
             .ok_or_else(|| format!("{context}: path must be a string"))?;
+        // Checked before anything is opened, and compared without copying.
         let expected = field(object, "sha256", &context)?
             .as_str()
-            .ok_or_else(|| format!("{context}: sha256 must be a string"))?;
+            .filter(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| format!("{context}: sha256 must be 64 hexadecimal digits"))?;
         let handle = directory
             .open_texture(relative)
             .map_err(|error| format!("{context}: {error}"))?;
@@ -746,7 +750,7 @@ pub(crate) fn load_within(
             format!("{error}; texture files together may hold at most {file_budget} bytes")
         })?;
         encoded_remaining -= u64::try_from(file.len()).unwrap_or(u64::MAX);
-        if hex(&Sha256::digest(&file)) != expected.to_ascii_lowercase() {
+        if !hex(&Sha256::digest(&file)).eq_ignore_ascii_case(expected) {
             return Err(format!("{context}: sha256 does not match {relative}"));
         }
         let (width, height, atx1) =

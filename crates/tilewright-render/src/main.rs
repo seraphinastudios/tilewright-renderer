@@ -625,6 +625,34 @@ mod tests {
     }
 
     #[test]
+    fn digests_are_checked_before_textures_are_opened() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let png = fs::read(directory.path().join("square.png")).unwrap();
+        let upper = view_file::hex(&Sha256::digest(&png)).to_ascii_uppercase();
+        // Hex digits in either case match.
+        set_textures(
+            &view,
+            &format!("[{{\"id\": 7, \"path\": \"square.png\", \"sha256\": \"{upper}\"}}]"),
+        );
+        assert!(view_file::load(&view).is_ok());
+        // Anything but 64 hex digits fails before the (missing) file is opened.
+        for digest in [
+            "0".repeat(65),
+            "g".repeat(64),
+            "0".repeat(63),
+            "x".repeat(4_096),
+        ] {
+            set_textures(
+                &view,
+                &format!("[{{\"id\": 7, \"path\": \"missing.png\", \"sha256\": \"{digest}\"}}]"),
+            );
+            let error = view_file::load(&view).err().unwrap();
+            assert!(error.contains("64 hexadecimal digits"), "{error}");
+        }
+    }
+
+    #[test]
     fn world_views_reject_mismatched_digests_and_unknown_keys() {
         let directory = tempfile::tempdir().unwrap();
         let view = write_view(directory.path(), Some(&"0".repeat(64)));
