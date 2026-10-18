@@ -340,21 +340,30 @@ impl ViewDirectory {
         })
     }
 
-    /// Reads the view file `name` in this directory without blocking.
+    /// Reads the view file `name` in this directory without blocking or
+    /// following a symbolic link.
     fn read_view(&self, path: &Path, name: &std::ffi::OsStr) -> Result<Vec<u8>> {
-        use rustix::fs::{Mode, OFlags, openat};
+        use rustix::{
+            fs::{Mode, OFlags, openat},
+            io::Errno,
+        };
         let file = openat(
             &self.0,
             name,
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(|error| {
-            format!(
-                "cannot read {}: {}",
-                path.display(),
-                std::io::Error::from(error)
-            )
+            // `O_NOFOLLOW` reports a symbolic link as ELOOP (EMLINK on BSDs).
+            if error == Errno::LOOP || error == Errno::MLINK {
+                format!("{} may not be a symbolic link", path.display())
+            } else {
+                format!(
+                    "cannot read {}: {}",
+                    path.display(),
+                    std::io::Error::from(error)
+                )
+            }
         })?;
         read_handle(
             fs::File::from(file),
@@ -839,6 +848,17 @@ pub(crate) fn load_within(
 mod tests {
     use super::ViewDirectory;
     use std::{fs, io::Read as _};
+
+    #[test]
+    fn view_files_are_not_followed_through_links() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("real.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink("real.json", directory.path().join("view.json")).unwrap();
+        let error = super::load(&directory.path().join("view.json"))
+            .err()
+            .unwrap_or_default();
+        assert!(error.contains("may not be a symbolic link"), "{error}");
+    }
 
     #[test]
     fn textures_resolve_beneath_the_directory_opened_first() {
