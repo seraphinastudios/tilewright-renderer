@@ -692,6 +692,30 @@ def upload(config, release_id, revision, manifest_sha256):
     return manifest
 
 
+def legacy_manifest(config, value, tag):
+    """A manifest this repository published under an earlier name.
+
+    GitHub keeps a repository's ID across renames and transfers, so a manifest
+    with the same ID, a different well-formed name, and a crate family disjoint
+    from every current and historical name belongs to an earlier identity.
+    Such a release cannot own any coordinate this policy manages and is
+    skipped. Anything else must pass `validate_manifest`.
+    """
+    if not isinstance(value, dict) or value.get('repository') == config['repository']:
+        return False
+    require(set(value) == {'schema_version', 'repository', 'repository_id', 'revision', 'source_tag', 'crates'}
+            and value['schema_version'] == 1 and value['repository_id'] == config['repository_id']
+            and isinstance(value['repository'], str)
+            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+', value['repository'])
+            and SHA.fullmatch(value['revision']) and value['source_tag'] == tag
+            and isinstance(value['crates'], list), 'legacy manifest identity')
+    managed = {row['name'] for row in config['crates']} | {row['name'] for row in config['historical']}
+    for row in value['crates']:
+        require(isinstance(row, dict) and isinstance(row.get('name'), str)
+                and row['name'] not in managed, 'legacy manifest overlaps managed crates')
+    return True
+
+
 def catalog(config):
     found = {}
     for page in range(1, 11):
@@ -703,7 +727,10 @@ def catalog(config):
             if not any(row['name'] == MANIFEST for row in release['assets']):
                 continue
             raw = asset_bytes(config, release, MANIFEST, MAX_JSON)
-            manifest = validate_manifest(config, json.loads(raw))
+            value = json.loads(raw)
+            if legacy_manifest(config, value, release['tag_name']):
+                continue
+            manifest = validate_manifest(config, value)
             require(manifest['source_tag'] == release['tag_name'], 'catalog source tag')
             if manifest['crates']:
                 require(release.get('immutable') is True, 'mutable automatic source release')

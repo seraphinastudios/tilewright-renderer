@@ -10,5 +10,6 @@
     "tilewright-render-sdl3": ["sdl3", "tilewright-render-api", "tilewright-render-wgpu", "wgpu"],
     "tilewright-render": ["tempfile", "tilewright-render-api", "tilewright-render-sdl3", "tilewright-render-testkit", "tilewright-render-wgpu"]
   },
-  "forbidden_source_patterns": []
+  "forbidden_source_patterns": ["github.com/seraphinastudios/game", "github.com/seraphinastudios/tilewright-editor", "github.com/seraphinastudios/tilewright-world"],
+  "forbidden_package_prefixes": ["tilewright-cli", "tilewright-editor", "tilewright-jsonc", "tilewright-pack", "tilewright-source"]
 }

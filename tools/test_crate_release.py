@@ -598,6 +598,44 @@ class BoundaryTests(unittest.TestCase):
 
 
 
+class CatalogTests(unittest.TestCase):
+    def releases(self):
+        return [{'id': 7, 'tag_name': 'v1.0.0', 'draft': False, 'prerelease': False,
+                 'immutable': True, 'assets': [{'name': R.MANIFEST}]}]
+
+    def run_catalog(self, manifest):
+        with patch.object(R, 'api', return_value=self.releases()), \
+                patch.object(R, 'asset_bytes', return_value=json.dumps(manifest).encode()):
+            return R.catalog(CONFIG)
+
+    def legacy(self, **changes):
+        manifest = {'schema_version': 1, 'repository': 'previous-owner/example', 'repository_id': '123',
+                    'revision': REVISION, 'source_tag': 'v1.0.0',
+                    'crates': [{'name': 'previous-example', 'version': '0.1.0'}]}
+        manifest.update(changes)
+        return manifest
+
+    def test_earlier_identity_of_the_same_repository_is_skipped(self):
+        self.assertEqual(self.run_catalog(self.legacy()), {})
+        self.assertEqual(self.run_catalog(self.legacy(crates=[])), {})
+
+    def test_foreign_or_overlapping_or_malformed_legacy_manifests_fail(self):
+        for manifest in (self.legacy(repository_id='999'),
+                         self.legacy(crates=[{'name': 'example', 'version': '0.1.0'}]),
+                         self.legacy(source_tag='v9.9.9'),
+                         self.legacy(revision='not-a-sha'),
+                         dict(self.legacy(), extra=True)):
+            with self.subTest(manifest=manifest), self.assertRaises(ValueError):
+                self.run_catalog(manifest)
+
+    def test_historical_names_are_managed_too(self):
+        config = dict(CONFIG, historical=[{'name': 'previous-example'}])
+        with patch.object(R, 'api', return_value=self.releases()), \
+                patch.object(R, 'asset_bytes', return_value=json.dumps(self.legacy()).encode()), \
+                self.assertRaises(ValueError):
+            R.catalog(config)
+
+
 class StablePackageTests(unittest.TestCase):
     def old_fixture(self):
         old_files = files()
