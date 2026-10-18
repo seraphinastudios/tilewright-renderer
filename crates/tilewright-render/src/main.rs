@@ -538,6 +538,43 @@ mod tests {
     }
 
     #[test]
+    fn object_and_frame_counts_are_bounded_before_collection() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let original = fs::read_to_string(&view).unwrap();
+        let animated = |frames: usize| {
+            let list = vec!["7"; frames].join(",");
+            format!(
+                "{{\"id\": 1, \"tile\": [0, 0], \"rank\": 0, \"anchor\": \"ground\", \"animation\": {{\"frames\": [{list}]}}}}"
+            )
+        };
+        let objects = |list: &[String]| {
+            let start = original.find("\"objects\"").unwrap();
+            format!(
+                "{}\"objects\": [{}]\n}}",
+                &original[..start],
+                list.join(", ")
+            )
+        };
+        fs::write(&view, objects(&[animated(1_024)])).unwrap();
+        assert!(view_file::load(&view).is_ok());
+        fs::write(&view, objects(&[animated(1_025)])).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("at most 1024 frames"), "{error}");
+        let many: Vec<String> = (0..257).map(|_| animated(1_024)).collect();
+        fs::write(&view, objects(&many)).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(
+            error.contains("objects[256]") && error.contains("262144 frames together"),
+            "{error}"
+        );
+        let crowd: Vec<String> = (0..131_073).map(|_| "{\"id\": 1}".to_owned()).collect();
+        fs::write(&view, objects(&crowd)).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("at most 131072 objects"), "{error}");
+    }
+
+    #[test]
     fn bounded_reads_limit_the_bytes_actually_read() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ten.bin");

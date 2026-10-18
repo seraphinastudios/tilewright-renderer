@@ -25,11 +25,12 @@ The output path must not exist; the write is atomic and never overwrites.
   silently ignored.
 - View files are capped at 64 MiB, and texture files at 16 MiB each and
   256 MiB together; reads stop at the cap even if a file grows while it is
-  read. A view lists at most 4,096
-  textures and 131,072 draws: one per object plus one per double-drawn repeat,
-  counted before off-screen objects are culled. Each image is at most 8,192 px
-  per side and decodes to at most 16 MiB; all textures together decode to at
-  most 256 MiB. Sizes are checked from the PNG header before decoding. The GPU
+  read. A view lists at most 4,096 textures, 131,072 objects, 1,024 frames per
+  animation and 262,144 animation frames in total, and 131,072 draws: one per
+  object plus one per double-drawn repeat, counted before off-screen objects
+  are culled. Counts are checked before their entries are read. Each image is
+  at most 8,192 px per side and decodes to at most 16 MiB; all textures
+  together decode to at most 256 MiB. Sizes are checked from the PNG header before decoding. The GPU
   device may impose a lower bound, which is reported as an error. The compiled
   scene must also fit the default scene limits, including 268,435,456 raster
   samples of overdraw and glow work.

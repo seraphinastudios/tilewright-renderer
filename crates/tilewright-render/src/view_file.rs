@@ -26,6 +26,12 @@ const MAXIMUM_TEXTURE_BYTES: u64 = 16 * 1024 * 1024;
 const MAXIMUM_TEXTURE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 /// Most textures one view may list, matching the renderer's texture cache.
 const MAXIMUM_TEXTURES: usize = 4_096;
+/// Most objects one view may list, matching the default scene's draw budget.
+const MAXIMUM_OBJECTS: usize = 131_072;
+/// Most frames one animation may list.
+const MAXIMUM_ANIMATION_FRAMES: usize = 1_024;
+/// Most frame references all of a view's animations may list together.
+const MAXIMUM_FRAME_REFERENCES: usize = 262_144;
 
 pub struct LoadedView {
     pub view: WorldView,
@@ -555,13 +561,16 @@ pub(crate) fn load_within(
             .ok_or_else(|| format!("{context}: unknown texture {id}"))
     };
 
-    let mut objects = Vec::new();
-    for (index, entry) in field(root, "objects", "view")?
+    let entries = field(root, "objects", "view")?
         .as_array()
-        .ok_or("objects must be an array")?
-        .iter()
-        .enumerate()
-    {
+        .ok_or("objects must be an array")?;
+    // Counts are bounded before anything is collected from them.
+    if entries.len() > MAXIMUM_OBJECTS {
+        return Err(format!("a view lists at most {MAXIMUM_OBJECTS} objects"));
+    }
+    let mut frame_references = 0_usize;
+    let mut objects = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
         let context = format!("objects[{index}]");
         let object = as_object(entry, &context)?;
         reject_unknown(
@@ -595,10 +604,22 @@ pub(crate) fn load_within(
                 &["frames", "frame_millis", "phase_millis"],
                 &context,
             )?;
+            let frames = field(animation_object, "frames", &context)?
+                .as_array()
+                .ok_or_else(|| format!("{context}: frames must be an array"))?;
+            frame_references = frame_references.saturating_add(frames.len());
+            if frames.len() > MAXIMUM_ANIMATION_FRAMES {
+                return Err(format!(
+                    "{context}: an animation lists at most {MAXIMUM_ANIMATION_FRAMES} frames"
+                ));
+            }
+            if frame_references > MAXIMUM_FRAME_REFERENCES {
+                return Err(format!(
+                    "{context}: a view's animations list at most {MAXIMUM_FRAME_REFERENCES} frames together"
+                ));
+            }
             Animation {
-                frames: field(animation_object, "frames", &context)?
-                    .as_array()
-                    .ok_or_else(|| format!("{context}: frames must be an array"))?
+                frames: frames
                     .iter()
                     .map(|frame| texture(frame, &context))
                     .collect::<Result<Vec<_>>>()?,
