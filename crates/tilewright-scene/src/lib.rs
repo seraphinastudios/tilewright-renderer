@@ -185,9 +185,10 @@ pub struct SceneLimits {
     pub maximum_dimension: u32,
     pub maximum_pixels: u64,
     /// Most texture samples drawing the scene may take: the sum over quads of
-    /// each quad's viewport-clipped bounding box in pixels, times
-    /// [`GLOW_SAMPLES_PER_PIXEL`] for glow quads with a nonzero radius. It
-    /// bounds overdraw and halo work on every backend.
+    /// the viewport-clipped pixels each scans (the bounding box of an
+    /// axis-aligned quad, or of each of the other quads' two triangles),
+    /// times [`GLOW_SAMPLES_PER_PIXEL`] for glow quads with a nonzero radius.
+    /// It bounds overdraw and halo work on every backend.
     pub maximum_raster_samples: u64,
 }
 
@@ -393,7 +394,11 @@ fn validate_quad(quad: &Quad, maximum_dimension: u32) -> Result<(), Error> {
 }
 
 fn bounds(quad: &Quad) -> (f32, f32, f32, f32) {
-    quad.positions.iter().fold(
+    point_bounds(&quad.positions)
+}
+
+fn point_bounds(points: &[[f32; 2]]) -> (f32, f32, f32, f32) {
+    points.iter().fold(
         (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
         |(min_x, max_x, min_y, max_y), point| {
             (
@@ -406,25 +411,35 @@ fn bounds(quad: &Quad) -> (f32, f32, f32, f32) {
     )
 }
 
-/// Texture samples a validated quad can take: its bounding box clipped to
-/// the viewport in whole pixels, times its samples per pixel.
+/// Texture samples a validated quad can take, counted the way rasterisers
+/// scan it: an axis-aligned quad as one rectangle, any other as the
+/// triangles (0, 1, 2) and (0, 2, 3), each over its own bounding box, so a
+/// concave or self-intersecting quad pays for both. Boxes are clipped to the
+/// viewport in whole pixels and multiplied by the samples per pixel.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn raster_samples(quad: &Quad, viewport: Viewport) -> u64 {
-    let (min_x, max_x, min_y, max_y) = bounds(quad);
     let span = |low: f32, high: f32, size: u32| {
         let low = f64::from(low).floor().max(0.0);
         let high = f64::from(high).ceil().min(f64::from(size));
         if high > low { (high - low) as u64 } else { 0 }
     };
+    // Custom limits may admit viewports whose products overflow `u64`;
+    // saturating keeps such a scene over any budget.
+    let pixels = |points: &[[f32; 2]]| {
+        let (min_x, max_x, min_y, max_y) = point_bounds(points);
+        span(min_x, max_x, viewport.width).saturating_mul(span(min_y, max_y, viewport.height))
+    };
+    let [first, second, third, fourth] = quad.positions;
+    let covered = if quad.aligned_rect().is_some() {
+        pixels(&quad.positions)
+    } else {
+        pixels(&[first, second, third]).saturating_add(pixels(&[first, third, fourth]))
+    };
     let per_pixel = match quad.glow {
         Some(glow) if glow.radius_uv.iter().any(|radius| *radius > 0.0) => GLOW_SAMPLES_PER_PIXEL,
         _ => 1,
     };
-    // Custom limits may admit viewports whose products overflow `u64`;
-    // saturating keeps such a scene over any budget.
-    span(min_x, max_x, viewport.width)
-        .saturating_mul(span(min_y, max_y, viewport.height))
-        .saturating_mul(per_pixel)
+    covered.saturating_mul(per_pixel)
 }
 
 fn valid_color(color: [f32; 4]) -> bool {
@@ -634,6 +649,16 @@ mod tests {
             Err(super::Error::LimitExceeded)
         );
         assert!(render(halo(0.0), 64).is_ok());
+        // A self-intersecting quad's triangles overlap; both are charged.
+        let bow_tie = Quad {
+            positions: [[0.0, 0.0], [64.0, 64.0], [64.0, 0.0], [0.0, 64.0]],
+            ..full(1)
+        };
+        assert!(render(bow_tie, 2 * 64 * 64).is_ok());
+        assert_eq!(
+            render(bow_tie, 2 * 64 * 64 - 1),
+            Err(super::Error::LimitExceeded)
+        );
         // Permissive custom limits must not let the count overflow.
         let huge = Viewport {
             width: u32::MAX,

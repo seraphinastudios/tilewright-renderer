@@ -26,8 +26,9 @@ their state into these contracts through adapters in their own repositories.
 
 Default limits are 131,072 quads, 8,192 pixels on either axis, 16,777,216 total
 pixels, 8× scale, 268,435,456 raster samples, and 16 MiB per resource request.
-Raster samples bound overdraw: each quad counts its viewport-clipped bounding
-box in pixels, 33 times over for a glow quad with a nonzero radius. The GPU device is created
+Raster samples bound overdraw: an axis-aligned quad counts its viewport-clipped
+bounding box in pixels and any other quad the boxes of both its triangles, 33
+times over for a glow quad with a nonzero radius. The GPU device is created
 with downlevel limits except for the 2D texture dimension, which follows the
 adapter up to the same 8,192 bound; targets and textures beyond the device's
 bound are rejected with a typed error. All float inputs must be finite; color
