@@ -534,41 +534,62 @@ mod tests {
     }
 
     #[test]
-    fn reference_rejects_scenes_naming_too_many_textures_before_loading() {
+    fn scenes_naming_too_many_textures_never_reach_a_renderer() {
         use tilewright_scene::{Layer, Quad, Sampling, SemanticId, Viewport};
-        let quads = (0..=4_096_u32).map(|index| Quad {
-            semantic_id: SemanticId(index + 1),
-            part: 0,
-            resource_id: ResourceId(u64::from(index) + 1),
-            resource_revision: 1,
-            resource_digest: Digest256([1; 32]),
-            positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-            depth: 0,
-            painter_order: index,
-            color: [1.0; 4],
-            grayscale: 0.0,
-            glow: None,
-            pickable: true,
-            sampling: Sampling::Nearest,
-            layer: Layer::World,
-        });
+        let quads = |count: u32| {
+            (0..count).map(|index| Quad {
+                semantic_id: SemanticId(index + 1),
+                part: 0,
+                resource_id: ResourceId(u64::from(index) + 1),
+                resource_revision: 1,
+                resource_digest: Digest256([1; 32]),
+                positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                depth: 0,
+                painter_order: index,
+                color: [1.0; 4],
+                grayscale: 0.0,
+                glow: None,
+                pickable: true,
+                sampling: Sampling::Nearest,
+                layer: Layer::World,
+            })
+        };
         let viewport = Viewport {
             width: 4,
             height: 4,
             scale_milli: 1_000,
         };
-        let scene =
-            SceneBundle::from_quads(1, 0, viewport, [0.0; 4], quads, SceneLimits::default())
-                .unwrap();
-        // A provider that fails every load shows nothing was requested.
+        // The scene contract itself enforces the bound the renderers share.
+        assert_eq!(
+            SceneBundle::from_quads(
+                1,
+                0,
+                viewport,
+                [0.0; 4],
+                quads(4_097),
+                SceneLimits::default()
+            ),
+            Err(tilewright_scene::Error::LimitExceeded)
+        );
+        // At the bound, the reference requests each texture once (here the
+        // provider refuses the first).
+        let scene = SceneBundle::from_quads(
+            1,
+            0,
+            viewport,
+            [0.0; 4],
+            quads(4_096),
+            SceneLimits::default(),
+        )
+        .unwrap();
         let result = ReferenceRenderer::new(offscreen_target(4, 4))
             .unwrap()
             .render(RenderRequest {
                 scene: &scene,
                 resources: Arc::new(FailingProvider(ResourceError::NotFound)),
             });
-        assert_eq!(result.err(), Some(Error::LimitExceeded));
+        assert!(matches!(result, Err(Error::Resource(_))));
     }
 
     #[test]

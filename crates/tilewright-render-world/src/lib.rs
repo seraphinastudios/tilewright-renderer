@@ -11,8 +11,8 @@
 
 use std::{collections::HashSet, fmt};
 use tilewright_scene::{
-    Digest256, Glow, Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId,
-    Viewport,
+    Digest256, Glow, Layer, MAXIMUM_SCENE_TEXTURES, Quad, ResourceId, Sampling, SceneBundle,
+    SceneLimits, SemanticId, Viewport,
 };
 
 /// Most frames one animation may list.
@@ -377,7 +377,8 @@ impl std::error::Error for Error {}
 /// tile emits 16 and a glowing object 2), must fit
 /// [`SceneLimits::maximum_quads`]. An animation lists at most
 /// [`MAXIMUM_ANIMATION_FRAMES`] frames, and a view's animations at most twice
-/// [`SceneLimits::maximum_quads`] together.
+/// [`SceneLimits::maximum_quads`] together, naming at most
+/// [`MAXIMUM_SCENE_TEXTURES`] distinct textures across every frame.
 pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Error> {
     // Bound ordering and frame work by the scene budget before allocating or
     // traversing anything.
@@ -397,17 +398,7 @@ pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Err
         .ok_or(Error::Scene(tilewright_scene::Error::LimitExceeded))?;
     validate(view, limits)?;
     let projector = Projector::new(view, limits);
-    // Every quad each draw will emit is counted before culling, from the
-    // view's own geometry, so the budget does not depend on the camera.
-    view.objects
-        .iter()
-        .try_fold(0_usize, |total, object| {
-            let repeats = 1 + usize::from(object.double_draw);
-            total
-                .checked_add(projector.quads_per_draw(view, object) * repeats)
-                .filter(|total| *total <= limits.maximum_quads)
-        })
-        .ok_or(Error::Scene(tilewright_scene::Error::LimitExceeded))?;
+    check_emission(view, &projector, limits)?;
     let mut entries: Vec<Entry<'_>> = Vec::with_capacity(draws);
     for (index, object) in view.objects.iter().enumerate() {
         let sequence = u32::try_from(index).map_err(|_| Error::InvalidValue)?;
@@ -475,6 +466,40 @@ pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Err
         limits,
     )
     .map_err(Error::Scene)
+}
+
+/// Checks, before culling, that every quad the view's draws will emit fits
+/// the quad budget and that all its frames name few enough textures.
+fn check_emission(
+    view: &WorldView,
+    projector: &Projector,
+    limits: SceneLimits,
+) -> Result<(), Error> {
+    // Every quad each draw will emit is counted before culling, from the
+    // view's own geometry, so the budget does not depend on the camera.
+    view.objects
+        .iter()
+        .try_fold(0_usize, |total, object| {
+            let repeats = 1 + usize::from(object.double_draw);
+            total
+                .checked_add(projector.quads_per_draw(view, object) * repeats)
+                .filter(|total| *total <= limits.maximum_quads)
+        })
+        .ok_or(Error::Scene(tilewright_scene::Error::LimitExceeded))?;
+    // Every texture any frame may show counts, so which ones survive culling
+    // or the clock cannot change whether the scene fits every renderer.
+    let mut textures = HashSet::new();
+    for frame in view
+        .objects
+        .iter()
+        .flat_map(|object| &object.animation.frames)
+    {
+        textures.insert((frame.id, frame.revision, frame.digest));
+        if textures.len() > MAXIMUM_SCENE_TEXTURES {
+            return Err(Error::Scene(tilewright_scene::Error::LimitExceeded));
+        }
+    }
+    Ok(())
 }
 
 struct Entry<'a> {

@@ -34,7 +34,7 @@ adapter up to the same 8,192 bound; targets and textures beyond the device's
 bound are rejected with a typed error. All float inputs must be finite; color
 channels are within 0–1; zero identities/revisions and all-zero digests are
 rejected. Each (semantic ID, part) pair is unique, so one object may own several
-quads. Sorting is stable by layer, depth, painter order, semantic ID, then part.
+quads, and a scene names at most 4,096 distinct textures. Sorting is stable by layer, depth, painter order, semantic ID, then part.
 
 ## Quads, rasterisation and effects
 
@@ -95,16 +95,16 @@ knows nothing about any game or content format.
   emit (16 for a bent isometric tile, 2 for a glowing object) is counted
   against the scene's quad budget before anything is ordered or culled,
   animations list at most 1,024 frames each and twice that budget together,
-  and height fields hold at most 4,194,304 cells. Every object and every
-  animation frame is validated before culling or frame selection, so a view's
-  validity never depends on the camera or clock: semantic IDs are nonzero and
-  unique, frames carry full resource identities within the scene's dimension
-  limit, every quad an object produces (after scale, rotation, glow padding
-  and terrain bending) spans at most that limit less one pixel, and a glow
-  radius stays within every frame. Ground objects reject the offset, `z`,
-  scale, rotation and glow they cannot apply, isometric ground covers one
-  tile, and no ground footprint covers a tile the height field marks as having
-  none.
+  naming at most 4,096 distinct textures across every frame, and height fields
+  hold at most 4,194,304 cells. Every object and every animation frame is
+  validated before culling or frame selection, so a view's validity never
+  depends on the camera or clock: semantic IDs are nonzero and unique, frames
+  carry full resource identities within the scene's dimension limit, every
+  quad an object produces (after scale, rotation, glow padding and terrain
+  bending) spans at most that limit less one pixel, and a glow radius stays
+  within every frame. Ground objects reject the offset, `z`, scale, rotation
+  and glow they cannot apply, isometric ground covers one tile, and no ground
+  footprint covers a tile the height field marks as having none.
 
 Lighting and weather are not part of this version.
 
@@ -114,21 +114,22 @@ CPU work is O(pixels + quads), GPU vertex generation is O(quads), and GPU
 readback is O(pixels). A completed frame owns 11 bytes per pixel across RGBA,
 semantic, depth, and coverage planes. The GPU path additionally owns a color
 target, private depth/stencil target, at most 255 bytes of readback row padding
-per row, and 432 bytes of transient vertices per quad (six 72-byte vertices). Checked arithmetic
-precedes every size-derived allocation. Offscreen targets/readback buffers are
-reused until resize; immutable textures are reused by ID/revision/digest with a
-hard 4,096-entry cache. A scene's missing textures are decoded before the cache
-changes; cached and staged textures share the 256 MiB CPU budget, and textures
-the scene does not use are evicted before a decode or admission would exceed it
-or the entry bound, so the cache never holds more than one bounded working set.
-Every renderer, the CPU reference included, rejects a scene naming more than
-4,096 distinct textures before loading any. Retained texture pixels and each
-scene's distinct texture working set are also capped at 256 MiB, and prepared
-quads share decoded immutable pixels instead of cloning them. The shared vertex
-buffer grows geometrically to the next power of two, capped at the device's
-largest buffer (larger streams are rejected before they are generated), and is
-reused by offscreen and surface presentation until a larger scene is submitted;
-per-texture nearest/linear bind groups are created only on cache misses.
+per row, and 432 bytes of transient vertices per quad (six 72-byte vertices).
+Checked arithmetic precedes every size-derived allocation. Offscreen
+targets/readback buffers are reused until resize; immutable textures are reused
+by ID/revision/digest with a hard 4,096-entry cache. A scene's missing textures
+are decoded before the cache changes; cached and staged textures share the 256
+MiB CPU budget, and textures the scene does not use are evicted before a decode
+or admission would exceed it or the entry bound, so the cache never holds more
+than one bounded working set. Scene validation and every renderer, the CPU
+reference included, reject a scene naming more than 4,096 distinct textures
+before loading any. Retained texture pixels and each scene's distinct texture
+working set are also capped at 256 MiB, and prepared quads share decoded
+immutable pixels instead of cloning them. The shared vertex buffer grows
+geometrically to the next power of two, capped at the device's largest buffer
+(larger streams are rejected before they are generated), and is reused by
+offscreen and surface presentation until a larger scene is submitted; per-
+texture nearest/linear bind groups are created only on cache misses.
 
 No public dependency or type points to a client, editor, protocol, server, or
 game implementation. `tools/check-architecture.sh` validates exact direct

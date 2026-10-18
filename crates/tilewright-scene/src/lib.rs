@@ -19,6 +19,10 @@ pub const SCENE_BUNDLE_VERSION: u32 = 2;
 /// ground meshes); those samples are transparent.
 pub const MAXIMUM_UV_MAGNITUDE: f32 = 16.0;
 
+/// Most distinct texture identities (ID, revision and digest) one scene may
+/// name. Every renderer can hold this many at once.
+pub const MAXIMUM_SCENE_TEXTURES: usize = 4_096;
+
 /// Texture samples a glow quad with a nonzero radius takes per covered
 /// pixel: its centre plus 16 directions at full and half radius. Other quads,
 /// including zero-radius glows, take one.
@@ -252,7 +256,8 @@ impl SceneBundle {
     ///
     /// # Errors
     /// Returns [`Error::InvalidValue`], [`Error::LimitExceeded`] (also when
-    /// the quads need more than [`SceneLimits::maximum_raster_samples`]) or
+    /// the quads need more than [`SceneLimits::maximum_raster_samples`] or
+    /// name more than [`MAXIMUM_SCENE_TEXTURES`] distinct textures) or
     /// [`Error::DuplicateSemanticId`] for a repeated identity and part.
     pub fn from_quads(
         revision: u64,
@@ -293,6 +298,17 @@ impl SceneBundle {
             .any(|quad| !identities.insert((quad.semantic_id, quad.part)))
         {
             return Err(Error::DuplicateSemanticId);
+        }
+        let mut textures = HashSet::new();
+        for quad in &values {
+            textures.insert((
+                quad.resource_id,
+                quad.resource_revision,
+                quad.resource_digest,
+            ));
+            if textures.len() > MAXIMUM_SCENE_TEXTURES {
+                return Err(Error::LimitExceeded);
+            }
         }
         values.sort_by_key(|quad| {
             (
@@ -532,6 +548,25 @@ mod tests {
                 SceneLimits::default()
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn scenes_name_at_most_the_shared_texture_count() {
+        let named = |count: u64| {
+            (0..count).map(|index| {
+                Quad::from(Sprite {
+                    resource_id: ResourceId(index + 1),
+                    ..sprite(u32::try_from(index).unwrap(), 0)
+                })
+            })
+        };
+        let limits = SceneLimits::default();
+        let count = super::MAXIMUM_SCENE_TEXTURES as u64;
+        assert!(SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], named(count), limits).is_ok());
+        assert_eq!(
+            SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], named(count + 1), limits),
+            Err(super::Error::LimitExceeded)
         );
     }
 

@@ -965,3 +965,42 @@ fn animation_phase_holds_across_the_whole_clock() {
     view.clock_millis = u64::MAX;
     assert_eq!(quads_of(&view, 1)[0].resource_id, ResourceId(21));
 }
+
+#[test]
+fn texture_identities_are_bounded_across_every_frame() {
+    // Off-screen objects and unselected frames count toward the bound.
+    let named = |count: u64| {
+        let mut object = WorldObject::new(
+            SemanticId(1),
+            [40, 40],
+            3,
+            Anchor::Standing,
+            texture(1, 16, 16),
+        );
+        object.animation.frames = (1..=count).map(|id| texture(id, 16, 16)).collect();
+        object.animation.frames.truncate(1_024);
+        object
+    };
+    let objects = |total: u64| -> Vec<WorldObject> {
+        (0..total.div_ceil(1_024))
+            .map(|index| {
+                let mut object = named(1_024);
+                object.semantic_id = SemanticId(u32::try_from(index).unwrap() + 1);
+                for (offset, frame) in object.animation.frames.iter_mut().enumerate() {
+                    frame.id = ResourceId(index * 1_024 + offset as u64 + 1);
+                }
+                object
+                    .animation
+                    .frames
+                    .truncate(usize::try_from((total - index * 1_024).min(1_024)).unwrap());
+                object
+            })
+            .collect()
+    };
+    let view = |total| iso_view(objects(total), HeightField::empty());
+    assert!(compile(&view(4_096), SceneLimits::default()).is_ok());
+    assert_eq!(
+        compile(&view(4_097), SceneLimits::default()),
+        Err(Error::Scene(tilewright_scene::Error::LimitExceeded))
+    );
+}

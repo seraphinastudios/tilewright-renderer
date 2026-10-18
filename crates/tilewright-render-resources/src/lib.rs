@@ -10,7 +10,7 @@ use tilewright_scene::{Digest256, Glow, Layer, Quad, ResourceId, Sampling};
 pub const DEFAULT_MAXIMUM_RESOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES: u64 = 256 * 1024 * 1024;
 /// Most distinct texture identities one scene may name, on every renderer.
-pub const MAXIMUM_SCENE_TEXTURES: usize = 4_096;
+pub use tilewright_scene::MAXIMUM_SCENE_TEXTURES;
 
 /// Adds one distinct decoded texture to the default scene working-set budget.
 ///
