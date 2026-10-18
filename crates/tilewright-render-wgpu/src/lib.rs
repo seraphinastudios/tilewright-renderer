@@ -1084,7 +1084,9 @@ fn semantic_planes(
     let mut depth = vec![i16::MIN; pixels];
     let mut coverage = vec![0; pixels];
     for (quad, prepared) in scene.quads().iter().zip(prepared) {
-        if !quad.pickable || quad.glow.is_some() {
+        // Scene validation rejects pickable glow quads, so `pickable` alone
+        // selects the quads that mark these planes, as in the reference.
+        if !quad.pickable {
             continue;
         }
         mark_quad(

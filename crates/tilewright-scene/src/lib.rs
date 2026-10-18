@@ -62,7 +62,8 @@ pub struct Sprite {
 }
 
 /// A coloured halo around the texture's silhouette. A quad with a glow draws
-/// only the halo; its texture supplies the silhouette.
+/// only the halo; its texture supplies the silhouette. Halos are never
+/// pickable, so a glow quad must have `pickable: false`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glow {
     /// Halo colour; alpha is the halo strength.
@@ -93,6 +94,7 @@ pub struct Quad {
     pub grayscale: f32,
     pub glow: Option<Glow>,
     /// Whether this quad writes the semantic, depth and coverage planes.
+    /// Glow quads must not be pickable.
     pub pickable: bool,
     pub sampling: Sampling,
     pub layer: Layer,
@@ -341,7 +343,8 @@ fn validate_quad(quad: &Quad, maximum_dimension: u32) -> Result<(), Error> {
             .all(|value| value.is_finite() && value.abs() <= MAXIMUM_UV_MAGNITUDE)
     };
     let glow_ok = quad.glow.is_none_or(|glow| {
-        valid_color(glow.color)
+        !quad.pickable
+            && valid_color(glow.color)
             && glow
                 .radius_uv
                 .iter()
@@ -509,6 +512,15 @@ mod tests {
                 positions: [[f32::NAN, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 ..base
             },
+            // Halos are never pickable on any backend.
+            Quad {
+                glow: Some(Glow {
+                    color: [1.0; 4],
+                    radius_uv: [0.1, 0.1],
+                }),
+                pickable: true,
+                ..base
+            },
         ];
         for quad in cases {
             assert_eq!(
@@ -516,6 +528,18 @@ mod tests {
                 Err(super::Error::InvalidValue)
             );
         }
+        let halo = Quad {
+            glow: Some(Glow {
+                color: [1.0; 4],
+                radius_uv: [0.1, 0.1],
+            }),
+            pickable: false,
+            ..base
+        };
+        assert!(
+            SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], [halo], SceneLimits::default())
+                .is_ok()
+        );
     }
 
     #[test]

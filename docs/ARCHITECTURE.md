@@ -50,8 +50,8 @@ rules start from identical fixed-point corners.
 
 Texture lookups outside 0–1 are transparent. A glow quad extends its art by
 the glow radius and draws a halo from 16 fixed sample directions around the
-art's alpha; it is never pickable. Greyscale uses Rec. 601 luma weights before
-the legacy effect swap.
+art's alpha; it is never pickable, and scene validation rejects a pickable
+glow quad. Greyscale uses Rec. 601 luma weights before the legacy effect swap.
 
 ## World compiler
 
