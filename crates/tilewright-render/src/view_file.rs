@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
+    io::Read as _,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -106,16 +107,35 @@ fn reject_unknown(object: &Map<String, Value>, allowed: &[&str], context: &str) 
     }
 }
 
-fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
-    let metadata =
-        fs::metadata(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    if !metadata.is_file() || metadata.len() > maximum {
-        return Err(format!(
+/// Reads a regular file of at most `maximum` bytes. The size and type are
+/// checked on the open handle and the read itself stops after `maximum + 1`
+/// bytes, so the limit holds even if the file is replaced or grows while it
+/// is read.
+pub(crate) fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+    let failure = |error: std::io::Error| format!("cannot read {}: {error}", path.display());
+    let rejected = || {
+        format!(
             "{} is not a regular file within {maximum} bytes",
             path.display()
-        ));
+        )
+    };
+    // Checking the path first avoids opening FIFOs or devices, which may block.
+    if !fs::metadata(path).map_err(failure)?.is_file() {
+        return Err(rejected());
     }
-    fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+    let file = fs::File::open(path).map_err(failure)?;
+    let metadata = file.metadata().map_err(failure)?;
+    if !metadata.is_file() || metadata.len() > maximum {
+        return Err(rejected());
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(failure)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+        return Err(rejected());
+    }
+    Ok(bytes)
 }
 
 pub fn hex(bytes: &[u8]) -> String {

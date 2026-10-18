@@ -403,6 +403,24 @@ mod tests {
     }
 
     #[test]
+    fn bounded_reads_limit_the_bytes_actually_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ten.bin");
+        fs::write(&path, [7; 10]).unwrap();
+        assert_eq!(view_file::read_bounded(&path, 10).unwrap(), [7; 10]);
+        assert!(view_file::read_bounded(&path, 9).is_err());
+        assert!(view_file::read_bounded(directory.path(), 10).is_err());
+        // Procfs reports a zero size for files that hold more, like a file
+        // that grows after its size is checked; the read must still stop.
+        #[cfg(target_os = "linux")]
+        {
+            let error =
+                view_file::read_bounded(std::path::Path::new("/proc/self/status"), 16).unwrap_err();
+            assert!(error.contains("within 16 bytes"), "{error}");
+        }
+    }
+
+    #[test]
     fn output_persistence_is_atomic_and_no_clobber() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("frame.rgba");
