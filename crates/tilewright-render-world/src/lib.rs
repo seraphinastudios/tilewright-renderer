@@ -141,6 +141,11 @@ pub struct WorldObject {
     pub glow: Option<GlowEffect>,
     /// Draw the object a second time after the next diagonal (isometric) or
     /// row (top-down), so tall art is not cut by later neighbours.
+    ///
+    /// Double draw is for opaque art. The repeat composites over the first
+    /// copy, so [`compile`] rejects it together with `alpha < 1` or a glow.
+    /// Translucent texels inside double-drawn art still composite twice by
+    /// design.
     pub double_draw: bool,
     pub pickable: bool,
 }
@@ -485,6 +490,8 @@ fn validate(view: &WorldView, limits: SceneLimits) -> Result<(), Error> {
                         })
                 })
                 && ground_ok(object)
+                // The repeat would composite translucency over the first copy.
+                && (!object.double_draw || (object.alpha >= 1.0 && object.glow.is_none()))
         });
     if !valid {
         return Err(Error::InvalidValue);

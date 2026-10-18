@@ -493,6 +493,25 @@ mod tests {
     }
 
     #[test]
+    fn world_views_reject_translucent_double_draws() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let text = fs::read_to_string(&view).unwrap();
+        let standing = text.replace(
+            "\"anchor\": \"ground\", \"texture\": 7}",
+            "\"anchor\": \"standing\", \"texture\": 7, \"double_draw\": true, \"alpha\": 0.5}",
+        );
+        assert_ne!(standing, text);
+        fs::write(&view, &standing).unwrap();
+        let output = directory.path().join("frame.png");
+        let error = render_world(&view, &output, true).unwrap_err();
+        assert!(error.contains("invalid world view"), "{error}");
+        assert!(!output.exists());
+        fs::write(&view, standing.replace(", \"alpha\": 0.5", "")).unwrap();
+        render_world(&view, &output, true).unwrap();
+    }
+
+    #[test]
     fn world_views_reject_mismatched_digests_and_unknown_keys() {
         let directory = tempfile::tempdir().unwrap();
         let view = write_view(directory.path(), Some(&"0".repeat(64)));

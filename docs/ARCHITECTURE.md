@@ -81,7 +81,10 @@ knows nothing about any game or content format.
 - **Draw order.** Isometric scenes order by diagonal (x + y), then layer rank,
   sub-layer, and column. Top-down scenes draw ground ranks first, then order
   by row. Double-drawn objects repeat after the next diagonal or row so tall art
-  is not cut by later neighbours; the repeat is not pickable.
+  is not cut by later neighbours; the repeat is not pickable. Double draw is
+  for opaque art: the repeat composites over the first copy, so it is
+  rejected together with alpha below 1 or a glow, and translucent texels
+  inside double-drawn art still composite twice by design.
 - **Effects.** Offset, scale, rotation, alpha, tint, greyscale, a pulsing glow,
   and clocked animation frames are compiled into the quad fields.
 - **Pixel grid.** Axis-aligned art snaps its top-left corner to whole pixels,

@@ -743,3 +743,40 @@ fn bent_ground_spans_do_not_depend_on_position() {
         assert!(compile(&view, limits).is_ok(), "{tile:?}");
     }
 }
+
+#[test]
+fn double_draw_is_for_opaque_art() {
+    let tall = || {
+        let mut object = WorldObject::new(
+            SemanticId(1),
+            [0, 0],
+            3,
+            Anchor::Standing,
+            texture(2, 20, 80),
+        );
+        object.double_draw = true;
+        object
+    };
+    let compiles = |object: WorldObject| {
+        compile(
+            &iso_view(vec![object], HeightField::empty()),
+            SceneLimits::default(),
+        )
+    };
+    assert!(compiles(tall()).is_ok());
+    let mut faded = tall();
+    faded.alpha = 0.5;
+    assert_eq!(compiles(faded.clone()), Err(Error::InvalidValue));
+    let mut glowing = tall();
+    glowing.glow = Some(GlowEffect {
+        color: [1.0; 4],
+        radius_px: 2.0,
+        pulse_millis: 0,
+    });
+    assert_eq!(compiles(glowing.clone()), Err(Error::InvalidValue));
+    // Without the repeat, the same effects are fine.
+    for mut object in [faded, glowing] {
+        object.double_draw = false;
+        assert!(compiles(object).is_ok());
+    }
+}
