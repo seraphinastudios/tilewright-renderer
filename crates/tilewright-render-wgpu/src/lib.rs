@@ -17,7 +17,7 @@ use tilewright_render_api::{
 use tilewright_render_resources::{
     DEFAULT_MAXIMUM_RESOURCE_BYTES, DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES, ResourceProvider,
     ResourceRequest, Rgba8Image, add_working_set_bytes, for_each_quad_pixel, sample_quad_rgba8,
-    shade_quad_rgba8,
+    shade_quad_rgba8, subpixel_position,
 };
 use tilewright_scene::{Digest256, Layer, Quad, ResourceId, Sampling, SceneBundle};
 
@@ -1023,7 +1023,7 @@ fn vertices(scene: &SceneBundle) -> Vec<Vertex> {
             (glow.color, glow.radius_uv, 1.0)
         });
         let vertex = |corner: usize| {
-            let [x, y] = quad.positions[corner];
+            let [x, y] = quad.positions[corner].map(subpixel_position);
             Vertex {
                 position: [
                     x.mul_add(2.0 / viewport.width as f32, -1.0),

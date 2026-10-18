@@ -267,6 +267,15 @@ fn snap(value: f32) -> i64 {
     (f64::from(value) * SUBPIXEL_SCALE).round() as i64
 }
 
+/// A position rounded to the shared subpixel grid. GPU backends submit these
+/// so the hardware's own snapping starts from the exact fixed-point corners
+/// the reference rasteriser uses, whatever its rounding mode.
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+pub fn subpixel_position(value: f32) -> f32 {
+    (snap(value) as f64 / SUBPIXEL_SCALE) as f32
+}
+
 const fn edge(a: (i64, i64), b: (i64, i64), point: (i64, i64)) -> i64 {
     (b.0 - a.0) * (point.1 - a.1) - (b.1 - a.1) * (point.0 - a.0)
 }
