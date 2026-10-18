@@ -13,13 +13,17 @@ The output path must not exist; the write is atomic and never overwrites.
 ## Inputs and trust
 
 - Every texture is listed explicitly with a path relative to the view file
-  and the SHA-256 of the file's bytes. A mismatch fails before anything is
-  drawn. Nothing else is read from disk and nothing is fetched.
+  and the SHA-256 of the file's bytes. Paths are `/`-separated with no empty,
+  `.` or `..` components, and must stay inside the view's directory once
+  symbolic links are resolved. A mismatch fails before anything is drawn.
+  Nothing else is read from disk and nothing is fetched.
 - Unknown keys are errors, so a misspelled field fails rather than being
   silently ignored.
-- View files are capped at 64 MiB and texture files at 16 MiB. Images are
-  capped at 8,192 px per side; the GPU device may impose a lower bound, which
-  is reported as an error.
+- View files are capped at 64 MiB and texture files at 16 MiB. A view lists
+  at most 4,096 textures. Each image is at most 8,192 px per side and decodes
+  to at most 16 MiB; all textures together decode to at most 256 MiB. Sizes
+  are checked from the PNG header before decoding. The GPU device may impose
+  a lower bound, which is reported as an error.
 - PNG input may be RGBA, RGB, greyscale, greyscale with alpha, or indexed;
   16-bit channels are reduced to 8 bits.
 
