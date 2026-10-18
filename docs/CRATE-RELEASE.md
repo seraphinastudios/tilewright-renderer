@@ -1,8 +1,9 @@
 # crates.io delivery
 
 The public renderer family is `tilewright-scene`, `tilewright-render-resources`,
-`tilewright-render-api`, `tilewright-render-ui`, `tilewright-render-testkit`,
-`tilewright-render-wgpu`, and `tilewright-render-sdl3`. The policy allowlist in
+`tilewright-render-api`, `tilewright-render-ui`, `tilewright-render-world`,
+`tilewright-render-testkit`, `tilewright-render-wgpu`, and
+`tilewright-render-sdl3`. The policy allowlist in
 `policy/crate-release.json` is authoritative. `tilewright-render` stays a GitHub
 application artifact and has `publish = false`.
 
@@ -103,7 +104,7 @@ never reaches the GitHub CLI.
 
 ## Initial ownership and activation
 
-All seven names require an owner-run initial crates.io publication with a
+All eight names require an owner-run initial crates.io publication with a
 narrowly scoped local API token, using the verified source-release archives.
 Configure each crate's GitHub trusted publisher with this repository ID,
 `publish-crate.yml` and environment `crates-io-release`. Keep the token out of

@@ -87,7 +87,7 @@
 
 ## Registry delivery
 
-The seven public libraries are selected by `policy/crate-release.json`; the
+The eight public libraries are selected by `policy/crate-release.json`; the
 CLI is not a registry package. Run the packaged-content version gate and
 credential-free preparation before source-release publication. Trusted publishing
 uploads verified release archives without builds. The inert signer attests the

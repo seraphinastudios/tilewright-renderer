@@ -3,6 +3,9 @@
 
 #![forbid(unsafe_code)]
 
+mod world;
+pub use world::{iso_world_scene, top_down_world_scene, world_provider, world_texture};
+
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -13,13 +16,18 @@ use tilewright_render_api::{
     TargetKind, TargetLimits,
 };
 use tilewright_render_resources::{
-    DEFAULT_MAXIMUM_RESOURCE_BYTES, Error as ResourceError, ResourceBlob, ResourceProvider,
-    ResourceRequest, Rgba8Image, add_working_set_bytes, for_each_sprite_pixel, sample_rgba8,
-    shade_rgba8,
+    DEFAULT_MAXIMUM_RESOURCE_BYTES, Error as ResourceError, MAXIMUM_SCENE_TEXTURES, ResourceBlob,
+    ResourceProvider, ResourceRequest, Rgba8Image, add_working_set_bytes, for_each_quad_pixel,
+    glow_rgba8, sample_quad_rgba8, shade_quad_rgba8,
 };
 use tilewright_scene::{
-    Digest256, Layer, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, Sprite, Viewport,
+    Digest256, Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, Sprite,
+    Viewport,
 };
+
+/// Bytes per GPU vertex: position (3), colour (4), uv (2), effect, greyscale,
+/// glow colour (4), glow radius (2) and mode, all `f32`.
+pub const VERTEX_BYTES: u64 = 72;
 
 #[derive(Default)]
 pub struct FakeResourceProvider {
@@ -164,14 +172,32 @@ impl Renderer for ReferenceRenderer {
             coverage: vec![0; pixel_count],
             metrics: RecoveryMetrics::default(),
         };
+        // The same per-scene texture bound as every other renderer, checked
+        // before any resource is loaded.
+        let distinct = request
+            .scene
+            .quads()
+            .iter()
+            .map(|quad| {
+                (
+                    quad.resource_id,
+                    quad.resource_revision,
+                    quad.resource_digest,
+                )
+            })
+            .collect::<std::collections::HashSet<_>>();
+        if distinct.len() > MAXIMUM_SCENE_TEXTURES {
+            return Err(RenderError::LimitExceeded);
+        }
         let mut uploaded_bytes = 0_u64;
         let mut resource_requests = 0_u64;
-        let mut images: HashMap<(ResourceId, u64, Digest256), Arc<Rgba8Image>> = HashMap::new();
-        for sprite in request.scene.sprites() {
+        let mut images: HashMap<(ResourceId, u64, Digest256), Arc<Rgba8Image>> =
+            HashMap::with_capacity(distinct.len());
+        for quad in request.scene.quads() {
             let key = (
-                sprite.resource_id,
-                sprite.resource_revision,
-                sprite.resource_digest,
+                quad.resource_id,
+                quad.resource_revision,
+                quad.resource_digest,
             );
             let image = if let Some(image) = images.get(&key) {
                 image.clone()
@@ -179,12 +205,13 @@ impl Renderer for ReferenceRenderer {
                 let blob = request
                     .resources
                     .load(ResourceRequest {
-                        id: sprite.resource_id,
-                        revision: sprite.resource_revision,
-                        digest: sprite.resource_digest,
+                        id: quad.resource_id,
+                        revision: quad.resource_revision,
+                        digest: quad.resource_digest,
                         maximum_bytes: DEFAULT_MAXIMUM_RESOURCE_BYTES,
                     })
                     .map_err(|error| RenderError::Resource(error.to_string()))?;
+                charge_before_decoding(uploaded_bytes, &blob)?;
                 let image = Arc::new(
                     Rgba8Image::decode(&blob, 8_192, 16_777_216)
                         .map_err(|error| RenderError::Resource(error.to_string()))?,
@@ -195,17 +222,26 @@ impl Renderer for ReferenceRenderer {
                 images.insert(key, image.clone());
                 image
             };
-            raster_sprite(&mut output, sprite, &image, request.scene.clock_millis());
+            raster_quad(&mut output, quad, &image, request.scene.clock_millis());
         }
         output.metrics.frames_submitted = 1;
         output.metrics.resource_requests = resource_requests;
         output.metrics.uploaded_bytes = uploaded_bytes;
-        output.metrics.vertex_count = (request.scene.sprites().len() as u64) * 6;
-        output.metrics.vertex_allocation_bytes = output.metrics.vertex_count * 40;
+        output.metrics.vertex_count = (request.scene.quads().len() as u64) * 6;
+        output.metrics.vertex_allocation_bytes = output.metrics.vertex_count * VERTEX_BYTES;
         output.metrics.target_allocation_bytes = (pixel_count as u64) * 11;
         output.validate()?;
         Ok(output)
     }
+}
+
+/// Charges a blob's pixel payload (the envelope after its 12-byte header)
+/// to the working set before any pixels are decoded.
+fn charge_before_decoding(uploaded_bytes: u64, blob: &ResourceBlob) -> Result<(), RenderError> {
+    let payload = (blob.bytes().len() as u64).saturating_sub(12);
+    add_working_set_bytes(uploaded_bytes, payload)
+        .map(|_| ())
+        .map_err(|_| RenderError::LimitExceeded)
 }
 
 fn pixel_count(width: u32, height: u32) -> Result<usize, RenderError> {
@@ -219,26 +255,25 @@ fn pixel_count(width: u32, height: u32) -> Result<usize, RenderError> {
         .ok_or(RenderError::LimitExceeded)
 }
 
-fn raster_sprite(output: &mut FrameOutput, sprite: &Sprite, image: &Rgba8Image, clock_millis: u64) {
-    for_each_sprite_pixel(
-        sprite,
-        output.width,
-        output.height,
-        |_x, _y, index, u, v| {
-            let source = shade_rgba8(
-                sample_rgba8(image, u, v, sprite.sampling),
-                sprite.color,
-                sprite.layer,
+fn raster_quad(output: &mut FrameOutput, quad: &Quad, image: &Rgba8Image, clock_millis: u64) {
+    for_each_quad_pixel(quad, output.width, output.height, |_x, _y, index, u, v| {
+        let source = match quad.glow {
+            Some(glow) => glow_rgba8(image, u, v, &glow, quad.sampling),
+            None => shade_quad_rgba8(
+                sample_quad_rgba8(image, u, v, quad.sampling),
+                quad,
                 clock_millis,
-            );
-            if source[3] != 0 {
-                blend(&mut output.rgba8[index * 4..index * 4 + 4], source);
-                output.semantic_ids[index] = sprite.semantic_id.0;
-                output.depth[index] = sprite.depth;
+            ),
+        };
+        if source[3] != 0 {
+            blend(&mut output.rgba8[index * 4..index * 4 + 4], source);
+            if quad.pickable {
+                output.semantic_ids[index] = quad.semantic_id.0;
+                output.depth[index] = quad.depth;
                 output.coverage[index] = source[3];
             }
-        },
-    );
+        }
+    });
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -509,6 +544,87 @@ mod tests {
     }
 
     #[test]
+    fn scenes_naming_too_many_textures_never_reach_a_renderer() {
+        use tilewright_scene::{Layer, Quad, Sampling, SemanticId, Viewport};
+        let quads = |count: u32| {
+            (0..count).map(|index| Quad {
+                semantic_id: SemanticId(index + 1),
+                part: 0,
+                resource_id: ResourceId(u64::from(index) + 1),
+                resource_revision: 1,
+                resource_digest: Digest256([1; 32]),
+                positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                depth: 0,
+                painter_order: index,
+                color: [1.0; 4],
+                grayscale: 0.0,
+                glow: None,
+                pickable: true,
+                sampling: Sampling::Nearest,
+                layer: Layer::World,
+            })
+        };
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale_milli: 1_000,
+        };
+        // The scene contract itself enforces the bound the renderers share.
+        assert_eq!(
+            SceneBundle::from_quads(
+                1,
+                0,
+                viewport,
+                [0.0; 4],
+                quads(4_097),
+                SceneLimits::default()
+            ),
+            Err(tilewright_scene::Error::LimitExceeded)
+        );
+        // At the bound, the reference requests each texture once (here the
+        // provider refuses the first).
+        let scene = SceneBundle::from_quads(
+            1,
+            0,
+            viewport,
+            [0.0; 4],
+            quads(4_096),
+            SceneLimits::default(),
+        )
+        .unwrap();
+        let result = ReferenceRenderer::new(offscreen_target(4, 4))
+            .unwrap()
+            .render(RenderRequest {
+                scene: &scene,
+                resources: Arc::new(FailingProvider(ResourceError::NotFound)),
+            });
+        assert!(matches!(result, Err(Error::Resource(_))));
+    }
+
+    #[test]
+    fn the_working_set_is_charged_before_decoding() {
+        use tilewright_render_resources::DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES as BUDGET;
+        // A 2 × 2 envelope carries 16 bytes of pixels after its header.
+        let bytes = super::synthetic_resource().to_vec();
+        let blob = ResourceBlob::for_request(
+            ResourceRequest {
+                id: ResourceId(1),
+                revision: 1,
+                digest: Digest256(Sha256::digest(&bytes).into()),
+                maximum_bytes: bytes.len(),
+            },
+            bytes,
+        )
+        .unwrap();
+        assert!(super::charge_before_decoding(BUDGET - 16, &blob).is_ok());
+        assert_eq!(
+            super::charge_before_decoding(BUDGET - 15, &blob),
+            Err(Error::LimitExceeded)
+        );
+    }
+
+    #[test]
     fn reference_output_is_exact_and_repeatable() {
         let scene = synthetic_scene(16, 16).unwrap();
         let request = RenderRequest {
@@ -555,16 +671,16 @@ mod tests {
 
         let corrupt_bytes = b"not-an-atx1-texture".to_vec();
         let digest = Digest256(Sha256::digest(&corrupt_bytes).into());
-        let mut sprites = scene.sprites().to_vec();
-        for sprite in &mut sprites {
-            sprite.resource_digest = digest;
+        let mut quads = scene.quads().to_vec();
+        for quad in &mut quads {
+            quad.resource_digest = digest;
         }
-        let corrupt_scene = SceneBundle::new(
+        let corrupt_scene = SceneBundle::from_quads(
             scene.revision(),
             scene.clock_millis(),
             scene.viewport(),
             scene.clear_color(),
-            sprites,
+            quads,
             SceneLimits::default(),
         )
         .unwrap();

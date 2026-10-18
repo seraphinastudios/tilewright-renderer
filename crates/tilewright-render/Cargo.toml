@@ -11,10 +11,20 @@ publish = false
 
 [dependencies]
 tilewright-render-api.workspace = true
+tilewright-render-resources.workspace = true
 tilewright-render-sdl3 = { workspace = true, optional = true }
 tilewright-render-testkit.workspace = true
 tilewright-render-wgpu.workspace = true
+tilewright-render-world.workspace = true
+tilewright-scene.workspace = true
+png.workspace = true
+serde_core.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [features]
 default = []

@@ -23,6 +23,10 @@
       "path": "crates/tilewright-render-ui"
     },
     {
+      "name": "tilewright-render-world",
+      "path": "crates/tilewright-render-world"
+    },
+    {
       "name": "tilewright-render-testkit",
       "path": "crates/tilewright-render-testkit"
     },

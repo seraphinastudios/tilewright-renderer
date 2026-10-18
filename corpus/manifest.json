@@ -16,11 +16,11 @@
       "maximum_rgba_channel_difference": 1,
       "performance": {
         "maximum_cpu_micros": 50000,
-        "sprite_count": 3,
+        "quad_count": 3,
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 720,
+        "vertex_allocation_bytes": 1296,
         "target_allocation_bytes": 2816
       },
       "digests": {
@@ -38,11 +38,11 @@
       "maximum_rgba_channel_difference": 1,
       "performance": {
         "maximum_cpu_micros": 50000,
-        "sprite_count": 3,
+        "quad_count": 3,
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 720,
+        "vertex_allocation_bytes": 1296,
         "target_allocation_bytes": 5797
       },
       "digests": {
@@ -60,11 +60,11 @@
       "maximum_rgba_channel_difference": 1,
       "performance": {
         "maximum_cpu_micros": 75000,
-        "sprite_count": 11,
+        "quad_count": 11,
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 66,
-        "vertex_allocation_bytes": 2640,
+        "vertex_allocation_bytes": 4752,
         "target_allocation_bytes": 25344
       },
       "digests": {
@@ -82,11 +82,11 @@
       "maximum_rgba_channel_difference": 1,
       "performance": {
         "maximum_cpu_micros": 250000,
-        "sprite_count": 1024,
+        "quad_count": 1024,
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 6144,
-        "vertex_allocation_bytes": 245760,
+        "vertex_allocation_bytes": 442368,
         "target_allocation_bytes": 180224
       },
       "digests": {
@@ -94,6 +94,50 @@
         "semantic_u32le": "f2db51975d40f7cf739213139c61b978e76a79cb53d5cab083e668c4ce6bba88",
         "depth_i16le": "7813dbe07e40f1d543ac31832c0f72b063ef50716ab615f284a4575ba9589024",
         "coverage_u8": "a81f52b8cdae6907d00094aac5edc056251c9976d5ebe7f923d365eea4c0b120"
+      }
+    },
+    {
+      "name": "world-iso-terrain",
+      "width": 192,
+      "height": 128,
+      "clock_millis": 250,
+      "maximum_rgba_channel_difference": 1,
+      "performance": {
+        "maximum_cpu_micros": 400000,
+        "quad_count": 505,
+        "resource_requests": 4,
+        "uploaded_bytes": 11792,
+        "vertex_count": 3030,
+        "vertex_allocation_bytes": 218160,
+        "target_allocation_bytes": 270336
+      },
+      "digests": {
+        "rgba8": "cc5df12140433cc2aedc33f6331600c3b42d951963adaf171f937e13a15ec0b3",
+        "semantic_u32le": "08a9ffd6268923d24672c6f3da0247fb7c0b2e029350580b3e0069afd658a51b",
+        "depth_i16le": "24b03d80b2abfde5aad4f2bf2e954913cd52279551472780c0ba3d29872aa1ca",
+        "coverage_u8": "6daaef28fa7d55959b80e6d83402fa94efaceea0a468cac92e90d79d5f9d611d"
+      }
+    },
+    {
+      "name": "world-top-down",
+      "width": 96,
+      "height": 64,
+      "clock_millis": 300,
+      "maximum_rgba_channel_difference": 1,
+      "performance": {
+        "maximum_cpu_micros": 200000,
+        "quad_count": 28,
+        "resource_requests": 4,
+        "uploaded_bytes": 5008,
+        "vertex_count": 168,
+        "vertex_allocation_bytes": 12096,
+        "target_allocation_bytes": 67584
+      },
+      "digests": {
+        "rgba8": "32627ed5d0be0807970a390f6ea589a0d905b9c27b506035df787117d4c3d16e",
+        "semantic_u32le": "8bb543d7a7916bbbe5c9f587dbe051b39bbfd8a6fa9c5ac99c8e4d8c7b518ecb",
+        "depth_i16le": "f3cc103136423a57975750907ebc1d367e2985ac6338976d4d5a439f50323f4a",
+        "coverage_u8": "884929e08ec0c709c085488ca1b0c61bb9749b0f38bd253c97c073657116f5be"
       }
     }
   ]
