@@ -879,3 +879,25 @@ fn animation_frames_are_bounded_before_traversal() {
         limit
     );
 }
+
+#[test]
+fn height_fields_are_bounded_before_scanning() {
+    let side = 2_049_u32;
+    let mut view = iso_view(
+        Vec::new(),
+        HeightField {
+            origin: [0, 0],
+            width: side,
+            height: side,
+            heights: vec![None; (side * side) as usize],
+        },
+    );
+    assert_eq!(
+        compile(&view, SceneLimits::default()),
+        Err(Error::Scene(tilewright_scene::Error::LimitExceeded))
+    );
+    view.heights.width = 2_048;
+    view.heights.height = 2_048;
+    view.heights.heights.truncate(2_048 * 2_048);
+    assert!(compile(&view, SceneLimits::default()).is_ok());
+}

@@ -18,6 +18,9 @@ use tilewright_scene::{
 /// Most frames one animation may list.
 pub const MAXIMUM_ANIMATION_FRAMES: usize = 1_024;
 
+/// Most cells a view's height field may hold (2,048 × 2,048).
+pub const MAXIMUM_HEIGHT_FIELD_CELLS: usize = 1 << 22;
+
 /// Art pixels by which bent isometric ground overlaps its neighbours.
 pub const SEAM_BLEED_PX: f64 = 1.0;
 
@@ -236,8 +239,9 @@ struct Holes {
     width: usize,
     height: usize,
     /// `(width + 1) × (height + 1)` running counts; empty when the field has
-    /// no holes.
-    sums: Vec<u64>,
+    /// no holes. Fields hold at most [`MAXIMUM_HEIGHT_FIELD_CELLS`] cells, so
+    /// the counts fit `u32`.
+    sums: Vec<u32>,
 }
 
 impl Holes {
@@ -259,7 +263,7 @@ impl Holes {
         for (row, cells) in field.heights.chunks_exact(width).enumerate() {
             let mut line = 0;
             for (column, cell) in cells.iter().enumerate() {
-                line += u64::from(cell.is_none());
+                line += u32::from(cell.is_none());
                 holes.sums[(row + 1) * stride + column + 1] =
                     holes.sums[row * stride + column + 1] + line;
             }
@@ -365,7 +369,9 @@ impl std::error::Error for Error {}
 /// # Errors
 /// Returns [`Error::InvalidValue`] for an invalid view and [`Error::Scene`]
 /// for a repeated semantic ID or when the view or the produced scene exceeds
-/// its limits. A view holds at most [`SceneLimits::maximum_quads`] draws: one
+/// its limits, or its height field holds more than
+/// [`MAXIMUM_HEIGHT_FIELD_CELLS`] cells. A view holds at most
+/// [`SceneLimits::maximum_quads`] draws: one
 /// per object plus one per double-drawn repeat, counted before culling. An
 /// animation lists at most [`MAXIMUM_ANIMATION_FRAMES`] frames, and a view's
 /// animations at most twice [`SceneLimits::maximum_quads`] together.
@@ -505,6 +511,10 @@ fn validate(view: &WorldView, limits: SceneLimits) -> Result<(), Error> {
     let cells = u64::from(heights.width) * u64::from(heights.height);
     if !usize::try_from(cells).is_ok_and(|cells| cells == heights.heights.len()) {
         return Err(Error::InvalidValue);
+    }
+    // Bounded before the field is scanned for holes.
+    if heights.heights.len() > MAXIMUM_HEIGHT_FIELD_CELLS {
+        return Err(Error::Scene(tilewright_scene::Error::LimitExceeded));
     }
     let holes = Holes::new(heights).ok_or(Error::InvalidValue)?;
     // Ground art ignores placement effects, so it must not request them, and
