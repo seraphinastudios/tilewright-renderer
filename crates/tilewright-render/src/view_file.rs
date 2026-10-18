@@ -191,6 +191,87 @@ pub(crate) fn json_values(bytes: &[u8]) -> usize {
     count
 }
 
+/// A JSON document parsed as a [`Value`], except that an object repeating a
+/// key is an error instead of silently keeping the last occurrence.
+struct Strict(Value);
+
+impl<'de> serde_core::Deserialize<'de> for Strict {
+    fn deserialize<D: serde_core::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        deserializer.deserialize_any(StrictVisitor).map(Self)
+    }
+}
+
+struct StrictVisitor;
+
+impl<'de> serde_core::de::Visitor<'de> for StrictVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E: serde_core::de::Error>(self, value: bool) -> std::result::Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E: serde_core::de::Error>(self, value: i64) -> std::result::Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_u64<E: serde_core::de::Error>(self, value: u64) -> std::result::Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_f64<E: serde_core::de::Error>(self, value: f64) -> std::result::Result<Value, E> {
+        Ok(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E: serde_core::de::Error>(self, value: &str) -> std::result::Result<Value, E> {
+        Ok(Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E: serde_core::de::Error>(
+        self,
+        value: String,
+    ) -> std::result::Result<Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_unit<E: serde_core::de::Error>(self) -> std::result::Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: serde_core::de::SeqAccess<'de>>(
+        self,
+        mut sequence: A,
+    ) -> std::result::Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(Strict(item)) = sequence.next_element()? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: serde_core::de::MapAccess<'de>>(
+        self,
+        mut entries: A,
+    ) -> std::result::Result<Value, A::Error> {
+        let mut object = Map::new();
+        while let Some(key) = entries.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(serde_core::de::Error::custom(format_args!(
+                    "duplicate key \"{key}\""
+                )));
+            }
+            let Strict(value) = entries.next_value()?;
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
+}
+
 pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut output, byte| {
@@ -482,7 +563,7 @@ pub(crate) fn load_within(
             "a view holds at most {MAXIMUM_JSON_VALUES} JSON values"
         ));
     }
-    let document: Value =
+    let Strict(document) =
         serde_json::from_slice(&bytes).map_err(|error| format!("invalid view JSON: {error}"))?;
     let root = as_object(&document, "view")?;
     reject_unknown(

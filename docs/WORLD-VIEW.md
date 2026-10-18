@@ -22,8 +22,9 @@ The output path must not exist; the write is atomic and never overwrites.
   Elsewhere a path must stay inside the directory once symbolic links are
   resolved. A mismatch fails before anything is drawn. Nothing else is read
   from disk and nothing is fetched.
-- Unknown keys are errors, so a misspelled field fails rather than being
-  silently ignored. A camera takes only its own projection's tile keys.
+- Unknown and repeated keys are errors, so a misspelled or duplicated field
+  fails rather than being silently ignored or overridden. A camera takes only
+  its own projection's tile keys.
 - View files are capped at 64 MiB, and texture files at 16 MiB each and
   256 MiB together; reads stop at the cap even if a file grows while it is
   read. A view holds at most 2,097,152 JSON values, counted before the file is

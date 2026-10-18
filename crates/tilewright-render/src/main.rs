@@ -493,6 +493,33 @@ mod tests {
     }
 
     #[test]
+    fn repeated_json_keys_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let text = fs::read_to_string(&view).unwrap();
+        let repeated = [
+            (
+                "\"projection\": \"top_down\",",
+                "\"projection\": \"top_down\", \"projection\": \"isometric\",",
+            ),
+            ("\"texture\": 7}", "\"texture\": 7, \"texture\": 8}"),
+            (
+                "\"format\": \"tilewright.view/1\",",
+                "\"format\": \"tilewright.view/1\", \"format\": \"tilewright.view/1\",",
+            ),
+        ];
+        for (from, to) in repeated {
+            let changed = text.replacen(from, to, 1);
+            assert_ne!(changed, text, "{from}");
+            fs::write(&view, changed).unwrap();
+            let error = view_file::load(&view).err().unwrap();
+            assert!(error.contains("duplicate key"), "{from}: {error}");
+        }
+        fs::write(&view, &text).unwrap();
+        assert!(view_file::load(&view).is_ok());
+    }
+
+    #[test]
     fn cameras_take_only_their_projection_keys() {
         let directory = tempfile::tempdir().unwrap();
         let view = write_view(directory.path(), None);

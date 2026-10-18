@@ -1009,6 +1009,7 @@ version = "0.2.0"
 dependencies = [
  "png",
  "rustix",
+ "serde_core",
  "serde_json",
  "sha2",
  "tempfile",
