@@ -18,12 +18,12 @@ const MAINTENANCE_RULES = [
 function currentBranch() {
   const refName = process.env.GITHUB_REF_NAME;
   const branch =
-    process.env.ATRINIK_RELEASE_BRANCH ||
+    process.env.TILEWRIGHT_RELEASE_BRANCH ||
     (typeof refName === "string" && /^\d+\/merge$/.test(refName)
       ? process.env.GITHUB_BASE_REF || "main"
       : refName || process.env.GITHUB_HEAD_REF);
   if (typeof branch !== "string" || branch.length === 0) {
-    throw new Error("ATRINIK_RELEASE_BRANCH is required");
+    throw new Error("TILEWRIGHT_RELEASE_BRANCH is required");
   }
   return branch;
 }

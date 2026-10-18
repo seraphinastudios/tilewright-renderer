@@ -21,7 +21,7 @@ from tools import crate_release as R
 from tools import crate_prepare as P
 
 REVISION = 'a' * 40
-CONFIG = {'schema_version': 1, 'repository': 'atrinik/example', 'repository_id': '123',
+CONFIG = {'schema_version': 1, 'repository': 'seraphinastudios/example', 'repository_id': '123',
           'workflow': 'publish-crate.yml', 'environment': 'crates-io-release', 'toolchain': '1.97.1',
           'required_checks': ['Example validation'], 'crates': [{'name': 'example', 'path': 'crates/example'}], 'historical': []}
 
@@ -84,10 +84,10 @@ class ApiEndpointTests(unittest.TestCase):
     def test_repository_root_has_no_trailing_slash(self):
         with patch.object(R, 'get', return_value=b'{}') as get:
             R.api(CONFIG, '')
-            get.assert_called_once_with('https://api.github.com/repos/atrinik/example')
+            get.assert_called_once_with('https://api.github.com/repos/seraphinastudios/example')
         with patch.object(R, 'get', return_value=b'{}') as get:
             R.api(CONFIG, 'releases/123')
-            get.assert_called_once_with('https://api.github.com/repos/atrinik/example/releases/123')
+            get.assert_called_once_with('https://api.github.com/repos/seraphinastudios/example/releases/123')
 
 
 class MetadataTests(unittest.TestCase):
@@ -320,7 +320,7 @@ class AttestationTests(unittest.TestCase):
             self.assertEqual(R.verified_attestation(CONFIG, payload, REVISION), [{'run_id': 100, 'run_attempt': 2}])
         for argv, kwargs in calls:
             self.assertFalse(any('TOKEN' in name for name in kwargs['env']))
-            self.assertIn('atrinik-crate-attestation-', kwargs['env']['GH_CONFIG_DIR'])
+            self.assertIn('tilewright-crate-attestation-', kwargs['env']['GH_CONFIG_DIR'])
         self.assertIn('--bundle', calls[-1][0])
         self.assertIn('--deny-self-hosted-runners', calls[-1][0])
 
@@ -456,7 +456,7 @@ class BoundaryTests(unittest.TestCase):
         expected = {'GITHUB_ACTIONS': 'true', 'GITHUB_REPOSITORY': CONFIG['repository'],
                     'GITHUB_REPOSITORY_ID': '123', 'GITHUB_REF': 'refs/heads/main',
                     'GITHUB_EVENT_NAME': 'workflow_dispatch',
-                    'GITHUB_WORKFLOW_REF': 'atrinik/example/.github/workflows/publish-crate.yml@refs/heads/main',
+                    'GITHUB_WORKFLOW_REF': 'seraphinastudios/example/.github/workflows/publish-crate.yml@refs/heads/main',
                     'GITHUB_SHA': REVISION, 'GITHUB_WORKFLOW_SHA': REVISION}
         for change in [{}, {'GITHUB_EVENT_NAME': 'pull_request'}, {'GITHUB_EVENT_NAME': 'workflow_run'},
                        {'GITHUB_REPOSITORY_ID': '456'}, {'GITHUB_REF': 'refs/tags/v1.0.0'}]:
@@ -513,7 +513,7 @@ class BoundaryTests(unittest.TestCase):
                 target = Path(argv[argv.index('--target-dir') + 1]) / 'package'
                 target.mkdir(parents=True)
                 (target / entry['asset']).write_bytes(data)
-        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'ATRINIK_RELEASE_BRANCH': '1.0.x'}, clear=True), \
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'TILEWRIGHT_RELEASE_BRANCH': '1.0.x'}, clear=True), \
              patch.object(P, 'versions', return_value={'example': '0.1.0'}), \
              patch.object(P, 'known') as known, patch.object(P, 'git', side_effect=lambda *args: REVISION if args[0] == 'rev-parse' else ''), \
              patch.object(P.subprocess, 'run', side_effect=command):
@@ -548,7 +548,7 @@ class BoundaryTests(unittest.TestCase):
 
     def test_actions_source_ref_cannot_be_overridden_and_read_token_not_in_build(self):
         with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'GITHUB_REF': 'refs/heads/1.0.x',
-                                    'ATRINIK_RELEASE_BRANCH': 'main'}, clear=True), self.assertRaises(ValueError):
+                                    'TILEWRIGHT_RELEASE_BRANCH': 'main'}, clear=True), self.assertRaises(ValueError):
             R.registry_source_branch()
         with patch.dict(os.environ, {'GH_READ_TOKEN': 'read-only-secret'}, clear=True):
             self.assertNotIn('GH_READ_TOKEN', P.clean_environment())
@@ -590,12 +590,50 @@ class BoundaryTests(unittest.TestCase):
                  patch.object(R, 'api') as settings_api:
                 R.finalize(CONFIG, 'v1.0.0', directory)
                 settings_api.assert_not_called()
-                with patch.dict(os.environ, {'ATRINIK_RELEASE_BRANCH': '1.0.x'}, clear=True), self.assertRaisesRegex(ValueError, 'maintenance release'):
+                with patch.dict(os.environ, {'TILEWRIGHT_RELEASE_BRANCH': '1.0.x'}, clear=True), self.assertRaisesRegex(ValueError, 'maintenance release'):
                     R.finalize(CONFIG, 'v1.0.0', directory)
                 (directory / 'unchecked').write_text('extra')
                 with self.assertRaisesRegex(ValueError, 'inventory coverage'):
                     R.finalize(CONFIG, 'v1.0.0', directory)
 
+
+
+class CatalogTests(unittest.TestCase):
+    def releases(self):
+        return [{'id': 7, 'tag_name': 'v1.0.0', 'draft': False, 'prerelease': False,
+                 'immutable': True, 'assets': [{'name': R.MANIFEST}]}]
+
+    def run_catalog(self, manifest):
+        with patch.object(R, 'api', return_value=self.releases()), \
+                patch.object(R, 'asset_bytes', return_value=json.dumps(manifest).encode()):
+            return R.catalog(CONFIG)
+
+    def legacy(self, **changes):
+        manifest = {'schema_version': 1, 'repository': 'previous-owner/example', 'repository_id': '123',
+                    'revision': REVISION, 'source_tag': 'v1.0.0',
+                    'crates': [{'name': 'previous-example', 'version': '0.1.0'}]}
+        manifest.update(changes)
+        return manifest
+
+    def test_earlier_identity_of_the_same_repository_is_skipped(self):
+        self.assertEqual(self.run_catalog(self.legacy()), {})
+        self.assertEqual(self.run_catalog(self.legacy(crates=[])), {})
+
+    def test_foreign_or_overlapping_or_malformed_legacy_manifests_fail(self):
+        for manifest in (self.legacy(repository_id='999'),
+                         self.legacy(crates=[{'name': 'example', 'version': '0.1.0'}]),
+                         self.legacy(source_tag='v9.9.9'),
+                         self.legacy(revision='not-a-sha'),
+                         dict(self.legacy(), extra=True)):
+            with self.subTest(manifest=manifest), self.assertRaises(ValueError):
+                self.run_catalog(manifest)
+
+    def test_historical_names_are_managed_too(self):
+        config = dict(CONFIG, historical=[{'name': 'previous-example'}])
+        with patch.object(R, 'api', return_value=self.releases()), \
+                patch.object(R, 'asset_bytes', return_value=json.dumps(self.legacy()).encode()), \
+                self.assertRaises(ValueError):
+            R.catalog(config)
 
 
 class StablePackageTests(unittest.TestCase):
@@ -653,7 +691,7 @@ class StablePackageTests(unittest.TestCase):
     def test_maintenance_retains_cli_without_looking_up_main_ownership(self):
         calls = []; data = {'example': make_archive(), 'cli': self.named_archive('cli', publish=False)}
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
-            stack.enter_context(patch.dict(os.environ, {'ATRINIK_RELEASE_BRANCH': '1.0.x'}, clear=True))
+            stack.enter_context(patch.dict(os.environ, {'TILEWRIGHT_RELEASE_BRANCH': '1.0.x'}, clear=True))
             stack.enter_context(patch.object(P, 'versions', return_value={'example': '0.1.0'}))
             stack.enter_context(patch.object(P, 'source_only_packages', return_value={
                 'cli': {'name': 'cli', 'version': '0.1.0', 'path': 'crates/cli'}}))

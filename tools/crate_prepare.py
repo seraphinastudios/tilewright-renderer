@@ -255,7 +255,7 @@ def prepare(config, tag, output, archives=None, dry_run=False, source_packages=(
     # Reject them rather than let an all-selected overlay replace published bytes.
     for directory in {output, archives} - {None}:
         R.require(not any(directory.glob('*.crate')), 'preexisting package output collision')
-    with tempfile.TemporaryDirectory(prefix='atrinik-crate-prepare-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='tilewright-crate-prepare-') as temporary:
         rows, data = stage_packages(config, current, previous, revision, Path(temporary), dry_run, extras)
         for crate in config['crates']:
             name, version = crate['name'], current[crate['name']]

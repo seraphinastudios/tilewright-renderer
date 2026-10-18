@@ -1,14 +1,15 @@
 {
   "schema_version": 1,
   "crate_dependencies": {
-    "atrinik-scene": [],
-    "atrinik-render-resources": ["atrinik-scene", "sha2"],
-    "atrinik-render-api": ["atrinik-render-resources", "atrinik-scene"],
-    "atrinik-render-ui": ["atrinik-scene"],
-    "atrinik-render-testkit": ["atrinik-render-api", "atrinik-render-resources", "atrinik-scene", "sha2"],
-    "atrinik-render-wgpu": ["atrinik-render-api", "atrinik-render-resources", "atrinik-render-testkit", "atrinik-scene", "bytemuck", "naga", "pollster", "wgpu"],
-    "atrinik-render-sdl3": ["atrinik-render-api", "atrinik-render-wgpu", "sdl3", "wgpu"],
-    "atrinik-render": ["atrinik-render-api", "atrinik-render-sdl3", "atrinik-render-testkit", "atrinik-render-wgpu", "tempfile"]
+    "tilewright-scene": [],
+    "tilewright-render-resources": ["sha2", "tilewright-scene"],
+    "tilewright-render-api": ["tilewright-render-resources", "tilewright-scene"],
+    "tilewright-render-ui": ["tilewright-scene"],
+    "tilewright-render-testkit": ["sha2", "tilewright-render-api", "tilewright-render-resources", "tilewright-scene"],
+    "tilewright-render-wgpu": ["bytemuck", "naga", "pollster", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-testkit", "tilewright-scene", "wgpu"],
+    "tilewright-render-sdl3": ["sdl3", "tilewright-render-api", "tilewright-render-wgpu", "wgpu"],
+    "tilewright-render": ["tempfile", "tilewright-render-api", "tilewright-render-sdl3", "tilewright-render-testkit", "tilewright-render-wgpu"]
   },
-  "forbidden_source_patterns": ["github.com/atrinik/classic", "github.com/atrinik/client", "github.com/atrinik/editor", "github.com/atrinik/server"]
+  "forbidden_source_patterns": ["github.com/seraphinastudios/game", "github.com/seraphinastudios/tilewright-editor", "github.com/seraphinastudios/tilewright-world"],
+  "forbidden_package_prefixes": ["tilewright-cli", "tilewright-editor", "tilewright-jsonc", "tilewright-pack", "tilewright-source"]
 }

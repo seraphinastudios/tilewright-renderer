@@ -1,9 +1,9 @@
 # crates.io delivery
 
-The public renderer family is `atrinik-scene`, `atrinik-render-resources`,
-`atrinik-render-api`, `atrinik-render-ui`, `atrinik-render-testkit`,
-`atrinik-render-wgpu`, and `atrinik-render-sdl3`. The policy allowlist in
-`policy/crate-release.json` is authoritative. `atrinik-render` stays a GitHub
+The public renderer family is `tilewright-scene`, `tilewright-render-resources`,
+`tilewright-render-api`, `tilewright-render-ui`, `tilewright-render-testkit`,
+`tilewright-render-wgpu`, and `tilewright-render-sdl3`. The policy allowlist in
+`policy/crate-release.json` is authoritative. `tilewright-render` stays a GitHub
 application artifact and has `publish = false`.
 
 Only source releases from `main` may own registry coordinates. Maintenance

@@ -13,7 +13,7 @@ for (const [branch, message, pending, expected] of [
   ["main", "untyped message", false, null],
   ["main", "untyped message", true, "8.3.1"],
 ]) {
-  const fixture = mkdtempSync(join(tmpdir(), "atrinik-source-version-test-"));
+  const fixture = mkdtempSync(join(tmpdir(), "tilewright-source-version-test-"));
   try {
     mkdirSync(join(fixture, "scripts/release"), {recursive: true});
     mkdirSync(join(fixture, "tools"));
@@ -34,7 +34,7 @@ for (const [branch, message, pending, expected] of [
     git("tag", "v8.3.0");
     git("commit", "--quiet", "--allow-empty", "-m", message);
     const result = JSON.parse(execFileSync(process.execPath, ["scripts/release/source-version.mjs"], {
-      cwd: fixture, encoding: "utf8", env: {...process.env, ATRINIK_RELEASE_BRANCH: branch},
+      cwd: fixture, encoding: "utf8", env: {...process.env, TILEWRIGHT_RELEASE_BRANCH: branch},
     }));
     assert.equal(result.version, expected);
     assert.equal(result.source_tag, expected === null ? null : "v" + expected);

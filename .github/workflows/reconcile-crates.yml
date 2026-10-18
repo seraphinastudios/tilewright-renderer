@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   reconcile:
-    if: github.repository == 'atrinik/renderer' && github.repository_id == '1327106998' && github.ref == 'refs/heads/main'
+    if: github.repository == 'seraphinastudios/tilewright-renderer' && github.repository_id == '1327106998' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

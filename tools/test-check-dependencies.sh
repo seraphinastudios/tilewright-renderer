@@ -4,7 +4,7 @@ set -euo pipefail
 repository=$(git rev-parse --show-toplevel)
 cd "${repository}"
 
-temporary=$(mktemp -d /tmp/atrinik-renderer-dependency-test.XXXXXX)
+temporary=$(mktemp -d /tmp/tilewright-renderer-dependency-test.XXXXXX)
 trap 'rm -rf -- "${temporary}"' EXIT
 
 mkdir "${temporary}/bin"
@@ -25,7 +25,7 @@ updated="${repository}/tools/fixtures/dependency-metadata.json"
 run_check "${updated}"
 
 build_dependency="${temporary}/build-dependency.json"
-jq '(.packages[] | select(.name == "atrinik-render-wgpu")
+jq '(.packages[] | select(.name == "tilewright-render-wgpu")
   | .dependencies[] | select(.name == "naga") | .kind) = "build"' \
   "${updated}" >"${build_dependency}"
 run_check "${build_dependency}"
@@ -73,7 +73,7 @@ if run_check "${unapproved_source}"; then
 fi
 
 undeclared_direct="${temporary}/undeclared-direct.json"
-jq '(.packages[] | select(.name == "atrinik-render") | .dependencies) +=
+jq '(.packages[] | select(.name == "tilewright-render") | .dependencies) +=
   [{"name":"transitive","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null}]' \
   "${updated}" >"${undeclared_direct}"
 if run_check "${undeclared_direct}"; then

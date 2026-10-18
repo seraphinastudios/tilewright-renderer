@@ -84,7 +84,7 @@ jobs:
               if (env['GITHUB_API_URL'] != 'https://api.github.com'
                       or env['GITHUB_SERVER_URL'] != 'https://github.com'
                       or env['GITHUB_EVENT_NAME'] != 'pull_request'
-                      or not re.fullmatch(r'atrinik/[A-Za-z0-9_.-]+', repo)
+                      or not re.fullmatch(r'seraphinastudios/[A-Za-z0-9_.-]+', repo)
                       or not all(re.fullmatch(r'[1-9][0-9]*', value) for value in (number, run, attempt))
                       or not re.fullmatch(r'[0-9a-f]{40}', head)
                       or not re.fullmatch(r'[0-9a-f]{40}', base_sha)

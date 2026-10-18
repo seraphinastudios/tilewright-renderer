@@ -28,17 +28,17 @@ assert.equal(
 );
 assert.throws(() => rulesForBranch("release"), /unsupported/);
 
-delete process.env.ATRINIK_RELEASE_BRANCH;
+delete process.env.TILEWRIGHT_RELEASE_BRANCH;
 process.env.GITHUB_REF_NAME = "421/merge";
 process.env.GITHUB_BASE_REF = "8.3.x";
 assert.equal(currentBranch(), "8.3.x");
 delete process.env.GITHUB_REF_NAME;
 delete process.env.GITHUB_BASE_REF;
 
-process.env.ATRINIK_RELEASE_BRANCH = "main";
+process.env.TILEWRIGHT_RELEASE_BRANCH = "main";
 delete require.cache[require.resolve("./release-rules.cjs")];
 assert.equal(require("./release-rules.cjs").at(-1).release, "minor");
-process.env.ATRINIK_RELEASE_BRANCH = "8.3.x";
+process.env.TILEWRIGHT_RELEASE_BRANCH = "8.3.x";
 delete require.cache[require.resolve("./release-rules.cjs")];
 assert.equal(require("./release-rules.cjs").at(-1).release, "patch");
 

@@ -69,7 +69,7 @@ def policy(root=ROOT):
     value = json.loads((root / 'policy/crate-release.json').read_text())
     require(set(value) == {'schema_version', 'repository', 'repository_id', 'workflow',
                            'environment', 'toolchain', 'crates', 'historical', 'required_checks'}, 'policy fields')
-    require(value['schema_version'] == 1 and re.fullmatch(r'atrinik/[a-z0-9-]+', value['repository'])
+    require(value['schema_version'] == 1 and re.fullmatch(r'seraphinastudios/[a-z0-9-]+', value['repository'])
             and re.fullmatch(r'[1-9][0-9]*', value['repository_id'])
             and value['workflow'] == 'publish-crate.yml' and value['environment'] == 'crates-io-release'
             and VERSION.fullmatch(value['toolchain']), 'policy identity')
@@ -136,7 +136,7 @@ class PublicRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def get(url, absent=False, maximum=MAX_JSON, token=None):
-    headers = {'User-Agent': 'atrinik-crate-release/1 (https://github.com/atrinik)', 'Accept': 'application/json'}
+    headers = {'User-Agent': 'tilewright-crate-release/1 (https://github.com/seraphinastudios)', 'Accept': 'application/json'}
     token = token or os.environ.get('GH_READ_TOKEN')
     authenticated = url.startswith('https://api.github.com/') and bool(token)
     if authenticated:
@@ -167,7 +167,7 @@ def github_write(config, suffix, body, token):
     request = urllib.request.Request(f"https://api.github.com/repos/{config['repository']}/{suffix}",
         data=canonical(body), method='POST', headers={'Authorization': 'Bearer ' + token,
         'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json',
-        'User-Agent': 'atrinik-crate-release/1'})
+        'User-Agent': 'tilewright-crate-release/1'})
     with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=30) as response:
         require(response.status == 201, 'GitHub intent creation not acknowledged')
         raw = response.read(MAX_JSON + 1)
@@ -249,7 +249,7 @@ def verified_attestation(config, raw, revision):
                    + '?per_page=30&predicate_type=https%3A%2F%2Fslsa.dev%2Fprovenance%2Fv1')
     bundles = envelope.get('attestations', [])
     require(isinstance(bundles, list) and 0 < len(bundles) <= 30, 'attestation inventory bound')
-    with tempfile.TemporaryDirectory(prefix='atrinik-crate-attestation-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='tilewright-crate-attestation-') as temporary:
         directory = Path(temporary)
         manifest_path, bundle_path, output_path = (directory / name for name in ('crate-release.json', 'bundles.jsonl', 'verified.json'))
         manifest_path.write_bytes(raw)
@@ -335,7 +335,7 @@ def reserve_upload(config, release, row, revision, manifest_sha256, token):
     url = f"https://api.github.com/repos/{config['repository']}/git/ref/{suffix}"
     require(get(url, absent=True) is None, 'existing upload intent requires explicit owner recovery')
     producer = release['_verified_producer']
-    intent = {'schema_version': 1, 'kind': 'atrinik-crate-upload-intent', 'repository_id': config['repository_id'],
+    intent = {'schema_version': 1, 'kind': 'tilewright-crate-upload-intent', 'repository_id': config['repository_id'],
         'name': row['name'], 'version': row['version'], 'archive_sha256': row['sha256'],
         'manifest_sha256': manifest_sha256, 'source_revision': revision, 'source_release_id': release['id'],
         'producer': producer, 'nonce': secrets.token_hex(32)}
@@ -636,7 +636,7 @@ def put_once(data, metadata_value, token):
     endpoint = REGISTRY + '/api/v1/crates/new'
     request = urllib.request.Request(endpoint, data=payload, method='PUT', headers={
         'Authorization': token, 'Content-Type': 'application/octet-stream', 'Accept': 'application/json',
-        'User-Agent': 'atrinik-crate-release/1 (https://github.com/atrinik)'})
+        'User-Agent': 'tilewright-crate-release/1 (https://github.com/seraphinastudios)'})
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=30) as response:
             raw = response.read(65537)
@@ -663,9 +663,9 @@ def registry_source_branch():
         ref = os.environ.get('GITHUB_REF', '')
         require(ref.startswith('refs/heads/'), 'source release must use a branch')
         branch = ref.removeprefix('refs/heads/')
-        require(os.environ.get('ATRINIK_RELEASE_BRANCH', branch) == branch, 'source branch identity drift')
+        require(os.environ.get('TILEWRIGHT_RELEASE_BRANCH', branch) == branch, 'source branch identity drift')
     else:
-        branch = os.environ.get('ATRINIK_RELEASE_BRANCH', 'main')
+        branch = os.environ.get('TILEWRIGHT_RELEASE_BRANCH', 'main')
     require(branch == 'main' or re.fullmatch(r'[0-9]+\.[0-9]+\.x', branch), 'unsupported source release branch')
     return branch == 'main'
 
@@ -692,6 +692,30 @@ def upload(config, release_id, revision, manifest_sha256):
     return manifest
 
 
+def legacy_manifest(config, value, tag):
+    """A manifest this repository published under an earlier name.
+
+    GitHub keeps a repository's ID across renames and transfers, so a manifest
+    with the same ID, a different well-formed name, and a crate family disjoint
+    from every current and historical name belongs to an earlier identity.
+    Such a release cannot own any coordinate this policy manages and is
+    skipped. Anything else must pass `validate_manifest`.
+    """
+    if not isinstance(value, dict) or value.get('repository') == config['repository']:
+        return False
+    require(set(value) == {'schema_version', 'repository', 'repository_id', 'revision', 'source_tag', 'crates'}
+            and value['schema_version'] == 1 and value['repository_id'] == config['repository_id']
+            and isinstance(value['repository'], str)
+            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+', value['repository'])
+            and SHA.fullmatch(value['revision']) and value['source_tag'] == tag
+            and isinstance(value['crates'], list), 'legacy manifest identity')
+    managed = {row['name'] for row in config['crates']} | {row['name'] for row in config['historical']}
+    for row in value['crates']:
+        require(isinstance(row, dict) and isinstance(row.get('name'), str)
+                and row['name'] not in managed, 'legacy manifest overlaps managed crates')
+    return True
+
+
 def catalog(config):
     found = {}
     for page in range(1, 11):
@@ -703,7 +727,10 @@ def catalog(config):
             if not any(row['name'] == MANIFEST for row in release['assets']):
                 continue
             raw = asset_bytes(config, release, MANIFEST, MAX_JSON)
-            manifest = validate_manifest(config, json.loads(raw))
+            value = json.loads(raw)
+            if legacy_manifest(config, value, release['tag_name']):
+                continue
+            manifest = validate_manifest(config, value)
             require(manifest['source_tag'] == release['tag_name'], 'catalog source tag')
             if manifest['crates']:
                 require(release.get('immutable') is True, 'mutable automatic source release')
@@ -725,7 +752,7 @@ def dispatch(config, release, manifest, manifest_sha256):
                       'source_revision': manifest['revision'], 'manifest_sha256': manifest_sha256}})
     request = urllib.request.Request(f"https://api.github.com/repos/{config['repository']}/actions/workflows/{config['workflow']}/dispatches",
         data=body, method='POST', headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
-                                        'Content-Type': 'application/json', 'User-Agent': 'atrinik-crate-release/1'})
+                                        'Content-Type': 'application/json', 'User-Agent': 'tilewright-crate-release/1'})
     with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=30) as response:
         require(response.status == 204, 'dispatch response unresolved')
 

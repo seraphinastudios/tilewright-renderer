@@ -9,17 +9,17 @@ packages=$(realpath "${packages}")
 version=$(cargo metadata --locked --offline --no-deps --format-version 1 \
   | jq -er '[.packages[].version] | unique | if length == 1 then .[0]
     else error("renderer crates do not share one version") end')
-verification=$(mktemp -d /tmp/atrinik-renderer-crates.XXXXXX)
+verification=$(mktemp -d /tmp/tilewright-renderer-crates.XXXXXX)
 trap 'rm -rf -- "${verification}"' EXIT
 
 crates=(
-  atrinik-scene
-  atrinik-render-resources
-  atrinik-render-api
-  atrinik-render-testkit
-  atrinik-render-wgpu
-  atrinik-render-sdl3
-  atrinik-render-ui
+  tilewright-scene
+  tilewright-render-resources
+  tilewright-render-api
+  tilewright-render-testkit
+  tilewright-render-wgpu
+  tilewright-render-sdl3
+  tilewright-render-ui
 )
 
 for crate in "${crates[@]}"; do

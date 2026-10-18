@@ -1,4 +1,4 @@
-# M1 architecture and limits
+# Architecture and limits
 
 Dependencies point inward toward contracts:
 
@@ -6,12 +6,12 @@ Dependencies point inward toward contracts:
 scene <- resources <- render-api <- testkit
   ^          ^            ^          ^
   |          |            |          |
-  +----------+------------+------ render-wgpu <- atrinik-render
+  +----------+------------+------ render-wgpu <- tilewright-render
   +-----------------------+------ render-sdl3
   +------------------------------ render-ui
 ```
 
-`atrinik-scene` owns immutable, versioned, sorted render inputs. `render-api`
+`tilewright-scene` owns immutable, versioned, sorted render inputs. `render-api`
 owns targets, lifecycle errors, output planes, and a renderer trait. Resource
 providers receive explicit content identity, revision, SHA-256 digest, and byte
 budget; this grants no ambient path or URL access. The provider is deliberately
@@ -44,7 +44,7 @@ submitted; per-texture nearest/linear bind groups are created only on cache
 misses.
 
 No public dependency or type points to a client, editor, protocol, server, or
-classic implementation. `tools/check-architecture.sh` validates exact direct
+game implementation. `tools/check-architecture.sh` validates exact direct
 crate edges from Cargo metadata and rejects forbidden sibling sources.
 
 ## Compatibility and cross-repository checklist
@@ -57,7 +57,7 @@ contract; the embedded shader ships in the matching `render-wgpu` crate.
 - A scene field, identity, ordering, semantic mask, or serialized bundle change
   requires renderer, protocol producer, client adapter, editor adapter, and
   corpus review.
-- A resource envelope/digest/revision change requires renderer, content toolkit,
+- A resource envelope/digest/revision change requires renderer, world toolkit,
   content packaging, client/editor providers, and corpus/provenance review.
 - A shader/material/sampling/depth change requires renderer and visual corpus
   review; exact masks must not change silently.

@@ -27,7 +27,7 @@ jq -e '
   and (.eol_response | nonempty_string) and (.validation | nonempty_string)
 ' policy/dependencies.json >/dev/null
 
-metadata=$(mktemp /tmp/atrinik-renderer-metadata.XXXXXX)
+metadata=$(mktemp /tmp/tilewright-renderer-metadata.XXXXXX)
 trap 'rm -f -- "${metadata}"' EXIT
 cargo metadata --locked --offline --all-features --format-version 1 >"${metadata}"
 

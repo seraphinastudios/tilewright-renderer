@@ -24,8 +24,8 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       revision: ${{ steps.plan.outputs.revision }}
     env:
-      CARGO_HOME: /tmp/atrinik-renderer-cargo
-      CARGO_TARGET_DIR: /tmp/atrinik-renderer-target
+      CARGO_HOME: /tmp/tilewright-renderer-cargo
+      CARGO_TARGET_DIR: /tmp/tilewright-renderer-target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,7 +55,7 @@ jobs:
         id: plan
         env:
           NODE_PATH: ${{ runner.temp }}/crate-analysis/node_modules
-          ATRINIK_RELEASE_BRANCH: ${{ github.ref_name }}
+          TILEWRIGHT_RELEASE_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           node scripts/release/source-version.mjs > "$RUNNER_TEMP/source-plan.json"
@@ -102,7 +102,7 @@ jobs:
           path: build/release/
       - name: Verify complete inert payload before attestation
         env:
-          ATRINIK_RELEASE_BRANCH: ${{ github.ref_name }}
+          TILEWRIGHT_RELEASE_BRANCH: ${{ github.ref_name }}
           EXPECTED_SOURCE_REVISION: ${{ needs.source-package.outputs.revision }}
           EXPECTED_SOURCE_VERSION: ${{ needs.source-package.outputs.version }}
         run: >-
@@ -150,7 +150,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_READ_TOKEN: ${{ github.token }}
-          ATRINIK_RELEASE_BRANCH: ${{ github.ref_name }}
+          TILEWRIGHT_RELEASE_BRANCH: ${{ github.ref_name }}
           EXPECTED_SOURCE_REVISION: ${{ needs.source-package.outputs.revision }}
           EXPECTED_SOURCE_VERSION: ${{ needs.source-package.outputs.version }}
         run: '"${RUNNER_TEMP}/semantic-release/node_modules/.bin/semantic-release"'

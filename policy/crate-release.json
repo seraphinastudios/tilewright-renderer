@@ -1,38 +1,38 @@
 {
   "schema_version": 1,
-  "repository": "atrinik/renderer",
+  "repository": "seraphinastudios/tilewright-renderer",
   "repository_id": "1327106998",
   "workflow": "publish-crate.yml",
   "environment": "crates-io-release",
   "toolchain": "1.97.1",
   "crates": [
     {
-      "name": "atrinik-scene",
-      "path": "crates/atrinik-scene"
+      "name": "tilewright-scene",
+      "path": "crates/tilewright-scene"
     },
     {
-      "name": "atrinik-render-resources",
-      "path": "crates/atrinik-render-resources"
+      "name": "tilewright-render-resources",
+      "path": "crates/tilewright-render-resources"
     },
     {
-      "name": "atrinik-render-api",
-      "path": "crates/atrinik-render-api"
+      "name": "tilewright-render-api",
+      "path": "crates/tilewright-render-api"
     },
     {
-      "name": "atrinik-render-ui",
-      "path": "crates/atrinik-render-ui"
+      "name": "tilewright-render-ui",
+      "path": "crates/tilewright-render-ui"
     },
     {
-      "name": "atrinik-render-testkit",
-      "path": "crates/atrinik-render-testkit"
+      "name": "tilewright-render-testkit",
+      "path": "crates/tilewright-render-testkit"
     },
     {
-      "name": "atrinik-render-wgpu",
-      "path": "crates/atrinik-render-wgpu"
+      "name": "tilewright-render-wgpu",
+      "path": "crates/tilewright-render-wgpu"
     },
     {
-      "name": "atrinik-render-sdl3",
-      "path": "crates/atrinik-render-sdl3"
+      "name": "tilewright-render-sdl3",
+      "path": "crates/tilewright-render-sdl3"
     }
   ],
   "historical": [],
