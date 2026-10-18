@@ -14,6 +14,11 @@ tilewright-render-api.workspace = true
 tilewright-render-sdl3 = { workspace = true, optional = true }
 tilewright-render-testkit.workspace = true
 tilewright-render-wgpu.workspace = true
+tilewright-render-world.workspace = true
+tilewright-scene.workspace = true
+png.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 
 [features]

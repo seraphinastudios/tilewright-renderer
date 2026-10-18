@@ -1,0 +1,399 @@
+// Copyright 2026 Seraphina Studios
+// SPDX-License-Identifier: MIT
+
+#![allow(clippy::float_cmp)]
+
+use super::{
+    Anchor, Animation, Camera, CornerRule, Error, GlowEffect, HeightField, Projection, Stretch,
+    TextureRef, WorldObject, WorldView, compile,
+};
+use tilewright_scene::{Digest256, Quad, ResourceId, Sampling, SceneLimits, SemanticId};
+
+fn texture(id: u64, width: u32, height: u32) -> TextureRef {
+    TextureRef {
+        id: ResourceId(id),
+        revision: 1,
+        digest: Digest256([7; 32]),
+        width,
+        height,
+    }
+}
+
+fn iso_view(objects: Vec<WorldObject>, heights: HeightField) -> WorldView {
+    WorldView {
+        revision: 1,
+        clock_millis: 0,
+        camera: Camera {
+            projection: Projection::Isometric {
+                tile_width: 48,
+                tile_height: 24,
+            },
+            center: [0.5, 0.5],
+            zoom: 1.0,
+            width: 96,
+            height: 64,
+            sampling: Sampling::Nearest,
+        },
+        clear_color: [0.0, 0.0, 0.0, 1.0],
+        heights,
+        stretch: Stretch::default(),
+        ground_layer_ranks: 2,
+        objects,
+    }
+}
+
+fn ground(id: u32, tile: [i64; 2]) -> WorldObject {
+    WorldObject::new(SemanticId(id), tile, 1, Anchor::Ground, texture(1, 48, 23))
+}
+
+fn quads_of(view: &WorldView, id: u32) -> Vec<Quad> {
+    compile(view, SceneLimits::default())
+        .unwrap()
+        .quads()
+        .iter()
+        .filter(|quad| quad.semantic_id == SemanticId(id))
+        .copied()
+        .collect()
+}
+
+#[test]
+fn flat_isometric_tile_maps_its_diamond_onto_the_tile() {
+    let view = iso_view(vec![ground(1, [0, 0])], HeightField::empty());
+    let quads = quads_of(&view, 1);
+    assert_eq!(quads.len(), 1);
+    let rect = quads[0].aligned_rect().expect("flat tiles are rectangles");
+    // The tile centre is at the viewport centre (48, 32); the art's diamond
+    // centre is at (24, 11.5) in a 48 × 23 image, so the top edge at 20.5
+    // snaps up to the pixel grid.
+    assert_eq!(
+        (rect.left, rect.top, rect.right, rect.bottom),
+        (24.0, 21.0, 72.0, 44.0)
+    );
+}
+
+#[test]
+fn neighbouring_flat_tiles_tessellate_on_the_half_tile_steps() {
+    let view = iso_view(
+        vec![ground(1, [0, 0]), ground(2, [1, 0]), ground(3, [0, 1])],
+        HeightField::empty(),
+    );
+    let first = quads_of(&view, 1)[0].aligned_rect().unwrap();
+    let east = quads_of(&view, 2)[0].aligned_rect().unwrap();
+    let south = quads_of(&view, 3)[0].aligned_rect().unwrap();
+    assert_eq!((east.left - first.left, east.top - first.top), (24.0, 12.0));
+    assert_eq!(
+        (south.left - first.left, south.top - first.top),
+        (-24.0, 12.0)
+    );
+}
+
+#[test]
+fn stretched_tile_bends_to_shared_corner_heights() {
+    let heights = HeightField {
+        origin: [0, 0],
+        width: 2,
+        height: 1,
+        heights: vec![Some(0), Some(8)],
+    };
+    let view = iso_view(vec![ground(1, [0, 0]), ground(2, [1, 0])], heights);
+    let left = quads_of(&view, 1);
+    let right = quads_of(&view, 2);
+    assert_eq!(left.len(), 16, "a sloped tile becomes a 4 × 4 mesh");
+    assert!(left.iter().all(|quad| quad.aligned_rect().is_none()));
+    let parts: std::collections::BTreeSet<u16> = left.iter().map(|quad| quad.part).collect();
+    assert_eq!(parts.len(), 16);
+    // The shared edge between the two tiles takes the mean height 4 at both
+    // ends, so the meshes meet without a gap.
+    let right_edge_of_left = left
+        .iter()
+        .flat_map(|quad| quad.positions)
+        .fold(f32::MIN, |best, point| best.max(point[0]));
+    let left_edge_of_right = right
+        .iter()
+        .flat_map(|quad| quad.positions)
+        .fold(f32::MAX, |best, point| best.min(point[0]));
+    assert!(right_edge_of_left > left_edge_of_right);
+}
+
+#[test]
+fn cliff_threshold_keeps_hard_edges() {
+    let heights = HeightField {
+        origin: [0, 0],
+        width: 2,
+        height: 1,
+        heights: vec![Some(0), Some(100)],
+    };
+    let mut view = iso_view(vec![ground(1, [0, 0])], heights);
+    view.stretch = Stretch {
+        cliff_threshold: Some(12),
+        ..Stretch::default()
+    };
+    assert_eq!(
+        quads_of(&view, 1).len(),
+        1,
+        "the cliff neighbour does not bend the tile"
+    );
+    view.stretch.rule = CornerRule::Max;
+    view.stretch.cliff_threshold = None;
+    // Without a threshold the tile bends toward its 100-unit neighbour; parts
+    // lifted above the viewport are culled.
+    let bent = quads_of(&view, 1);
+    assert!(bent.len() > 1 && bent.iter().all(|quad| quad.aligned_rect().is_none()));
+}
+
+#[test]
+fn standing_art_sits_on_the_tile_and_rises_with_height() {
+    let tree = |id| {
+        WorldObject::new(
+            SemanticId(id),
+            [0, 0],
+            3,
+            Anchor::Standing,
+            texture(2, 40, 60),
+        )
+    };
+    let flat = iso_view(vec![tree(1)], HeightField::empty());
+    let rect = quads_of(&flat, 1)[0].aligned_rect().unwrap();
+    // Bottom centre at the diamond's front edge (48, 32 + 11.5), snapped to
+    // the pixel grid like the diamond itself.
+    assert_eq!(
+        (rect.left, rect.bottom, rect.right - rect.left),
+        (28.0, 44.0, 40.0)
+    );
+    let raised = iso_view(
+        vec![tree(1)],
+        HeightField {
+            origin: [0, 0],
+            width: 1,
+            height: 1,
+            heights: vec![Some(10)],
+        },
+    );
+    let raised_rect = quads_of(&raised, 1)[0].aligned_rect().unwrap();
+    assert!((raised_rect.bottom - (rect.bottom - 10.0)).abs() < 1e-4);
+}
+
+#[test]
+fn isometric_order_interleaves_ground_and_objects_by_diagonal() {
+    let objects = vec![
+        WorldObject::new(
+            SemanticId(10),
+            [0, 0],
+            3,
+            Anchor::Standing,
+            texture(2, 40, 60),
+        ),
+        ground(11, [1, 1]),
+        ground(12, [0, 0]),
+    ];
+    let scene = compile(
+        &iso_view(objects, HeightField::empty()),
+        SceneLimits::default(),
+    )
+    .unwrap();
+    let order: Vec<u32> = scene
+        .quads()
+        .iter()
+        .map(|quad| quad.semantic_id.0)
+        .collect();
+    assert_eq!(order, [12, 10, 11]);
+}
+
+#[test]
+fn top_down_draws_ground_first_then_rows() {
+    let mut view = iso_view(Vec::new(), HeightField::empty());
+    view.camera.projection = Projection::TopDown { tile_size: 32 };
+    view.camera.center = [1.0, 1.0];
+    view.objects = vec![
+        WorldObject::new(
+            SemanticId(1),
+            [0, 1],
+            3,
+            Anchor::Standing,
+            texture(2, 32, 48),
+        ),
+        WorldObject::new(
+            SemanticId(2),
+            [0, 0],
+            3,
+            Anchor::Standing,
+            texture(2, 32, 48),
+        ),
+        WorldObject::new(SemanticId(3), [1, 1], 0, Anchor::Ground, texture(1, 32, 32)),
+    ];
+    let scene = compile(&view, SceneLimits::default()).unwrap();
+    let order: Vec<u32> = scene
+        .quads()
+        .iter()
+        .map(|quad| quad.semantic_id.0)
+        .collect();
+    assert_eq!(order, [3, 2, 1]);
+    let tile = scene.quads()[0].aligned_rect().unwrap();
+    assert_eq!(
+        (tile.left, tile.top, tile.right, tile.bottom),
+        (48.0, 32.0, 80.0, 64.0)
+    );
+}
+
+#[test]
+fn glow_adds_an_unpickable_halo_before_the_art() {
+    let mut lamp = WorldObject::new(
+        SemanticId(5),
+        [0, 0],
+        3,
+        Anchor::Standing,
+        texture(3, 20, 20),
+    );
+    lamp.glow = Some(GlowEffect {
+        color: [1.0, 0.8, 0.2, 1.0],
+        radius_px: 4.0,
+        pulse_millis: 1000,
+    });
+    let mut view = iso_view(vec![lamp], HeightField::empty());
+    view.clock_millis = 250;
+    let quads = quads_of(&view, 5);
+    assert_eq!(quads.len(), 2);
+    let halo = quads[0];
+    assert!(!halo.pickable);
+    let glow = halo.glow.unwrap();
+    assert!((glow.radius_uv[0] - 0.2).abs() < 1e-6);
+    assert!(
+        (glow.color[3] - 0.7).abs() < 1e-6,
+        "pulse at a quarter period"
+    );
+    let halo_rect = halo.aligned_rect().unwrap();
+    let art = quads[1].aligned_rect().unwrap();
+    assert!((art.left - halo_rect.left - 4.0).abs() < 1e-4);
+    assert!(quads[1].pickable && quads[1].glow.is_none());
+}
+
+#[test]
+fn effects_reach_the_quads() {
+    let mut object = WorldObject::new(
+        SemanticId(1),
+        [0, 0],
+        3,
+        Anchor::Standing,
+        texture(2, 20, 30),
+    );
+    object.scale = [2.0, 0.5];
+    object.alpha = 0.5;
+    object.tint = [1.0, 0.0, 0.5];
+    object.grayscale = 0.25;
+    object.offset_px = [3.0, -2.0];
+    let quad = quads_of(&iso_view(vec![object.clone()], HeightField::empty()), 1)[0];
+    assert_eq!(quad.color, [1.0, 0.0, 0.5, 0.5]);
+    assert!((quad.grayscale - 0.25).abs() < f32::EPSILON);
+    let rect = quad.aligned_rect().unwrap();
+    assert_eq!(
+        (rect.right - rect.left, rect.bottom - rect.top),
+        (40.0, 15.0)
+    );
+    assert_eq!(rect.left, 48.0 - 20.0 + 3.0);
+    object.rotation_degrees = 30.0;
+    let rotated = quads_of(&iso_view(vec![object], HeightField::empty()), 1)[0];
+    assert!(rotated.aligned_rect().is_none());
+    let center = rotated.positions.iter().fold([0.0_f32; 2], |sum, point| {
+        [sum[0] + point[0] / 4.0, sum[1] + point[1] / 4.0]
+    });
+    assert!((center[0] - f32::midpoint(rect.left, rect.right)).abs() < 1e-3);
+    assert!((center[1] - f32::midpoint(rect.top, rect.bottom)).abs() < 1e-3);
+}
+
+#[test]
+fn animation_frames_follow_the_clock() {
+    let mut object = WorldObject::new(
+        SemanticId(1),
+        [0, 0],
+        3,
+        Anchor::Standing,
+        texture(20, 16, 16),
+    );
+    object.animation = Animation {
+        frames: vec![
+            texture(20, 16, 16),
+            texture(21, 16, 16),
+            texture(22, 16, 16),
+        ],
+        frame_millis: 100,
+        phase_millis: 50,
+    };
+    let mut view = iso_view(vec![object], HeightField::empty());
+    for (clock, expected) in [(0, 20), (49, 20), (50, 21), (200, 22), (250, 20)] {
+        view.clock_millis = clock;
+        assert_eq!(
+            quads_of(&view, 1)[0].resource_id,
+            ResourceId(expected),
+            "clock {clock}"
+        );
+    }
+}
+
+#[test]
+fn double_draw_repeats_after_the_next_diagonal_without_picking() {
+    let mut tall = WorldObject::new(
+        SemanticId(1),
+        [0, 0],
+        3,
+        Anchor::Standing,
+        texture(2, 20, 80),
+    );
+    tall.double_draw = true;
+    let objects = vec![tall, ground(2, [1, 0])];
+    let scene = compile(
+        &iso_view(objects, HeightField::empty()),
+        SceneLimits::default(),
+    )
+    .unwrap();
+    let order: Vec<(u32, bool)> = scene
+        .quads()
+        .iter()
+        .map(|quad| (quad.semantic_id.0, quad.pickable))
+        .collect();
+    assert_eq!(order, [(1, true), (2, true), (1, false)]);
+}
+
+#[test]
+fn objects_outside_the_viewport_are_culled() {
+    let view = iso_view(
+        vec![ground(1, [0, 0]), ground(2, [40, 40])],
+        HeightField::empty(),
+    );
+    let scene = compile(&view, SceneLimits::default()).unwrap();
+    assert!(scene.quads().iter().all(|quad| quad.semantic_id.0 == 1));
+}
+
+#[test]
+fn compiling_is_deterministic_and_validates_input() {
+    let view = iso_view(
+        vec![ground(1, [0, 0]), ground(2, [1, 0])],
+        HeightField::empty(),
+    );
+    assert_eq!(
+        compile(&view, SceneLimits::default()).unwrap(),
+        compile(&view, SceneLimits::default()).unwrap()
+    );
+    let mut bad = view.clone();
+    bad.camera.zoom = 0.0;
+    assert_eq!(
+        compile(&bad, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+    let mut bad = view.clone();
+    bad.objects[0].footprint = [0, 1];
+    assert_eq!(
+        compile(&bad, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+    let mut bad = view;
+    bad.heights = HeightField {
+        origin: [0, 0],
+        width: 2,
+        height: 2,
+        heights: vec![Some(0)],
+    };
+    assert_eq!(
+        compile(&bad, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+}

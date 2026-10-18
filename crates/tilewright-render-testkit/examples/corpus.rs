@@ -5,25 +5,51 @@ use sha2::{Digest, Sha256};
 use std::{fmt::Write as _, time::Instant};
 use tilewright_render_api::{RenderRequest, Renderer};
 use tilewright_render_testkit::{
-    ReferenceRenderer, dense_scene, offscreen_target, structural_scene, synthetic_provider,
-    synthetic_scene,
+    ReferenceRenderer, dense_scene, iso_world_scene, offscreen_target, structural_scene,
+    synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{{\"schema_version\":1,\"cases\":[");
     let cases = [
-        ("overlap-square", synthetic_scene(16, 16)?, 50_000_u64),
-        ("unaligned-wide", synthetic_scene(31, 17)?, 50_000),
-        ("structural-fog-ui", structural_scene(48, 48)?, 75_000),
-        ("high-density-1024", dense_scene(128, 128)?, 250_000),
+        (
+            "overlap-square",
+            synthetic_scene(16, 16)?,
+            50_000_u64,
+            false,
+        ),
+        ("unaligned-wide", synthetic_scene(31, 17)?, 50_000, false),
+        (
+            "structural-fog-ui",
+            structural_scene(48, 48)?,
+            75_000,
+            false,
+        ),
+        ("high-density-1024", dense_scene(128, 128)?, 250_000, false),
+        (
+            "world-iso-terrain",
+            iso_world_scene(192, 128)?,
+            400_000,
+            true,
+        ),
+        (
+            "world-top-down",
+            top_down_world_scene(96, 64)?,
+            200_000,
+            true,
+        ),
     ];
-    for (index, (name, scene, maximum_cpu_micros)) in cases.into_iter().enumerate() {
+    for (index, (name, scene, maximum_cpu_micros, world)) in cases.into_iter().enumerate() {
         let viewport = scene.viewport();
         let started = Instant::now();
         let frame = ReferenceRenderer::new(offscreen_target(viewport.width, viewport.height))?
             .render(RenderRequest {
                 scene: &scene,
-                resources: synthetic_provider()?,
+                resources: if world {
+                    world_provider()?
+                } else {
+                    synthetic_provider()?
+                },
             })?;
         let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         if elapsed_micros > maximum_cpu_micros {
@@ -43,14 +69,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .flat_map(|value| value.to_le_bytes())
             .collect::<Vec<_>>();
         println!(
-            "{}{{\"name\":\"{}\",\"width\":{},\"height\":{},\"clock_millis\":{},\"maximum_rgba_channel_difference\":1,\"performance\":{{\"maximum_cpu_micros\":{},\"sprite_count\":{},\"resource_requests\":{},\"uploaded_bytes\":{},\"vertex_count\":{},\"vertex_allocation_bytes\":{},\"target_allocation_bytes\":{}}},\"digests\":{{\"rgba8\":\"{}\",\"semantic_u32le\":\"{}\",\"depth_i16le\":\"{}\",\"coverage_u8\":\"{}\"}}}}",
+            "{}{{\"name\":\"{}\",\"width\":{},\"height\":{},\"clock_millis\":{},\"maximum_rgba_channel_difference\":1,\"performance\":{{\"maximum_cpu_micros\":{},\"quad_count\":{},\"resource_requests\":{},\"uploaded_bytes\":{},\"vertex_count\":{},\"vertex_allocation_bytes\":{},\"target_allocation_bytes\":{}}},\"digests\":{{\"rgba8\":\"{}\",\"semantic_u32le\":\"{}\",\"depth_i16le\":\"{}\",\"coverage_u8\":\"{}\"}}}}",
             if index == 0 { "" } else { "," },
             name,
             viewport.width,
             viewport.height,
             scene.clock_millis(),
             maximum_cpu_micros,
-            scene.sprites().len(),
+            scene.quads().len(),
             frame.metrics.resource_requests,
             frame.metrics.uploaded_bytes,
             frame.metrics.vertex_count,

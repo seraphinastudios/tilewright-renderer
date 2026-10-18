@@ -1,0 +1,91 @@
+# World-view files
+
+`tilewright-render world VIEW.json OUTPUT.png [--reference]` renders one frame
+of a tile world from a `tilewright.view/1` file. The file is plain JSON holding
+the same data as `tilewright_render_world::WorldView`. Consumers such as the
+world toolkit or a game's content tools write it; the renderer never reads
+game content directly.
+
+The command compiles the view with `tilewright-render-world`, renders it with
+the wgpu backend (or the CPU reference with `--reference`), and writes a PNG.
+The output path must not exist; the write is atomic and never overwrites.
+
+## Inputs and trust
+
+- Every texture is listed explicitly with a path relative to the view file
+  and the SHA-256 of the file's bytes. A mismatch fails before anything is
+  drawn. Nothing else is read from disk and nothing is fetched.
+- Unknown keys are errors, so a misspelled field fails rather than being
+  silently ignored.
+- View files are capped at 64 MiB and texture files at 16 MiB. Images are
+  capped at 8,192 px per side; the GPU device may impose a lower bound, which
+  is reported as an error.
+- PNG input may be RGBA, RGB, greyscale, greyscale with alpha, or indexed;
+  16-bit channels are reduced to 8 bits.
+
+## Fields
+
+```jsonc
+{
+  "format": "tilewright.view/1",      // required
+  "revision": 1,                      // default 1
+  "clock_millis": 0,                  // drives animation and glow pulses
+  "camera": {
+    "projection": "isometric",        // or "top_down"
+    "tile_width": 48,                 // isometric only
+    "tile_height": 24,                // isometric only
+    "tile_size": 32,                  // top_down only
+    "center": [24.0, 24.0],           // tile coordinates at the viewport centre
+    "zoom": 1.0,                      // default 1
+    "width": 1024,                    // output size in pixels
+    "height": 768,
+    "sampling": "nearest"             // or "linear"
+  },
+  "clear_color": [0.0, 0.0, 0.0, 1.0],
+  "stretch": {
+    "enabled": true,                  // default true
+    "rule": "mean",                   // "mean", "max" or "min"
+    "cliff_threshold": 24,            // optional
+    "pixels_per_unit": 1.0            // screen pixels per height unit
+  },
+  "ground_layer_ranks": 3,            // ranks below this are ground layers
+  "heights": {                        // optional
+    "origin": [0, 0],
+    "width": 48,
+    "height": 48,
+    "values": [0, 0, 8, null]         // row-major; null means no height
+  },
+  "textures": [
+    {"id": 1, "path": "art/grass.png", "sha256": "…64 hex digits…"}
+  ],
+  "objects": [
+    {
+      "id": 1,                        // semantic ID reported in picking
+      "tile": [3, 4],                 // head tile
+      "rank": 1,                      // render-layer rank
+      "anchor": "ground",             // "ground" or "standing"
+      "texture": 1                    // or "animation" below
+    },
+    {
+      "id": 2, "tile": [5, 5], "rank": 3, "anchor": "standing",
+      "animation": {"frames": [1, 2], "frame_millis": 200, "phase_millis": 0},
+      "footprint": [2, 1],            // default [1, 1]
+      "sub_layer": 0,
+      "offset": [0.0, -4.0],          // art pixels
+      "z": 6,                         // extra height units
+      "scale": [1.0, 1.0],
+      "rotation": 0.0,                // degrees clockwise
+      "alpha": 1.0,
+      "tint": [1.0, 1.0, 1.0],
+      "grayscale": 0.0,
+      "glow": {"color": [1.0, 0.6, 0.1, 0.9], "radius": 3.0, "pulse_millis": 1000},
+      "double_draw": false,
+      "pickable": true
+    }
+  ]
+}
+```
+
+The comments above are for this document only; view files are strict JSON.
+See [architecture](ARCHITECTURE.md#world-compiler) for how projection,
+stretching, draw order, and effects are applied.

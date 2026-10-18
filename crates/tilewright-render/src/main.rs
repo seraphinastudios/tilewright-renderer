@@ -3,14 +3,20 @@
 
 #![forbid(unsafe_code)]
 
+mod view_file;
+
 use std::{env, io::Write, path::Path, process::ExitCode};
 use tilewright_render_api::{
-    BackendPreference, RenderRequest, Renderer, TargetDescriptor, TargetKind,
+    BackendPreference, FrameOutput, RenderRequest, Renderer, TargetDescriptor, TargetKind,
 };
 use tilewright_render_testkit::{
-    dense_scene, structural_scene, synthetic_provider, synthetic_scene,
+    ReferenceRenderer, dense_scene, iso_world_scene, structural_scene, synthetic_provider,
+    synthetic_scene, top_down_world_scene, world_provider,
 };
 use tilewright_render_wgpu::WgpuRenderer;
+use tilewright_scene::SceneLimits;
+
+const USAGE: &str = "usage: tilewright-render {--version|probe|corpus|window|offscreen OUTPUT.rgba|world VIEW.json OUTPUT.png [--reference]}";
 
 #[cfg(unix)]
 use std::fs::File;
@@ -59,11 +65,51 @@ fn run() -> Result<(), String> {
         }
         Some("corpus") if arguments.next().is_none() => render_corpus(),
         Some("window") if arguments.next().is_none() => render_window(),
-        _ => Err(
-            "usage: tilewright-render {--version|probe|corpus|window|offscreen OUTPUT.rgba}"
-                .to_owned(),
-        ),
+        Some("world") => {
+            let (Some(view), Some(output)) = (arguments.next(), arguments.next()) else {
+                return Err(USAGE.to_owned());
+            };
+            let reference = match arguments.next().as_deref() {
+                None => false,
+                Some("--reference") if arguments.next().is_none() => true,
+                Some(_) => return Err(USAGE.to_owned()),
+            };
+            render_world(Path::new(&view), Path::new(&output), reference)
+        }
+        _ => Err(USAGE.to_owned()),
     }
+}
+
+/// Renders a `tilewright.view/1` file to a PNG through the same compiler and
+/// renderer paths the corpus uses. `--reference` selects the CPU reference.
+fn render_world(view: &Path, output: &Path, reference: bool) -> Result<(), String> {
+    let loaded = view_file::load(view)?;
+    let scene = tilewright_render_world::compile(&loaded.view, SceneLimits::default())
+        .map_err(|error| format!("cannot compile view: {error}"))?;
+    let viewport = scene.viewport();
+    let request = RenderRequest {
+        scene: &scene,
+        resources: loaded.provider,
+    };
+    let frame: FrameOutput = if reference {
+        ReferenceRenderer::new(target(viewport.width, viewport.height))
+            .and_then(|mut renderer| renderer.render(request))
+    } else {
+        WgpuRenderer::new(target(viewport.width, viewport.height))
+            .and_then(|mut renderer| renderer.render(request))
+    }
+    .map_err(|error| error.to_string())?;
+    let png = view_file::encode_png(frame.width, frame.height, &frame.rgba8)?;
+    persist_new(output, &[&png])?;
+    println!(
+        "world={} quads={} size={}x{} renderer={}",
+        output.display(),
+        scene.quads().len(),
+        frame.width,
+        frame.height,
+        if reference { "reference" } else { "wgpu" },
+    );
+    Ok(())
 }
 
 #[cfg(feature = "sdl3")]
@@ -106,12 +152,14 @@ fn render_window() -> Result<(), String> {
 
 fn render_corpus() -> Result<(), String> {
     let cases = [
-        ("overlap-square", synthetic_scene(16, 16)),
-        ("unaligned-wide", synthetic_scene(31, 17)),
-        ("structural-fog-ui", structural_scene(48, 48)),
-        ("high-density-1024", dense_scene(128, 128)),
+        ("overlap-square", synthetic_scene(16, 16), false),
+        ("unaligned-wide", synthetic_scene(31, 17), false),
+        ("structural-fog-ui", structural_scene(48, 48), false),
+        ("high-density-1024", dense_scene(128, 128), false),
+        ("world-iso-terrain", iso_world_scene(192, 128), true),
+        ("world-top-down", top_down_world_scene(96, 64), true),
     ];
-    for (name, scene) in cases {
+    for (name, scene, world) in cases {
         let scene = scene.map_err(|error| error.to_string())?;
         let viewport = scene.viewport();
         let mut renderer = WgpuRenderer::new(target(viewport.width, viewport.height))
@@ -119,12 +167,17 @@ fn render_corpus() -> Result<(), String> {
         let frame = renderer
             .render(RenderRequest {
                 scene: &scene,
-                resources: synthetic_provider().map_err(|error| error.to_string())?,
+                resources: if world {
+                    world_provider()
+                } else {
+                    synthetic_provider()
+                }
+                .map_err(|error| error.to_string())?,
             })
             .map_err(|error| error.to_string())?;
         println!(
-            "scenario={name} sprites={} vertices={} uploads={} readback_bytes={} frame_cpu_micros={}",
-            scene.sprites().len(),
+            "scenario={name} quads={} vertices={} uploads={} readback_bytes={} frame_cpu_micros={}",
+            scene.quads().len(),
             frame.metrics.vertex_count,
             frame.metrics.uploaded_bytes,
             frame.metrics.readback_bytes,
@@ -202,8 +255,57 @@ const fn target(width: u32, height: u32) -> TargetDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use super::persist_new;
+    use super::{persist_new, render_world, view_file};
+    use sha2::{Digest, Sha256};
     use std::fs;
+
+    /// Writes a 4 × 4 opaque square PNG and a view naming it.
+    fn write_view(directory: &std::path::Path, digest: Option<&str>) -> std::path::PathBuf {
+        let pixels: Vec<u8> = (0..16).flat_map(|_| [200, 40, 40, 255]).collect();
+        let png = view_file::encode_png(4, 4, &pixels).unwrap();
+        fs::write(directory.join("square.png"), &png).unwrap();
+        let sha = digest.map_or_else(|| view_file::hex(&Sha256::digest(&png)), str::to_owned);
+        let view = format!(
+            r#"{{
+  "format": "tilewright.view/1",
+  "camera": {{"projection": "top_down", "tile_size": 4, "center": [1.0, 1.0],
+              "width": 8, "height": 8}},
+  "clear_color": [0.0, 0.0, 1.0, 1.0],
+  "stretch": {{"enabled": false}},
+  "textures": [{{"id": 7, "path": "square.png", "sha256": "{sha}"}}],
+  "objects": [{{"id": 1, "tile": [0, 0], "rank": 0, "anchor": "ground", "texture": 7}}]
+}}"#
+        );
+        let path = directory.join("view.json");
+        fs::write(&path, view).unwrap();
+        path
+    }
+
+    #[test]
+    fn world_views_render_through_the_reference_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let output = directory.path().join("frame.png");
+        render_world(&view, &output, true).unwrap();
+        let (width, height, atx1) = view_file::png_to_atx1(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!((width, height), (8, 8));
+        let pixel = |x: usize, y: usize| &atx1[12 + (y * 8 + x) * 4..][..4];
+        assert_eq!(pixel(1, 1), [200, 40, 40, 255]);
+        assert_eq!(pixel(6, 6), [0, 0, 255, 255]);
+        assert!(render_world(&view, &output, true).is_err());
+    }
+
+    #[test]
+    fn world_views_reject_mismatched_digests_and_unknown_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), Some(&"0".repeat(64)));
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("sha256 does not match"), "{error}");
+        let text = fs::read_to_string(write_view(directory.path(), None)).unwrap();
+        fs::write(&view, text.replace("\"clear_color\"", "\"colour\"")).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("unknown key \"colour\""), "{error}");
+    }
 
     #[test]
     fn output_persistence_is_atomic_and_no_clobber() {

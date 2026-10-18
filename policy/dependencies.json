@@ -6,8 +6,10 @@
   "direct_dependencies": [
     {"name":"bytemuck","purpose":"checked vertex byte views"},
     {"name":"naga","purpose":"offline WGSL validation"},
+    {"name":"png","purpose":"CLI world-view texture input and frame output"},
     {"name":"pollster","purpose":"bounded native GPU initialization"},
     {"name":"sdl3","purpose":"window and embedded native handles"},
+    {"name":"serde_json","purpose":"CLI world-view file parsing"},
     {"name":"sha2","purpose":"resource and corpus identity"},
     {"name":"tempfile","purpose":"atomic no-clobber CLI output"},
     {"name":"wgpu","purpose":"Vulkan and D3D12 rendering"}

@@ -12,6 +12,7 @@ publish = ["crates-io"]
 [dependencies]
 tilewright-render-api.workspace = true
 tilewright-render-resources.workspace = true
+tilewright-render-world.workspace = true
 tilewright-scene.workspace = true
 sha2.workspace = true
 

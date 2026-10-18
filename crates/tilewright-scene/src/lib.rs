@@ -3,9 +3,21 @@
 
 #![forbid(unsafe_code)]
 
+//! Renderer-neutral, bounded, ordered scene contracts.
+//!
+//! A [`SceneBundle`] is an immutable, validated list of textured [`Quad`]s in
+//! logical pixel space. [`Sprite`] is a convenience for axis-aligned quads.
+
 use std::{collections::HashSet, fmt};
 
-pub const SCENE_BUNDLE_VERSION: u32 = 1;
+/// Version of the logical scene contract. Version 2 replaced sprites with
+/// arbitrary textured quads carrying effect parameters.
+pub const SCENE_BUNDLE_VERSION: u32 = 2;
+
+/// Largest accepted texture-coordinate magnitude. Coordinates outside 0–1
+/// are allowed so geometry can extend past an image (glow halos, bilinear
+/// ground meshes); those samples are transparent.
+pub const MAXIMUM_UV_MAGNITUDE: f32 = 16.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ResourceId(pub u64);
@@ -30,6 +42,8 @@ pub enum Layer {
     Interface,
 }
 
+/// An axis-aligned textured rectangle. Converted into a [`Quad`] whose
+/// corners run top-left, top-right, bottom-right, bottom-left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sprite {
     pub semantic_id: SemanticId,
@@ -47,6 +61,110 @@ pub struct Sprite {
     pub layer: Layer,
 }
 
+/// A coloured halo around the texture's silhouette. A quad with a glow draws
+/// only the halo; its texture supplies the silhouette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Glow {
+    /// Halo colour; alpha is the halo strength.
+    pub color: [f32; 4],
+    /// Halo radius in texture coordinates, per axis.
+    pub radius_uv: [f32; 2],
+}
+
+/// A textured quadrilateral split into the triangles (0, 1, 2) and (0, 2, 3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quad {
+    /// Picking identity. Several quads of one object share it.
+    pub semantic_id: SemanticId,
+    /// Distinguishes quads that share a semantic identity.
+    pub part: u16,
+    pub resource_id: ResourceId,
+    pub resource_revision: u64,
+    pub resource_digest: Digest256,
+    /// Corner positions in logical pixels.
+    pub positions: [[f32; 2]; 4],
+    /// Corner texture coordinates.
+    pub uvs: [[f32; 2]; 4],
+    pub depth: i16,
+    pub painter_order: u32,
+    /// Multiplied with the texture; alpha scales opacity.
+    pub color: [f32; 4],
+    /// 0 keeps colour, 1 is fully grey.
+    pub grayscale: f32,
+    pub glow: Option<Glow>,
+    /// Whether this quad writes the semantic, depth and coverage planes.
+    pub pickable: bool,
+    pub sampling: Sampling,
+    pub layer: Layer,
+}
+
+impl From<Sprite> for Quad {
+    fn from(sprite: Sprite) -> Self {
+        let left = sprite.x;
+        let top = sprite.y;
+        let right = sprite.x + sprite.width;
+        let bottom = sprite.y + sprite.height;
+        Self {
+            semantic_id: sprite.semantic_id,
+            part: 0,
+            resource_id: sprite.resource_id,
+            resource_revision: sprite.resource_revision,
+            resource_digest: sprite.resource_digest,
+            positions: [[left, top], [right, top], [right, bottom], [left, bottom]],
+            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            depth: sprite.depth,
+            painter_order: sprite.painter_order,
+            color: sprite.color,
+            grayscale: 0.0,
+            glow: None,
+            pickable: true,
+            sampling: sprite.sampling,
+            layer: sprite.layer,
+        }
+    }
+}
+
+/// An axis-aligned rectangle with linearly mapped texture coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AlignedRect {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+}
+
+impl Quad {
+    /// Returns the rectangle when the quad is axis aligned, in top-left,
+    /// top-right, bottom-right, bottom-left order, with texture coordinates
+    /// aligned the same way.
+    #[must_use]
+    #[allow(clippy::float_cmp)]
+    pub fn aligned_rect(&self) -> Option<AlignedRect> {
+        let [p0, p1, p2, p3] = self.positions;
+        let [t0, t1, t2, t3] = self.uvs;
+        let aligned = p0[1] == p1[1]
+            && p1[0] == p2[0]
+            && p2[1] == p3[1]
+            && p3[0] == p0[0]
+            && p0[0] < p1[0]
+            && p0[1] < p3[1]
+            && t0[1] == t1[1]
+            && t1[0] == t2[0]
+            && t2[1] == t3[1]
+            && t3[0] == t0[0];
+        aligned.then_some(AlignedRect {
+            left: p0[0],
+            top: p0[1],
+            right: p2[0],
+            bottom: p2[1],
+            uv_min: t0,
+            uv_max: t2,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Viewport {
     pub width: u32,
@@ -56,7 +174,7 @@ pub struct Viewport {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SceneLimits {
-    pub maximum_sprites: usize,
+    pub maximum_quads: usize,
     pub maximum_dimension: u32,
     pub maximum_pixels: u64,
 }
@@ -64,7 +182,7 @@ pub struct SceneLimits {
 impl Default for SceneLimits {
     fn default() -> Self {
         Self {
-            maximum_sprites: 65_536,
+            maximum_quads: 131_072,
             maximum_dimension: 8_192,
             maximum_pixels: 16_777_216,
         }
@@ -78,16 +196,44 @@ pub struct SceneBundle {
     clock_millis: u64,
     viewport: Viewport,
     clear_color: [f32; 4],
-    sprites: Vec<Sprite>,
+    quads: Vec<Quad>,
 }
 
 impl SceneBundle {
+    /// Builds a scene from axis-aligned sprites.
+    ///
+    /// # Errors
+    /// Returns a validation error as [`SceneBundle::from_quads`] does.
     pub fn new(
         revision: u64,
         clock_millis: u64,
         viewport: Viewport,
         clear_color: [f32; 4],
         sprites: impl IntoIterator<Item = Sprite>,
+        limits: SceneLimits,
+    ) -> Result<Self, Error> {
+        Self::from_quads(
+            revision,
+            clock_millis,
+            viewport,
+            clear_color,
+            sprites.into_iter().map(Quad::from),
+            limits,
+        )
+    }
+
+    /// Builds a scene from quads, validating every value and ordering them
+    /// stably by layer, depth, painter order, semantic identity and part.
+    ///
+    /// # Errors
+    /// Returns [`Error::InvalidValue`], [`Error::LimitExceeded`] or
+    /// [`Error::DuplicateSemanticId`] for a repeated identity and part.
+    pub fn from_quads(
+        revision: u64,
+        clock_millis: u64,
+        viewport: Viewport,
+        clear_color: [f32; 4],
+        quads: impl IntoIterator<Item = Quad>,
         limits: SceneLimits,
     ) -> Result<Self, Error> {
         if revision == 0
@@ -103,26 +249,27 @@ impl SceneBundle {
             return Err(Error::InvalidValue);
         }
         let mut values = Vec::new();
-        for sprite in sprites {
-            if values.len() >= limits.maximum_sprites {
+        for quad in quads {
+            if values.len() >= limits.maximum_quads {
                 return Err(Error::LimitExceeded);
             }
-            validate_sprite(&sprite, limits.maximum_dimension)?;
-            values.push(sprite);
+            validate_quad(&quad, limits.maximum_dimension)?;
+            values.push(quad);
         }
-        let mut semantic_ids = HashSet::with_capacity(values.len());
+        let mut identities = HashSet::with_capacity(values.len());
         if values
             .iter()
-            .any(|sprite| !semantic_ids.insert(sprite.semantic_id))
+            .any(|quad| !identities.insert((quad.semantic_id, quad.part)))
         {
             return Err(Error::DuplicateSemanticId);
         }
-        values.sort_by_key(|sprite| {
+        values.sort_by_key(|quad| {
             (
-                sprite.layer,
-                sprite.depth,
-                sprite.painter_order,
-                sprite.semantic_id,
+                quad.layer,
+                quad.depth,
+                quad.painter_order,
+                quad.semantic_id,
+                quad.part,
             )
         });
         Ok(Self {
@@ -131,7 +278,7 @@ impl SceneBundle {
             clock_millis,
             viewport,
             clear_color,
-            sprites: values,
+            quads: values,
         })
     }
 
@@ -161,8 +308,8 @@ impl SceneBundle {
     }
 
     #[must_use]
-    pub fn sprites(&self) -> &[Sprite] {
-        &self.sprites
+    pub fn quads(&self) -> &[Quad] {
+        &self.quads
     }
 }
 
@@ -181,23 +328,53 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-fn validate_sprite(sprite: &Sprite, maximum_dimension: u32) -> Result<(), Error> {
+fn validate_quad(quad: &Quad, maximum_dimension: u32) -> Result<(), Error> {
     let maximum = maximum_dimension as f32;
-    if sprite.semantic_id.0 == 0
-        || sprite.resource_id.0 == 0
-        || sprite.resource_revision == 0
-        || sprite.resource_digest.0.iter().all(|byte| *byte == 0)
-        || !sprite.x.is_finite()
-        || !sprite.y.is_finite()
-        || !sprite.width.is_finite()
-        || !sprite.height.is_finite()
-        || sprite.width <= 0.0
-        || sprite.height <= 0.0
-        || sprite.width > maximum
-        || sprite.height > maximum
-        || sprite.x.abs() > maximum * 2.0
-        || sprite.y.abs() > maximum * 2.0
-        || !valid_color(sprite.color)
+    let position_ok = |point: &[f32; 2]| {
+        point
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= maximum * 2.0)
+    };
+    let uv_ok = |point: &[f32; 2]| {
+        point
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= MAXIMUM_UV_MAGNITUDE)
+    };
+    let glow_ok = quad.glow.is_none_or(|glow| {
+        valid_color(glow.color)
+            && glow
+                .radius_uv
+                .iter()
+                .all(|radius| radius.is_finite() && (0.0..=1.0).contains(radius))
+    });
+    if quad.semantic_id.0 == 0
+        || quad.resource_id.0 == 0
+        || quad.resource_revision == 0
+        || quad.resource_digest.0.iter().all(|byte| *byte == 0)
+        || !quad.positions.iter().all(position_ok)
+        || !quad.uvs.iter().all(uv_ok)
+        || !valid_color(quad.color)
+        || !quad.grayscale.is_finite()
+        || !(0.0..=1.0).contains(&quad.grayscale)
+        || !glow_ok
+    {
+        return Err(Error::InvalidValue);
+    }
+    let (min_x, max_x, min_y, max_y) = quad.positions.iter().fold(
+        (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+        |(min_x, max_x, min_y, max_y), point| {
+            (
+                min_x.min(point[0]),
+                max_x.max(point[0]),
+                min_y.min(point[1]),
+                max_y.max(point[1]),
+            )
+        },
+    );
+    if max_x - min_x <= 0.0
+        || max_y - min_y <= 0.0
+        || max_x - min_x > maximum
+        || max_y - min_y > maximum
     {
         return Err(Error::InvalidValue);
     }
@@ -213,8 +390,8 @@ fn valid_color(color: [f32; 4]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Digest256, Layer, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, Sprite,
-        Viewport,
+        Digest256, Glow, Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId,
+        Sprite, Viewport,
     };
 
     fn sprite(order: u32, depth: i16) -> Sprite {
@@ -235,41 +412,56 @@ mod tests {
         }
     }
 
+    fn viewport() -> Viewport {
+        Viewport {
+            width: 64,
+            height: 64,
+            scale_milli: 1000,
+        }
+    }
+
     #[test]
     fn validates_bounds_and_orders_scene_deterministically() {
         let scene = SceneBundle::new(
             1,
             0,
-            Viewport {
-                width: 64,
-                height: 64,
-                scale_milli: 1000,
-            },
+            viewport(),
             [0.0, 0.0, 0.0, 1.0],
             [sprite(2, 1), sprite(1, 0)],
             SceneLimits::default(),
         )
         .unwrap();
-        assert_eq!(scene.sprites()[0].painter_order, 1);
+        assert_eq!(scene.version(), 2);
+        assert_eq!(scene.quads()[0].painter_order, 1);
+        assert!(scene.quads()[0].aligned_rect().is_some());
     }
 
     #[test]
-    fn rejects_duplicate_semantic_identity() {
+    fn rejects_duplicate_semantic_identity_and_part() {
         let value = sprite(0, 0);
         let error = SceneBundle::new(
             1,
             0,
-            Viewport {
-                width: 64,
-                height: 64,
-                scale_milli: 1000,
-            },
+            viewport(),
             [0.0, 0.0, 0.0, 1.0],
             [value, value],
             SceneLimits::default(),
         )
         .unwrap_err();
         assert_eq!(error, super::Error::DuplicateSemanticId);
+        let first = Quad::from(value);
+        let second = Quad { part: 1, ..first };
+        assert!(
+            SceneBundle::from_quads(
+                1,
+                0,
+                viewport(),
+                [0.0; 4],
+                [first, second],
+                SceneLimits::default()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -288,5 +480,48 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, super::Error::InvalidValue);
+    }
+
+    #[test]
+    fn rejects_invalid_quad_values() {
+        let base = Quad::from(sprite(0, 0));
+        let cases = [
+            Quad {
+                grayscale: 1.5,
+                ..base
+            },
+            Quad {
+                uvs: [[0.0, 0.0], [17.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                ..base
+            },
+            Quad {
+                positions: [[0.0, 0.0]; 4],
+                ..base
+            },
+            Quad {
+                glow: Some(Glow {
+                    color: [1.0; 4],
+                    radius_uv: [2.0, 0.1],
+                }),
+                ..base
+            },
+            Quad {
+                positions: [[f32::NAN, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                ..base
+            },
+        ];
+        for quad in cases {
+            assert_eq!(
+                SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], [quad], SceneLimits::default()),
+                Err(super::Error::InvalidValue)
+            );
+        }
+    }
+
+    #[test]
+    fn skewed_quads_are_not_aligned_rectangles() {
+        let mut quad = Quad::from(sprite(0, 0));
+        quad.positions[1][1] = 0.5;
+        assert!(quad.aligned_rect().is_none());
     }
 }

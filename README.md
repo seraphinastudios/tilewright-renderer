@@ -3,9 +3,9 @@
 Tilewright renderer is an MIT-licensed Rust GPU renderer for isometric and
 top-down tile worlds. Game clients, editors, previewers, and deterministic
 offscreen tools share it. The workspace defines a renderer-neutral scene and
-API, an explicit resource-provider boundary, a software reference
-implementation, a private wgpu backend, a thin SDL3 presentation bridge, a UI
-seam, a conformance corpus, and the `tilewright-render` proof CLI.
+API, an explicit resource-provider boundary, a world compiler, a software
+reference implementation, a private wgpu backend, a thin SDL3 presentation
+bridge, a UI seam, a conformance corpus, and the `tilewright-render` proof CLI.
 
 Tilewright is maintained by Seraphina Studios alongside
 [tilewright-world](https://github.com/seraphinastudios/tilewright-world), the
@@ -63,10 +63,24 @@ test "$(wc -c </tmp/tilewright-proof.rgba)" -eq 16407
 rm /tmp/tilewright-proof.rgba
 ```
 
+## World views
+
+`tilewright-render-world` compiles a tile world (camera, height field, and
+objects) into a scene: isometric or top-down projection, terrain stretching,
+draw order, multi-tile footprints, and effects. The CLI renders a
+[world-view file](docs/WORLD-VIEW.md) whose textures are digest-verified PNGs:
+
+```sh
+cargo run --locked --package tilewright-render -- world view.json /tmp/frame.png
+cargo run --locked --package tilewright-render -- world view.json /tmp/ref.png --reference
+```
+
+`--reference` renders with the CPU reference instead of the GPU.
+
 See [architecture and limits](docs/ARCHITECTURE.md), [GPU lifecycle](docs/GPU-LIFECYCLE.md),
 [corpus policy](corpus/README.md), and [provenance](PROVENANCE.md).
 
-The seven renderer libraries publish to crates.io from verified source-release
+The eight renderer libraries publish to crates.io from verified source-release
 archives. Cargo versions remain independent of source tags; see
 [crate release and initial ownership](docs/CRATE-RELEASE.md). The diagnostics CLI
 remains a GitHub release application.

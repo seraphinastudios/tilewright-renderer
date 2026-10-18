@@ -16,10 +16,10 @@ use tilewright_render_api::{
 };
 use tilewright_render_resources::{
     DEFAULT_MAXIMUM_RESOURCE_BYTES, DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES, ResourceProvider,
-    ResourceRequest, Rgba8Image, add_working_set_bytes, for_each_sprite_pixel, sample_rgba8,
-    shade_rgba8,
+    ResourceRequest, Rgba8Image, add_working_set_bytes, for_each_quad_pixel, sample_quad_rgba8,
+    shade_quad_rgba8,
 };
-use tilewright_scene::{Digest256, Layer, ResourceId, Sampling, SceneBundle, Sprite};
+use tilewright_scene::{Digest256, Layer, Quad, ResourceId, Sampling, SceneBundle};
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const MAXIMUM_CACHED_TEXTURES: usize = 4_096;
@@ -60,6 +60,8 @@ pub struct WgpuRenderer {
     vertices: Option<VertexCache>,
     textures: HashMap<TextureKey, TextureCacheEntry>,
     texture_bytes: u64,
+    /// Target bounds narrowed to what the device was created with.
+    limits: TargetLimits,
 }
 
 struct OffscreenTarget {
@@ -98,6 +100,11 @@ impl WgpuRenderer {
         let target = target.validate(TargetLimits::default())?;
         let (instance, adapter_handle, device, queue, adapter) =
             initialize_gpu(target.backend, startup)?;
+        let limits = TargetLimits {
+            maximum_dimension: device.limits().max_texture_dimension_2d,
+            ..TargetLimits::default()
+        };
+        let target = target.validate(limits)?;
         let texture_layout = create_texture_layout(&device);
         let pipeline = create_pipeline(&device, &texture_layout, OUTPUT_FORMAT);
         Ok(Self {
@@ -116,6 +123,7 @@ impl WgpuRenderer {
             vertices: None,
             textures: HashMap::new(),
             texture_bytes: 0,
+            limits,
         })
     }
 
@@ -505,15 +513,15 @@ impl WgpuRenderer {
         scene: &SceneBundle,
         resources: &dyn ResourceProvider,
     ) -> Result<Vec<PreparedSprite>, Error> {
-        let mut prepared = Vec::with_capacity(scene.sprites().len());
+        let mut prepared = Vec::with_capacity(scene.quads().len());
         let missing = scene
-            .sprites()
+            .quads()
             .iter()
-            .map(|sprite| {
+            .map(|quad| {
                 (
-                    sprite.resource_id,
-                    sprite.resource_revision,
-                    sprite.resource_digest,
+                    quad.resource_id,
+                    quad.resource_revision,
+                    quad.resource_digest,
                 )
             })
             .filter(|key| !self.textures.contains_key(key))
@@ -527,11 +535,11 @@ impl WgpuRenderer {
         }
         let mut working_set = HashSet::with_capacity(missing.len());
         let mut working_set_bytes = 0_u64;
-        for sprite in scene.sprites() {
+        for quad in scene.quads() {
             let key = (
-                sprite.resource_id,
-                sprite.resource_revision,
-                sprite.resource_digest,
+                quad.resource_id,
+                quad.resource_revision,
+                quad.resource_digest,
             );
             let uploaded_bytes = if self.textures.contains_key(&key) {
                 0
@@ -548,7 +556,7 @@ impl WgpuRenderer {
                         .map_err(|_| Error::LimitExceeded)?;
             }
             let image = cached.image.clone();
-            let bind_group = match sprite.sampling {
+            let bind_group = match quad.sampling {
                 Sampling::Nearest => cached.nearest.clone(),
                 Sampling::Linear => cached.linear.clone(),
             };
@@ -556,6 +564,8 @@ impl WgpuRenderer {
                 bind_group,
                 image,
                 uploaded_bytes,
+                key,
+                sampling: quad.sampling,
             });
         }
         Ok(prepared)
@@ -575,8 +585,12 @@ impl WgpuRenderer {
             })
             .map_err(|error| Error::Resource(error.to_string()))?;
         let image = Arc::new(
-            Rgba8Image::decode(&blob, 8_192, 16_777_216)
-                .map_err(|error| Error::Resource(error.to_string()))?,
+            Rgba8Image::decode(
+                &blob,
+                self.limits.maximum_dimension,
+                self.limits.maximum_pixels,
+            )
+            .map_err(|error| Error::Resource(error.to_string()))?,
         );
         let size = wgpu::Extent3d {
             width: image.width(),
@@ -657,7 +671,7 @@ impl Renderer for WgpuRenderer {
             height,
             ..self.target
         }
-        .validate(TargetLimits::default())?;
+        .validate(self.limits)?;
         self.metrics.surface_reconfigurations += 1;
         self.offscreen = None;
         self.surface_depth = None;
@@ -726,10 +740,19 @@ fn initialize_gpu(
             "no adapter for requested {preference:?} backend policy: {error}"
         ))
     })?;
+    // Downlevel limits keep the device portable; only the texture dimension is
+    // raised to what the adapter offers, up to the API's own target bound.
+    let required_limits = wgpu::Limits {
+        max_texture_dimension_2d: adapter
+            .limits()
+            .max_texture_dimension_2d
+            .min(TargetLimits::default().maximum_dimension),
+        ..wgpu::Limits::downlevel_defaults()
+    };
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("Tilewright renderer device"),
         required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::downlevel_defaults(),
+        required_limits,
         memory_hints: wgpu::MemoryHints::Performance,
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         trace: wgpu::Trace::Off,
@@ -913,13 +936,28 @@ fn encode_scene(
     });
     pass.set_pipeline(pipeline);
     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-    for (index, sprite) in sprites.iter().enumerate() {
-        let first = u32::try_from(index)
+    // Consecutive quads that sample the same texture the same way share one
+    // draw call; order is unchanged.
+    let mut start = 0_usize;
+    while start < sprites.len() {
+        let mut end = start + 1;
+        while end < sprites.len()
+            && sprites[end].key == sprites[start].key
+            && sprites[end].sampling == sprites[start].sampling
+        {
+            end += 1;
+        }
+        let first = u32::try_from(start)
             .ok()
             .and_then(|value| value.checked_mul(6))
             .ok_or(Error::LimitExceeded)?;
-        pass.set_bind_group(0, &sprite.bind_group, &[]);
-        pass.draw(first..first + 6, 0..1);
+        let last = u32::try_from(end)
+            .ok()
+            .and_then(|value| value.checked_mul(6))
+            .ok_or(Error::LimitExceeded)?;
+        pass.set_bind_group(0, &sprites[start].bind_group, &[]);
+        pass.draw(first..last, 0..1);
+        start = end;
     }
     Ok(())
 }
@@ -931,11 +969,16 @@ struct Vertex {
     color: [f32; 4],
     uv: [f32; 2],
     effect: f32,
+    grayscale: f32,
+    glow_color: [f32; 4],
+    glow_radius: [f32; 2],
+    mode: f32,
 }
 
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32
+    const ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+        0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32,
+        4 => Float32, 5 => Float32x4, 6 => Float32x2, 7 => Float32
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -951,6 +994,8 @@ struct PreparedSprite {
     bind_group: wgpu::BindGroup,
     image: Arc<Rgba8Image>,
     uploaded_bytes: u64,
+    key: TextureKey,
+    sampling: Sampling,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -970,45 +1015,55 @@ fn duration_micros(duration: std::time::Duration) -> u64 {
 #[allow(clippy::cast_precision_loss)]
 fn vertices(scene: &SceneBundle) -> Vec<Vertex> {
     let viewport = scene.viewport();
-    let mut output = Vec::with_capacity(scene.sprites().len().saturating_mul(6));
-    for sprite in scene.sprites() {
-        let left = sprite.x.mul_add(2.0 / viewport.width as f32, -1.0);
-        let right = (sprite.x + sprite.width).mul_add(2.0 / viewport.width as f32, -1.0);
-        let top = 1.0 - sprite.y * 2.0 / viewport.height as f32;
-        let bottom = 1.0 - (sprite.y + sprite.height) * 2.0 / viewport.height as f32;
-        let z = depth_value(sprite);
-        let effect = effect_amount(sprite, scene.clock_millis());
-        let vertex = |position: [f32; 2], uv| Vertex {
-            position: [position[0], position[1], z],
-            color: sprite.color,
-            uv,
-            effect,
+    let mut output = Vec::with_capacity(scene.quads().len().saturating_mul(6));
+    for quad in scene.quads() {
+        let z = depth_value(quad);
+        let effect = effect_amount(quad, scene.clock_millis());
+        let (glow_color, glow_radius, mode) = quad.glow.map_or(([0.0; 4], [0.0; 2], 0.0), |glow| {
+            (glow.color, glow.radius_uv, 1.0)
+        });
+        let vertex = |corner: usize| {
+            let [x, y] = quad.positions[corner];
+            Vertex {
+                position: [
+                    x.mul_add(2.0 / viewport.width as f32, -1.0),
+                    1.0 - y * 2.0 / viewport.height as f32,
+                    z,
+                ],
+                color: quad.color,
+                uv: quad.uvs[corner],
+                effect,
+                grayscale: quad.grayscale,
+                glow_color,
+                glow_radius,
+                mode,
+            }
         };
         output.extend_from_slice(&[
-            vertex([left, top], [0.0, 0.0]),
-            vertex([left, bottom], [0.0, 1.0]),
-            vertex([right, bottom], [1.0, 1.0]),
-            vertex([left, top], [0.0, 0.0]),
-            vertex([right, bottom], [1.0, 1.0]),
-            vertex([right, top], [1.0, 0.0]),
+            vertex(0),
+            vertex(1),
+            vertex(2),
+            vertex(0),
+            vertex(2),
+            vertex(3),
         ]);
     }
     output
 }
 
-fn depth_value(sprite: &Sprite) -> f32 {
-    let layer = match sprite.layer {
+fn depth_value(quad: &Quad) -> f32 {
+    let layer = match quad.layer {
         Layer::World => 0.0,
         Layer::Effect => 1.0,
         Layer::Interface => 2.0,
     };
-    let depth = (f32::from(sprite.depth) - f32::from(i16::MIN)) / f32::from(u16::MAX);
+    let depth = (f32::from(quad.depth) - f32::from(i16::MIN)) / f32::from(u16::MAX);
     (layer + depth) / 3.0
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn effect_amount(sprite: &Sprite, clock_millis: u64) -> f32 {
-    if sprite.layer == Layer::Effect {
+fn effect_amount(quad: &Quad, clock_millis: u64) -> f32 {
+    if quad.layer == Layer::Effect {
         (clock_millis % 1_000) as f32 / 1_000.0 * 0.15
     } else {
         0.0
@@ -1028,11 +1083,14 @@ fn semantic_planes(
     let mut semantic = vec![0; pixels];
     let mut depth = vec![i16::MIN; pixels];
     let mut coverage = vec![0; pixels];
-    for (sprite, prepared) in scene.sprites().iter().zip(prepared) {
-        mark_sprite(
+    for (quad, prepared) in scene.quads().iter().zip(prepared) {
+        if !quad.pickable || quad.glow.is_some() {
+            continue;
+        }
+        mark_quad(
             viewport.width,
             viewport.height,
-            sprite,
+            quad,
             &mut semantic,
             &mut depth,
             &mut coverage,
@@ -1042,25 +1100,20 @@ fn semantic_planes(
     Ok((semantic, depth, coverage))
 }
 
-fn mark_sprite(
+fn mark_quad(
     width: u32,
     height: u32,
-    sprite: &Sprite,
+    quad: &Quad,
     semantic: &mut [u32],
     depth: &mut [i16],
     coverage: &mut [u8],
     image: &Rgba8Image,
 ) {
-    for_each_sprite_pixel(sprite, width, height, |_x, _y, index, u, v| {
-        let alpha = shade_rgba8(
-            sample_rgba8(image, u, v, sprite.sampling),
-            sprite.color,
-            sprite.layer,
-            0,
-        )[3];
+    for_each_quad_pixel(quad, width, height, |_x, _y, index, u, v| {
+        let alpha = shade_quad_rgba8(sample_quad_rgba8(image, u, v, quad.sampling), quad, 0)[3];
         if alpha != 0 {
-            semantic[index] = sprite.semantic_id.0;
-            depth[index] = sprite.depth;
+            semantic[index] = quad.semantic_id.0;
+            depth[index] = quad.depth;
             coverage[index] = alpha;
         }
     });
@@ -1071,8 +1124,17 @@ mod tests {
     use super::WgpuRenderer;
     use tilewright_render_api::{RenderRequest, Renderer};
     use tilewright_render_testkit::{
-        ReferenceRenderer, offscreen_target, synthetic_provider, synthetic_scene,
+        ReferenceRenderer, iso_world_scene, offscreen_target, synthetic_provider, synthetic_scene,
+        top_down_world_scene, world_provider,
     };
+
+    #[test]
+    fn vertex_layout_matches_the_reference_accounting() {
+        assert_eq!(
+            std::mem::size_of::<super::Vertex>() as u64,
+            tilewright_render_testkit::VERTEX_BYTES
+        );
+    }
 
     #[test]
     fn renders_offscreen_when_a_gpu_adapter_is_available() {
@@ -1113,7 +1175,7 @@ mod tests {
         assert_eq!(frame.metrics.resource_requests, 1);
         assert_eq!(frame.metrics.uploaded_bytes, 16);
         assert_eq!(frame.metrics.vertex_count, 18);
-        assert_eq!(frame.metrics.vertex_allocation_bytes, 1_024);
+        assert_eq!(frame.metrics.vertex_allocation_bytes, 2_048);
         assert_eq!(frame.metrics.target_allocation_bytes, 16 * 16 * 12);
 
         let reused = renderer
@@ -1149,6 +1211,46 @@ mod tests {
                     resources: synthetic_provider().unwrap(),
                 })
                 .unwrap();
+        }
+    }
+
+    #[test]
+    fn world_scenes_match_the_reference_when_a_gpu_adapter_is_available() {
+        for scene in [
+            iso_world_scene(192, 128).unwrap(),
+            top_down_world_scene(96, 64).unwrap(),
+        ] {
+            let viewport = scene.viewport();
+            let target = offscreen_target(viewport.width, viewport.height);
+            let Ok(mut renderer) = WgpuRenderer::new(target) else {
+                eprintln!("skipping GPU world test: no supported adapter");
+                return;
+            };
+            let request = RenderRequest {
+                scene: &scene,
+                resources: world_provider().unwrap(),
+            };
+            let frame = renderer.render(request.clone()).unwrap();
+            let reference = ReferenceRenderer::new(target)
+                .unwrap()
+                .render(request)
+                .unwrap();
+            assert_eq!(frame.semantic_ids, reference.semantic_ids);
+            assert_eq!(frame.depth, reference.depth);
+            assert_eq!(frame.coverage, reference.coverage);
+            let maximum = frame
+                .rgba8
+                .iter()
+                .zip(&reference.rgba8)
+                .map(|(actual, expected)| actual.abs_diff(*expected))
+                .max()
+                .unwrap_or(0);
+            assert!(
+                maximum <= 1,
+                "{}x{} world scene differs from the reference by {maximum}",
+                viewport.width,
+                viewport.height,
+            );
         }
     }
 
