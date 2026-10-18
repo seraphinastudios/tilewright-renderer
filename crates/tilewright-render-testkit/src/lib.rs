@@ -211,6 +211,7 @@ impl Renderer for ReferenceRenderer {
                         maximum_bytes: DEFAULT_MAXIMUM_RESOURCE_BYTES,
                     })
                     .map_err(|error| RenderError::Resource(error.to_string()))?;
+                charge_before_decoding(uploaded_bytes, &blob)?;
                 let image = Arc::new(
                     Rgba8Image::decode(&blob, 8_192, 16_777_216)
                         .map_err(|error| RenderError::Resource(error.to_string()))?,
@@ -232,6 +233,15 @@ impl Renderer for ReferenceRenderer {
         output.validate()?;
         Ok(output)
     }
+}
+
+/// Charges a blob's pixel payload (the envelope after its 12-byte header)
+/// to the working set before any pixels are decoded.
+fn charge_before_decoding(uploaded_bytes: u64, blob: &ResourceBlob) -> Result<(), RenderError> {
+    let payload = (blob.bytes().len() as u64).saturating_sub(12);
+    add_working_set_bytes(uploaded_bytes, payload)
+        .map(|_| ())
+        .map_err(|_| RenderError::LimitExceeded)
 }
 
 fn pixel_count(width: u32, height: u32) -> Result<usize, RenderError> {
@@ -590,6 +600,28 @@ mod tests {
                 resources: Arc::new(FailingProvider(ResourceError::NotFound)),
             });
         assert!(matches!(result, Err(Error::Resource(_))));
+    }
+
+    #[test]
+    fn the_working_set_is_charged_before_decoding() {
+        use tilewright_render_resources::DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES as BUDGET;
+        // A 2 × 2 envelope carries 16 bytes of pixels after its header.
+        let bytes = super::synthetic_resource().to_vec();
+        let blob = ResourceBlob::for_request(
+            ResourceRequest {
+                id: ResourceId(1),
+                revision: 1,
+                digest: Digest256(Sha256::digest(&bytes).into()),
+                maximum_bytes: bytes.len(),
+            },
+            bytes,
+        )
+        .unwrap();
+        assert!(super::charge_before_decoding(BUDGET - 16, &blob).is_ok());
+        assert_eq!(
+            super::charge_before_decoding(BUDGET - 15, &blob),
+            Err(Error::LimitExceeded)
+        );
     }
 
     #[test]
