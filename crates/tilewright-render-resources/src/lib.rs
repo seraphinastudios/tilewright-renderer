@@ -408,16 +408,19 @@ pub const GLOW_DIRECTIONS: [[f32; 2]; 16] = [
 
 /// The halo colour at a texture coordinate: the glow colour with alpha set
 /// by the strongest texture alpha at the centre and at full and half radius
-/// along [`GLOW_DIRECTIONS`].
+/// along [`GLOW_DIRECTIONS`]. A zero radius samples only the centre.
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn glow_rgba8(image: &Rgba8Image, u: f32, v: f32, glow: &Glow, sampling: Sampling) -> [u8; 4] {
     let mut alpha = sample_quad_rgba8(image, u, v, sampling)[3];
-    for direction in GLOW_DIRECTIONS {
-        for scale in [1.0_f32, 0.5] {
-            let sample_u = u + direction[0] * glow.radius_uv[0] * scale;
-            let sample_v = v + direction[1] * glow.radius_uv[1] * scale;
-            alpha = alpha.max(sample_quad_rgba8(image, sample_u, sample_v, sampling)[3]);
+    // A zero radius would sample the centre 32 more times for the same alpha.
+    if glow.radius_uv.iter().any(|radius| *radius > 0.0) {
+        for direction in GLOW_DIRECTIONS {
+            for scale in [1.0_f32, 0.5] {
+                let sample_u = u + direction[0] * glow.radius_uv[0] * scale;
+                let sample_v = v + direction[1] * glow.radius_uv[1] * scale;
+                alpha = alpha.max(sample_quad_rgba8(image, sample_u, sample_v, sampling)[3]);
+            }
         }
     }
     let channel = |value: f32| (value * 255.0).round().clamp(0.0, 255.0) as u8;

@@ -19,6 +19,11 @@ pub const SCENE_BUNDLE_VERSION: u32 = 2;
 /// ground meshes); those samples are transparent.
 pub const MAXIMUM_UV_MAGNITUDE: f32 = 16.0;
 
+/// Texture samples a glow quad with a nonzero radius takes per covered
+/// pixel: its centre plus 16 directions at full and half radius. Other quads,
+/// including zero-radius glows, take one.
+pub const GLOW_SAMPLES_PER_PIXEL: u64 = 33;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ResourceId(pub u64);
 
@@ -179,6 +184,11 @@ pub struct SceneLimits {
     pub maximum_quads: usize,
     pub maximum_dimension: u32,
     pub maximum_pixels: u64,
+    /// Most texture samples drawing the scene may take: the sum over quads of
+    /// each quad's viewport-clipped bounding box in pixels, times
+    /// [`GLOW_SAMPLES_PER_PIXEL`] for glow quads with a nonzero radius. It
+    /// bounds overdraw and halo work on every backend.
+    pub maximum_raster_samples: u64,
 }
 
 impl Default for SceneLimits {
@@ -187,6 +197,8 @@ impl Default for SceneLimits {
             maximum_quads: 131_072,
             maximum_dimension: 8_192,
             maximum_pixels: 16_777_216,
+            // Sixteen layers of the largest viewport.
+            maximum_raster_samples: 268_435_456,
         }
     }
 }
@@ -228,7 +240,8 @@ impl SceneBundle {
     /// stably by layer, depth, painter order, semantic identity and part.
     ///
     /// # Errors
-    /// Returns [`Error::InvalidValue`], [`Error::LimitExceeded`] or
+    /// Returns [`Error::InvalidValue`], [`Error::LimitExceeded`] (also when
+    /// the quads need more than [`SceneLimits::maximum_raster_samples`]) or
     /// [`Error::DuplicateSemanticId`] for a repeated identity and part.
     pub fn from_quads(
         revision: u64,
@@ -251,11 +264,16 @@ impl SceneBundle {
             return Err(Error::InvalidValue);
         }
         let mut values = Vec::new();
+        let mut samples = 0_u64;
         for quad in quads {
             if values.len() >= limits.maximum_quads {
                 return Err(Error::LimitExceeded);
             }
             validate_quad(&quad, limits.maximum_dimension)?;
+            samples = samples.saturating_add(raster_samples(&quad, viewport));
+            if samples > limits.maximum_raster_samples {
+                return Err(Error::LimitExceeded);
+            }
             values.push(quad);
         }
         let mut identities = HashSet::with_capacity(values.len());
@@ -363,7 +381,19 @@ fn validate_quad(quad: &Quad, maximum_dimension: u32) -> Result<(), Error> {
     {
         return Err(Error::InvalidValue);
     }
-    let (min_x, max_x, min_y, max_y) = quad.positions.iter().fold(
+    let (min_x, max_x, min_y, max_y) = bounds(quad);
+    if max_x - min_x <= 0.0
+        || max_y - min_y <= 0.0
+        || max_x - min_x > maximum
+        || max_y - min_y > maximum
+    {
+        return Err(Error::InvalidValue);
+    }
+    Ok(())
+}
+
+fn bounds(quad: &Quad) -> (f32, f32, f32, f32) {
+    quad.positions.iter().fold(
         (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
         |(min_x, max_x, min_y, max_y), point| {
             (
@@ -373,15 +403,24 @@ fn validate_quad(quad: &Quad, maximum_dimension: u32) -> Result<(), Error> {
                 max_y.max(point[1]),
             )
         },
-    );
-    if max_x - min_x <= 0.0
-        || max_y - min_y <= 0.0
-        || max_x - min_x > maximum
-        || max_y - min_y > maximum
-    {
-        return Err(Error::InvalidValue);
-    }
-    Ok(())
+    )
+}
+
+/// Texture samples a validated quad can take: its bounding box clipped to
+/// the viewport in whole pixels, times its samples per pixel.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn raster_samples(quad: &Quad, viewport: Viewport) -> u64 {
+    let (min_x, max_x, min_y, max_y) = bounds(quad);
+    let span = |low: f32, high: f32, size: u32| {
+        let low = f64::from(low).floor().max(0.0);
+        let high = f64::from(high).ceil().min(f64::from(size));
+        if high > low { (high - low) as u64 } else { 0 }
+    };
+    let per_pixel = match quad.glow {
+        Some(glow) if glow.radius_uv.iter().any(|radius| *radius > 0.0) => GLOW_SAMPLES_PER_PIXEL,
+        _ => 1,
+    };
+    span(min_x, max_x, viewport.width) * span(min_y, max_y, viewport.height) * per_pixel
 }
 
 fn valid_color(color: [f32; 4]) -> bool {
@@ -540,6 +579,57 @@ mod tests {
             SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], [halo], SceneLimits::default())
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn raster_samples_bound_clipped_overdraw_and_halos() {
+        let limits = SceneLimits {
+            maximum_raster_samples: 64 * 64 * 4,
+            ..SceneLimits::default()
+        };
+        let full = |id: u32| {
+            Quad::from(Sprite {
+                x: -32.0,
+                y: -32.0,
+                width: 128.0,
+                height: 128.0,
+                ..sprite(id, 0)
+            })
+        };
+        // Each quad counts only the 64 × 64 pixels inside the viewport.
+        let layers: Vec<Quad> = (0..4).map(full).collect();
+        assert!(
+            SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], layers.clone(), limits).is_ok()
+        );
+        let mut more = layers;
+        more.push(full(4));
+        assert_eq!(
+            SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], more, limits),
+            Err(super::Error::LimitExceeded)
+        );
+        // A halo samples 33 times per pixel unless its radius is zero.
+        let halo = |radius: f32| Quad {
+            glow: Some(Glow {
+                color: [1.0; 4],
+                radius_uv: [radius, radius],
+            }),
+            pickable: false,
+            positions: [[0.0, 0.0], [8.0, 0.0], [8.0, 8.0], [0.0, 8.0]],
+            ..full(1)
+        };
+        let budget = |samples| SceneLimits {
+            maximum_raster_samples: samples,
+            ..SceneLimits::default()
+        };
+        let render = |quad, samples| {
+            SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], [quad], budget(samples))
+        };
+        assert!(render(halo(0.1), 64 * 33).is_ok());
+        assert_eq!(
+            render(halo(0.1), 64 * 33 - 1),
+            Err(super::Error::LimitExceeded)
+        );
+        assert!(render(halo(0.0), 64).is_ok());
     }
 
     #[test]

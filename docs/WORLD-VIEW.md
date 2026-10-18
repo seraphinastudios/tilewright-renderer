@@ -25,7 +25,9 @@ The output path must not exist; the write is atomic and never overwrites.
   counted before off-screen objects are culled. Each image is at most 8,192 px
   per side and decodes to at most 16 MiB; all textures together decode to at
   most 256 MiB. Sizes are checked from the PNG header before decoding. The GPU
-  device may impose a lower bound, which is reported as an error.
+  device may impose a lower bound, which is reported as an error. The compiled
+  scene must also fit the default scene limits, including 268,435,456 raster
+  samples of overdraw and glow work.
 - PNG input may be RGBA, RGB, greyscale, greyscale with alpha, or indexed;
   16-bit channels are reduced to 8 bits.
 - Every object is validated whether or not it is in view, and every animation

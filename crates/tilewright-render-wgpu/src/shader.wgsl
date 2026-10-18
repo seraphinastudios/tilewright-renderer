@@ -72,10 +72,13 @@ fn sample_inside(uv: vec2<f32>) -> vec4<f32> {
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (input.mode > 0.5) {
         var alpha = sample_inside(input.uv).a;
-        for (var index = 0u; index < 16u; index = index + 1u) {
-            let direction = GLOW_DIRECTIONS[index] * input.glow_radius;
-            alpha = max(alpha, sample_inside(input.uv + direction).a);
-            alpha = max(alpha, sample_inside(input.uv + direction * 0.5).a);
+        // A zero radius samples only the centre, as in the reference.
+        if (any(input.glow_radius > vec2<f32>(0.0))) {
+            for (var index = 0u; index < 16u; index = index + 1u) {
+                let direction = GLOW_DIRECTIONS[index] * input.glow_radius;
+                alpha = max(alpha, sample_inside(input.uv + direction).a);
+                alpha = max(alpha, sample_inside(input.uv + direction * 0.5).a);
+            }
         }
         return vec4<f32>(input.glow_color.rgb, input.glow_color.a * alpha);
     }

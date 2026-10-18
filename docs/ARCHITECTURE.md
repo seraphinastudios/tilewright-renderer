@@ -25,7 +25,9 @@ remain private to `render-wgpu`; SDL owns presentation only. Consumers translate
 their state into these contracts through adapters in their own repositories.
 
 Default limits are 131,072 quads, 8,192 pixels on either axis, 16,777,216 total
-pixels, 8× scale, and 16 MiB per resource request. The GPU device is created
+pixels, 8× scale, 268,435,456 raster samples, and 16 MiB per resource request.
+Raster samples bound overdraw: each quad counts its viewport-clipped bounding
+box in pixels, 33 times over for a glow quad with a nonzero radius. The GPU device is created
 with downlevel limits except for the 2D texture dimension, which follows the
 adapter up to the same 8,192 bound; targets and textures beyond the device's
 bound are rejected with a typed error. All float inputs must be finite; color
@@ -50,8 +52,9 @@ rules start from identical fixed-point corners.
 
 Texture lookups outside 0–1 are transparent. A glow quad extends its art by
 the glow radius and draws a halo from 16 fixed sample directions around the
-art's alpha; it is never pickable, and scene validation rejects a pickable
-glow quad. Greyscale uses Rec. 601 luma weights before the legacy effect swap.
+art's alpha (a zero radius samples only the centre); it is never pickable,
+and scene validation rejects a pickable glow quad. Greyscale uses Rec. 601 luma
+weights before the legacy effect swap.
 
 ## World compiler
 
