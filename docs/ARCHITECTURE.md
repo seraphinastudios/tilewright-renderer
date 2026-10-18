@@ -96,16 +96,19 @@ knows nothing about any game or content format.
   emit (16 for a bent isometric tile, 2 for a glowing object) is counted
   against the scene's quad budget before anything is ordered or culled,
   animations list at most 1,024 frames each and twice that budget together,
-  naming at most 4,096 distinct textures across every frame, and height fields
-  hold at most 4,194,304 cells. Every object and every animation frame is
-  validated before culling or frame selection, so a view's validity never
-  depends on the camera or clock: semantic IDs are nonzero and unique, frames
-  carry full resource identities within the scene's dimension limit, every
-  quad an object produces (after scale, rotation, glow padding and terrain
-  bending) spans at most that limit less one pixel, and a glow radius stays
-  within every frame. Ground objects reject the offset, `z`, scale, rotation
-  and glow they cannot apply, isometric ground covers one tile, and no ground
-  footprint covers a tile the height field marks as having none.
+  naming at most 4,096 distinct textures across every frame, height fields
+  hold at most 4,194,304 cells, and raster samples are charged for every
+  object's costliest frame as if it were in view (its box widened a pixel and
+  capped at the viewport, doubled when skewed). Every object and every
+  animation frame is validated before culling or frame selection, so a view's
+  validity never depends on the camera or clock: semantic IDs are nonzero and
+  unique, frames carry full resource identities within the scene's dimension
+  limit, every quad an object produces (after scale, rotation, glow padding
+  and terrain bending) spans at most that limit less one pixel, and a glow
+  radius stays within every frame. Ground objects reject the offset, `z`,
+  scale, rotation and glow they cannot apply, isometric ground covers one
+  tile, and no ground footprint covers a tile the height field marks as having
+  none.
 
 Lighting and weather are not part of this version.
 

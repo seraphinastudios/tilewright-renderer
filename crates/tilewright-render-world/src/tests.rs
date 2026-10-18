@@ -1004,3 +1004,49 @@ fn texture_identities_are_bounded_across_every_frame() {
         Err(Error::Scene(tilewright_scene::Error::LimitExceeded))
     );
 }
+
+#[test]
+fn raster_work_is_charged_before_culling() {
+    let limits = SceneLimits {
+        maximum_raster_samples: 1_000,
+        ..SceneLimits::default()
+    };
+    let art = |id, tile, side| {
+        WorldObject::new(
+            SemanticId(id),
+            tile,
+            3,
+            Anchor::Standing,
+            texture(2, side, side),
+        )
+    };
+    for tile in [[0, 0], [40, 40]] {
+        // Each 20 px object costs at most 21 × 21 samples wherever it lies.
+        let two = iso_view(
+            vec![art(1, tile, 20), art(2, tile, 20)],
+            HeightField::empty(),
+        );
+        assert!(compile(&two, limits).is_ok(), "{tile:?}");
+        let three = iso_view(
+            vec![art(1, tile, 20), art(2, tile, 20), art(3, tile, 20)],
+            HeightField::empty(),
+        );
+        assert_eq!(
+            compile(&three, limits),
+            Err(Error::Scene(tilewright_scene::Error::LimitExceeded)),
+            "{tile:?}"
+        );
+        // A frame the clock does not select yet counts at its own size.
+        let mut animated = art(1, tile, 10);
+        animated.animation = Animation {
+            frames: vec![texture(2, 10, 10), texture(3, 40, 40)],
+            frame_millis: 100,
+            phase_millis: 0,
+        };
+        assert_eq!(
+            compile(&iso_view(vec![animated], HeightField::empty()), limits),
+            Err(Error::Scene(tilewright_scene::Error::LimitExceeded)),
+            "{tile:?}"
+        );
+    }
+}

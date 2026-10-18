@@ -38,7 +38,8 @@ The output path must not exist; the write is atomic and never overwrites.
   are checked from the PNG header before decoding. The GPU device may impose
   a lower bound, which is reported as an error. The compiled
   scene must also fit the default scene limits, including 268,435,456 raster
-  samples of overdraw and glow work.
+  samples of overdraw and glow work, charged for every object as if it were
+  in view.
 - PNG input may be RGBA, RGB, greyscale, greyscale with alpha, or indexed;
   16-bit channels are reduced to 8 bits. Text and ICC metadata chunks are
   skipped unread, so no compressed metadata is inflated.

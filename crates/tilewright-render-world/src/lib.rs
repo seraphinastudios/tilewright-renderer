@@ -11,8 +11,8 @@
 
 use std::{collections::HashSet, fmt};
 use tilewright_scene::{
-    Digest256, Glow, Layer, MAXIMUM_SCENE_TEXTURES, Quad, ResourceId, Sampling, SceneBundle,
-    SceneLimits, SemanticId, Viewport,
+    Digest256, GLOW_SAMPLES_PER_PIXEL, Glow, Layer, MAXIMUM_SCENE_TEXTURES, Quad, ResourceId,
+    Sampling, SceneBundle, SceneLimits, SemanticId, Viewport,
 };
 
 /// Most frames one animation may list.
@@ -424,11 +424,15 @@ pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Err
             .then(left.repeat.cmp(&right.repeat))
     });
     let mut quads = Vec::new();
+    // Raster work is charged for every object as if it were in view, for its
+    // costliest frame, so panning or the clock cannot push a view over the
+    // scene's sample budget.
+    let mut raster_samples = 0_u64;
     for (order, entry) in entries.iter().enumerate() {
         let painter_order = u32::try_from(order).map_err(|_| Error::InvalidValue)?;
         let animation = &entry.object.animation;
         let shown = animation.frame(view.clock_millis);
-        projector.emit(
+        let mut costliest = projector.emit(
             view,
             entry.object,
             shown,
@@ -442,8 +446,15 @@ pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Err
             let mut sizes = HashSet::from([(shown.width, shown.height)]);
             for frame in &animation.frames {
                 if sizes.insert((frame.width, frame.height)) {
-                    projector.emit(view, entry.object, *frame, painter_order, false, None)?;
+                    let samples =
+                        projector.emit(view, entry.object, *frame, painter_order, false, None)?;
+                    costliest = costliest.max(samples);
                 }
+            }
+            let draws = 1 + u64::from(entry.object.double_draw);
+            raster_samples = raster_samples.saturating_add(costliest.saturating_mul(draws));
+            if raster_samples > limits.maximum_raster_samples {
+                return Err(Error::Scene(tilewright_scene::Error::LimitExceeded));
             }
         }
         if quads.len() > limits.maximum_quads {
@@ -830,7 +841,8 @@ impl Projector {
 
     #[allow(clippy::too_many_lines)]
     /// Emits the object's quads for one animation frame into `quads`, or
-    /// only checks them when `quads` is `None`.
+    /// only checks them when `quads` is `None`. Returns the raster samples
+    /// those quads may cost wherever they lie in view.
     fn emit(
         &self,
         view: &WorldView,
@@ -839,7 +851,7 @@ impl Projector {
         painter_order: u32,
         repeat: bool,
         mut quads: Option<&mut Vec<Quad>>,
-    ) -> Result<(), Error> {
+    ) -> Result<u64, Error> {
         let part_base: u16 = if repeat { 0x8000 } else { 0 };
         let tile_height = Self::tile_height(view, object);
         let base = Quad {
@@ -867,10 +879,12 @@ impl Projector {
         // scene's dimension limit and corners that overflow to infinity are
         // an invalid view, not quads to cull. A quad whose corners collapse
         // onto a line covers no pixels and is dropped.
-        let mut push = |quad: Quad, corners: [[f64; 2]; 4], span: [f64; 2]| {
+        let mut samples = 0_u64;
+        let mut push = |quad: Quad, corners: [[f64; 2]; 4], span: [f64; 2], skewed: bool| {
             if !span.iter().all(|extent| *extent <= self.maximum_span) {
                 return Err(Error::InvalidValue);
             }
+            samples = samples.saturating_add(self.raster_estimate(span, skewed, quad.glow));
             #[allow(clippy::cast_possible_truncation)]
             let quad = Quad {
                 positions: corners.map(|point| point.map(|value| value as f32)),
@@ -958,7 +972,7 @@ impl Projector {
                         let left = snap(center[0] - center_x * self.zoom);
                         let top = snap(center[1] - center_y * self.zoom);
                         let (width, height) = (art_w * self.zoom, art_h * self.zoom);
-                        push(base, rect(left, top, width, height), [width, height])?;
+                        push(base, rect(left, top, width, height), [width, height], false)?;
                     } else {
                         let steps = MESH_STEPS;
                         for row in 0..steps {
@@ -986,6 +1000,7 @@ impl Projector {
                                     },
                                     cell.map(|point| map(corners, point)),
                                     span_of(&cell.map(|point| map(local, point))),
+                                    true,
                                 )?;
                             }
                         }
@@ -1005,10 +1020,11 @@ impl Projector {
                         base,
                         rect(snap(origin[0]), snap(origin[1]), width, height),
                         [width, height],
+                        false,
                     )?;
                 }
             }
-            return Ok(());
+            return Ok(samples);
         }
         // Standing art: bottom centre at the front of the footprint.
         let footprint = [
@@ -1100,6 +1116,7 @@ impl Projector {
                 glow_quad,
                 rotate(rect(left - pad_x, top - pad_y, glow_width, glow_height)),
                 rotated_span(glow_width, glow_height, rotation),
+                rotation != 0.0,
             )?;
         }
         push(
@@ -1109,7 +1126,28 @@ impl Projector {
             },
             rotate(rect(left, top, width, height)),
             rotated_span(width, height, rotation),
-        )
+            rotation != 0.0,
+        )?;
+        Ok(samples)
+    }
+
+    /// Raster samples a quad of this span may cost wherever it lies in view:
+    /// its box widened by a pixel for sub-pixel placement and capped at the
+    /// viewport, twice over for a skewed quad (one box per triangle), times
+    /// its samples per pixel. It never undercounts the scene's own charge.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn raster_estimate(&self, span: [f64; 2], skewed: bool, glow: Option<Glow>) -> u64 {
+        let axis = |extent: f64, size: f64| (extent.ceil() + 1.0).clamp(0.0, size) as u64;
+        let pixels = axis(span[0], self.viewport[0]) * axis(span[1], self.viewport[1]);
+        let per_pixel = match glow {
+            Some(glow) if glow.radius_uv.iter().any(|radius| *radius > 0.0) => {
+                GLOW_SAMPLES_PER_PIXEL
+            }
+            _ => 1,
+        };
+        pixels
+            .saturating_mul(1 + u64::from(skewed))
+            .saturating_mul(per_pixel)
     }
 
     fn visible(&self, quad: &Quad) -> bool {
