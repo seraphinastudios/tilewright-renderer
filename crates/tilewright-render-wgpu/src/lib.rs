@@ -514,7 +514,7 @@ impl WgpuRenderer {
         resources: &dyn ResourceProvider,
     ) -> Result<Vec<PreparedSprite>, Error> {
         let mut prepared = Vec::with_capacity(scene.quads().len());
-        let missing = scene
+        let distinct = scene
             .quads()
             .iter()
             .map(|quad| {
@@ -524,16 +524,16 @@ impl WgpuRenderer {
                     quad.resource_digest,
                 )
             })
-            .filter(|key| !self.textures.contains_key(key))
-            .collect::<std::collections::HashSet<_>>();
-        if missing.len() > MAXIMUM_CACHED_TEXTURES {
-            return Err(Error::LimitExceeded);
-        }
-        if self.textures.len().saturating_add(missing.len()) > MAXIMUM_CACHED_TEXTURES {
+            .collect::<HashSet<_>>();
+        let missing = distinct
+            .iter()
+            .filter(|key| !self.textures.contains_key(*key))
+            .count();
+        if texture_cache_must_clear(self.textures.len(), distinct.len(), missing)? {
             self.textures.clear();
             self.texture_bytes = 0;
         }
-        let mut working_set = HashSet::with_capacity(missing.len());
+        let mut working_set = HashSet::with_capacity(distinct.len());
         let mut working_set_bytes = 0_u64;
         for quad in scene.quads() {
             let key = (
@@ -1051,6 +1051,17 @@ fn vertices(scene: &SceneBundle) -> Vec<Vertex> {
     output
 }
 
+/// Admits a scene's distinct textures to the cache. A scene naming more than
+/// [`MAXIMUM_CACHED_TEXTURES`] identities is rejected, counting the ones
+/// already cached, so loading after a clear never exceeds the cap. Returns
+/// whether the cache must clear first to fit the `missing` identities.
+fn texture_cache_must_clear(cached: usize, distinct: usize, missing: usize) -> Result<bool, Error> {
+    if distinct > MAXIMUM_CACHED_TEXTURES {
+        return Err(Error::LimitExceeded);
+    }
+    Ok(cached.saturating_add(missing) > MAXIMUM_CACHED_TEXTURES)
+}
+
 fn depth_value(quad: &Quad) -> f32 {
     let layer = match quad.layer {
         Layer::World => 0.0,
@@ -1129,6 +1140,18 @@ mod tests {
         ReferenceRenderer, iso_world_scene, offscreen_target, synthetic_provider, synthetic_scene,
         top_down_world_scene, world_provider,
     };
+
+    #[test]
+    fn texture_cache_admits_at_most_its_cap_per_scene() {
+        use super::{MAXIMUM_CACHED_TEXTURES as CAP, texture_cache_must_clear};
+        // A full cache plus as many new identities: the scene alone names
+        // twice the cap, so clearing and reloading would overflow it.
+        assert!(texture_cache_must_clear(CAP, CAP * 2, CAP).is_err());
+        assert!(texture_cache_must_clear(0, CAP + 1, CAP + 1).is_err());
+        assert_eq!(texture_cache_must_clear(CAP, CAP, CAP), Ok(true));
+        assert_eq!(texture_cache_must_clear(CAP, CAP, 0), Ok(false));
+        assert_eq!(texture_cache_must_clear(10, 20, 10), Ok(false));
+    }
 
     #[test]
     fn vertex_layout_matches_the_reference_accounting() {

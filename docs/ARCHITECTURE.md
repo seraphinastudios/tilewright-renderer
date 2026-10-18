@@ -104,7 +104,8 @@ per row, and 432 bytes of transient vertices per quad (six 72-byte vertices). Ch
 precedes every size-derived allocation. Offscreen targets/readback buffers are
 reused until resize; immutable textures are reused by ID/revision/digest with a
 hard 4,096-entry cache that clears as one bounded unit before admitting a new
-working set. Retained texture pixels and each scene's distinct texture working
+working set; a scene naming more than 4,096 distinct textures is rejected.
+Retained texture pixels and each scene's distinct texture working
 set are also capped at 256 MiB, and prepared quads share decoded immutable
 pixels instead of cloning them. The shared vertex buffer grows geometrically to the next power of
 two and is reused by offscreen and surface presentation until a larger scene is
