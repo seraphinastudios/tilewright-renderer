@@ -611,3 +611,53 @@ fn glow_radius_stays_within_every_frame() {
         );
     }
 }
+
+#[test]
+fn projection_overflow_is_rejected_rather_than_culled() {
+    let tree = || {
+        WorldObject::new(
+            SemanticId(1),
+            [0, 0],
+            3,
+            Anchor::Standing,
+            texture(2, 16, 16),
+        )
+    };
+    let mut view = iso_view(vec![tree()], HeightField::empty());
+    view.camera.center = [f64::MAX, f64::MAX];
+    assert_eq!(
+        compile(&view, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+    let bound = 1_099_511_627_776.0;
+    assert_eq!(super::MAXIMUM_TILE_COORDINATE, 1 << 40);
+    view.camera.center = [bound, -bound];
+    assert!(compile(&view, SceneLimits::default()).is_ok());
+    view.camera.center = [bound * 2.0, 0.0];
+    assert_eq!(
+        compile(&view, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+    // Finite inputs whose projection overflows `f32` are invalid too.
+    let mut lifted = iso_view(
+        vec![tree()],
+        HeightField {
+            origin: [0, 0],
+            width: 1,
+            height: 1,
+            heights: vec![Some(i32::MAX)],
+        },
+    );
+    lifted.stretch.pixels_per_unit = f32::MAX;
+    assert_eq!(
+        compile(&lifted, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+    let mut pushed = iso_view(vec![tree()], HeightField::empty());
+    pushed.objects[0].offset_px = [f32::MAX, 0.0];
+    pushed.camera.zoom = 8.0;
+    assert_eq!(
+        compile(&pushed, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+}

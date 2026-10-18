@@ -68,7 +68,9 @@ knows nothing about any game or content format.
   onto a 4 × 4 bilinear mesh one art pixel larger than the lattice cell, so
   neighbouring meshes overlap instead of leaving hairline seams. Top-down
   ground shifts up by its tile height without bending. Isometric tiles must be
-  wider than twice the seam bleed, and tile coordinates stay within ±2⁴⁰.
+  wider than twice the seam bleed, and tile coordinates and the camera centre
+  stay within ±2⁴⁰; a view whose projected corners overflow is rejected rather
+  than culled.
 - **Standing art** sits with its bottom centre on the front of its footprint,
   raised by the tile height and the object's `z`. Multi-tile footprints order
   by their front tile.

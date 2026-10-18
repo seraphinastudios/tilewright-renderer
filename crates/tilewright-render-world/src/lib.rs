@@ -335,7 +335,7 @@ pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Err
             part_base,
             entry.repeat,
             &mut quads,
-        );
+        )?;
         if quads.len() > limits.maximum_quads {
             return Err(Error::Scene(tilewright_scene::Error::LimitExceeded));
         }
@@ -385,7 +385,8 @@ fn unit(values: &[f32]) -> bool {
         .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
 }
 
-/// Largest tile coordinate magnitude a view may use. It keeps footprint and
+/// Largest tile coordinate magnitude a view may use, for object tiles, the
+/// height field origin and the camera centre. It keeps footprint and
 /// diagonal arithmetic far from `i64` overflow and pixel positions exact in
 /// `f64`.
 pub const MAXIMUM_TILE_COORDINATE: i64 = 1 << 40;
@@ -428,8 +429,13 @@ fn validate(view: &WorldView, limits: SceneLimits) -> Result<(), Error> {
     };
     let heights = &view.heights;
     let cells = u64::from(heights.width) * u64::from(heights.height);
+    #[allow(clippy::cast_precision_loss)]
+    let center_bound = MAXIMUM_TILE_COORDINATE as f64;
     let valid = projection_ok
-        && camera.center.iter().all(|value| value.is_finite())
+        && camera
+            .center
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= center_bound)
         && camera.zoom.is_finite()
         && camera.zoom > 0.0
         && camera.zoom <= 8.0
@@ -611,7 +617,7 @@ impl Projector {
         part_base: u16,
         repeat: bool,
         quads: &mut Vec<Quad>,
-    ) {
+    ) -> Result<(), Error> {
         let texture = object.animation.frame(self.clock_millis);
         let tile_height = view
             .heights
@@ -636,10 +642,21 @@ impl Projector {
         };
         let art_w = f64::from(texture.width);
         let art_h = f64::from(texture.height);
+        // Corners that overflow to infinity are an invalid view, not a quad
+        // to cull, so they are rejected before visibility is checked.
         let mut push = |quad: Quad| {
+            if !quad
+                .positions
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+            {
+                return Err(Error::InvalidValue);
+            }
             if self.visible(&quad) {
                 quads.push(quad);
             }
+            Ok(())
         };
         if object.anchor == Anchor::Ground {
             match self.projection {
@@ -703,7 +720,7 @@ impl Projector {
                         push(Quad {
                             positions: rect(left, top, art_w * self.zoom, art_h * self.zoom),
                             ..base
-                        });
+                        })?;
                     } else {
                         let steps = 4_u16;
                         for row in 0..steps {
@@ -731,7 +748,7 @@ impl Projector {
                                         [(point[0] / art_w) as f32, (point[1] / art_h) as f32]
                                     }),
                                     ..base
-                                });
+                                })?;
                             }
                         }
                     }
@@ -752,10 +769,10 @@ impl Projector {
                             size * f64::from(object.footprint[1]),
                         ),
                         ..base
-                    });
+                    })?;
                 }
             }
-            return;
+            return Ok(());
         }
         // Standing art: bottom centre at the front of the footprint.
         let footprint = [
@@ -846,13 +863,13 @@ impl Projector {
                 pickable: false,
                 ..base
             };
-            push(glow_quad);
+            push(glow_quad)?;
         }
         push(Quad {
             part: part_base + 2,
             positions: rotate(rect(left, top, width, height)),
             ..base
-        });
+        })
     }
 
     fn visible(&self, quad: &Quad) -> bool {
