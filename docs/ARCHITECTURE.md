@@ -41,11 +41,12 @@ alpha, a greyscale amount, an optional glow, sampling, a pickable flag, and the
 legacy effect fields. Axis-aligned quads use half-open rectangle coverage.
 Every other quad is split into the triangles (0, 1, 2) and (0, 2, 3), snapped
 to 1/256 px, and filled with an exact integer edge test whose top-left tie rule
-gives each pixel on a shared edge to exactly one triangle. The CPU reference
-and the GPU picking planes share this rasteriser, so semantic, depth, and
-coverage planes match exactly on every backend. The GPU backend submits
-positions already rounded to the same 1/256 px grid, so drivers with different
-snapping and rounding rules start from identical fixed-point corners.
+gives each pixel on a shared edge to exactly one triangle, as GPU rasterisers
+do. The CPU reference and the GPU picking planes share this rasteriser, so
+semantic, depth, and coverage planes match exactly on every backend and cover
+the pixels the GPU colours. The GPU backend submits positions already rounded
+to the same 1/256 px grid, so drivers with different snapping and rounding
+rules start from identical fixed-point corners.
 
 Texture lookups outside 0–1 are transparent. A glow quad extends its art by
 the glow radius and draws a halo from 16 fixed sample directions around the

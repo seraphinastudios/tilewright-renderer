@@ -1255,6 +1255,83 @@ mod tests {
     }
 
     #[test]
+    fn skewed_edges_through_pixel_centres_match_the_reference_coverage() {
+        use tilewright_render_testkit::synthetic_digest;
+        use tilewright_scene::{
+            Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, Viewport,
+        };
+        // Pixel centres lie exactly on every edge of these skewed quads; the
+        // GPU's top-left rule must colour the same pixels the shared
+        // rasteriser marks. Inset texture coordinates keep edge samples
+        // inside the texture.
+        let vertical = Quad {
+            semantic_id: SemanticId(1),
+            part: 0,
+            resource_id: ResourceId(1),
+            resource_revision: 1,
+            resource_digest: synthetic_digest(),
+            positions: [[0.5, 0.0], [3.5, 1.0], [3.5, 6.0], [0.5, 5.0]],
+            uvs: [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]],
+            depth: 0,
+            painter_order: 0,
+            color: [1.0; 4],
+            grayscale: 0.0,
+            glow: None,
+            pickable: true,
+            sampling: Sampling::Nearest,
+            layer: Layer::World,
+        };
+        let horizontal = Quad {
+            semantic_id: SemanticId(2),
+            positions: [[4.0, 0.5], [7.0, 0.5], [8.0, 4.5], [5.0, 4.5]],
+            ..vertical
+        };
+        let scene = SceneBundle::from_quads(
+            1,
+            0,
+            Viewport {
+                width: 8,
+                height: 8,
+                scale_milli: 1_000,
+            },
+            [0.0, 0.0, 0.0, 1.0],
+            [vertical, horizontal],
+            SceneLimits::default(),
+        )
+        .unwrap();
+        let target = offscreen_target(8, 8);
+        let Ok(mut renderer) = WgpuRenderer::new(target) else {
+            eprintln!("skipping GPU edge test: no supported adapter");
+            return;
+        };
+        let request = RenderRequest {
+            scene: &scene,
+            resources: synthetic_provider().unwrap(),
+        };
+        let frame = renderer.render(request.clone()).unwrap();
+        let reference = ReferenceRenderer::new(target)
+            .unwrap()
+            .render(request)
+            .unwrap();
+        let coloured = |rgba8: &[u8]| -> Vec<bool> {
+            rgba8
+                .chunks_exact(4)
+                .map(|pixel| pixel[..3] != [0, 0, 0])
+                .collect()
+        };
+        assert_eq!(coloured(&frame.rgba8), coloured(&reference.rgba8));
+        assert_eq!(
+            coloured(&frame.rgba8),
+            frame
+                .semantic_ids
+                .iter()
+                .map(|id| *id != 0)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(frame.semantic_ids, reference.semantic_ids);
+    }
+
+    #[test]
     fn shader_is_valid_portable_wgsl() {
         let source = include_str!("shader.wgsl");
         let module = naga::front::wgsl::parse_str(source).unwrap();

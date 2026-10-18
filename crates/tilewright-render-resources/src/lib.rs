@@ -193,9 +193,11 @@ fn snapped_bounds(quad: &Quad, width: u32, height: u32) -> PixelBounds {
 /// coordinates. Corners are first snapped to [`SUBPIXEL_STEPS`], exactly as
 /// GPU backends submit them. Axis-aligned quads then use half-open rectangle
 /// coverage. Other quads are split into the triangles (0, 1, 2) and
-/// (0, 2, 3) and filled with an exact integer edge test whose tie rule gives
-/// every pixel on a shared edge to exactly one triangle. The reference
-/// renderer and the GPU picking planes both use this function.
+/// (0, 2, 3) and filled with an exact integer edge test. Pixel centres on an
+/// edge follow the GPU's top-left rule: they belong to top and left edges
+/// only, so every pixel on a shared edge goes to exactly one triangle and
+/// matches what the hardware colours. The reference renderer and the GPU
+/// picking planes both use this function.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -295,8 +297,12 @@ const fn edge(a: (i64, i64), b: (i64, i64), point: (i64, i64)) -> i64 {
     (b.0 - a.0) * (point.1 - a.1) - (b.1 - a.1) * (point.0 - a.0)
 }
 
+/// Whether a pixel centre with this edge weight is inside. Triangles are
+/// wound so inside weights are positive in y-down screen space; there a top
+/// edge runs rightward and a left edge runs upward, and only those edges keep
+/// the centres lying exactly on them.
 const fn covers(weight: i64, a: (i64, i64), b: (i64, i64)) -> bool {
-    weight > 0 || (weight == 0 && (b.1 > a.1 || (b.1 == a.1 && b.0 < a.0)))
+    weight > 0 || (weight == 0 && (b.1 < a.1 || (b.1 == a.1 && b.0 > a.0)))
 }
 
 #[must_use]
@@ -509,6 +515,35 @@ mod tests {
         assert_eq!(covered, [0, 1]);
         let bounds = super::quad_pixel_bounds(&rect_quad(0.500_976_56, 2.0), 4, 1);
         assert_eq!((bounds.left, bounds.right), (0, 2));
+    }
+
+    #[test]
+    fn skewed_quads_keep_top_and_left_edge_pixels_only() {
+        // Pixel centres lie exactly on the vertical left (x = 0.5) and right
+        // (x = 3.5) edges, and on the horizontal top (y = 0.5) and bottom
+        // (y = 4.5) edges. The top-left rule keeps column 0 and row 0 and
+        // drops column 3 and row 4, as GPUs do.
+        let mut vertical = rect_quad(0.0, 1.0);
+        vertical.positions = [[0.5, 0.0], [3.5, 1.0], [3.5, 6.0], [0.5, 5.0]];
+        let mut horizontal = rect_quad(0.0, 1.0);
+        horizontal.positions = [[4.0, 0.5], [7.0, 0.5], [8.0, 4.5], [5.0, 4.5]];
+        let mut rows = [[b'.'; 8]; 6];
+        for quad in [vertical, horizontal] {
+            assert!(quad.aligned_rect().is_none());
+            super::for_each_quad_pixel(&quad, 8, 6, |x, y, _, _, _| {
+                rows[y as usize][x as usize] = b'#';
+            });
+        }
+        let rows: Vec<&str> = rows
+            .iter()
+            .map(|row| std::str::from_utf8(row).unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "##..###.", "###.###.", "###.###.", "###..###", "###.....", "..#.....",
+            ]
+        );
     }
 
     #[test]
