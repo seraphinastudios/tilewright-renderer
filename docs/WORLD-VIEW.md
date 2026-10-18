@@ -13,8 +13,8 @@ The output path must not exist; the write is atomic and never overwrites.
 ## Inputs and trust
 
 - Every texture is listed explicitly with a path relative to the view file
-  and the SHA-256 of the file's bytes. Paths are `/`-separated with no empty,
-  `.` or `..` components. On Unix they are opened one directory at a time
+  and the SHA-256 of the file's bytes. Paths are at most 4,096 bytes,
+  `/`-separated, with no empty, `.` or `..` components. On Unix they are opened one directory at a time
   beneath the view's directory without following symbolic links, and files
   are opened without waiting on FIFOs, so a path can neither leave the
   directory nor stall even if the directory changes while the view loads.
@@ -40,11 +40,13 @@ The output path must not exist; the write is atomic and never overwrites.
 - Every object is validated whether or not it is in view, and every animation
   frame whether or not the clock selects it, so panning or advancing the clock
   never turns a valid view into an invalid one. Object IDs are nonzero and
-  unique. Ground objects take no `offset`, `z`, `scale`, `rotation` or
-  `glow`, and isometric ground keeps the 1 × 1 footprint. A glow radius is at
-  most the width and height of every frame of its object. `double_draw` is for
-  opaque art: it is rejected together with an `alpha` below 1 or a `glow`, and
-  translucent texels inside double-drawn art still composite twice by design.
+  unique, and each object names exactly one of `texture` and `animation`.
+  Ground objects take no `offset`, `z`, `scale`, `rotation` or `glow`,
+  isometric ground keeps the 1 × 1 footprint, and no ground object sits on a
+  tile whose height is `null`. A glow radius is at most the width and height
+  of every frame of its object. `double_draw` is for opaque art: it is
+  rejected together with an `alpha` below 1 or a `glow`, and translucent
+  texels inside double-drawn art still composite twice by design.
   Every quad an object produces, after zoom, scale, rotation, glow padding and
   terrain bending, spans at most 8,191 px on each axis.
 
@@ -78,7 +80,7 @@ The output path must not exist; the write is atomic and never overwrites.
     "origin": [0, 0],
     "width": 48,
     "height": 48,
-    "values": [0, 0, 8, null]         // row-major; null means no height
+    "values": [0, 0, 8, null]         // row-major; null means no ground there
   },
   "textures": [
     {"id": 1, "path": "art/grass.png", "sha256": "…64 hex digits…"}

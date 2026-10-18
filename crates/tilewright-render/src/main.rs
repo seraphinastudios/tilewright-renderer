@@ -493,6 +493,38 @@ mod tests {
     }
 
     #[test]
+    fn objects_name_either_a_texture_or_an_animation() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let text = fs::read_to_string(&view).unwrap();
+        let both = text.replace(
+            "\"texture\": 7}",
+            "\"texture\": 7, \"animation\": {\"frames\": [7]}}",
+        );
+        assert_ne!(both, text);
+        fs::write(&view, &both).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("not both"), "{error}");
+        fs::write(&view, text.replace(", \"texture\": 7}", "}")).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("missing \"texture\""), "{error}");
+    }
+
+    #[test]
+    fn texture_paths_are_bounded_before_splitting() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let digest = "0".repeat(64);
+        let long = "a/".repeat(2_048) + "b.png";
+        set_textures(
+            &view,
+            &format!("[{{\"id\": 7, \"path\": \"{long}\", \"sha256\": \"{digest}\"}}]"),
+        );
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("at most 4096 bytes"), "{error}");
+    }
+
+    #[test]
     fn world_views_reject_translucent_double_draws() {
         let directory = tempfile::tempdir().unwrap();
         let view = write_view(directory.path(), None);

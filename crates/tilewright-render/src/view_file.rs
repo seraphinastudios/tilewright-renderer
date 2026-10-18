@@ -27,6 +27,8 @@ const MAXIMUM_TEXTURE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 /// Most JSON values (containers, object members and array items) a view may
 /// hold. It bounds the parsed document's memory before the document is built.
 const MAXIMUM_JSON_VALUES: usize = 2_097_152;
+/// Longest texture path a view may write.
+const MAXIMUM_TEXTURE_PATH_BYTES: usize = 4_096;
 /// Most textures one view may list, matching the renderer's texture cache.
 const MAXIMUM_TEXTURES: usize = 4_096;
 /// Most objects one view may list, matching the default scene's draw budget.
@@ -286,6 +288,13 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
 /// Splits a texture path written in a view into its components: relative,
 /// `/`-separated, with no empty, `.` or `..` components.
 fn components(relative: &str) -> Result<Vec<&str>> {
+    // The length is bounded before the path is split, so a huge path cannot
+    // allocate an entry per component.
+    if relative.len() > MAXIMUM_TEXTURE_PATH_BYTES {
+        return Err(format!(
+            "texture paths are at most {MAXIMUM_TEXTURE_PATH_BYTES} bytes"
+        ));
+    }
     let components: Vec<&str> = relative.split('/').collect();
     if relative.is_empty()
         || relative.contains('\\')
@@ -632,6 +641,11 @@ pub(crate) fn load_within(
             ],
             &context,
         )?;
+        if optional(object, "animation").is_some() && optional(object, "texture").is_some() {
+            return Err(format!(
+                "{context}: give either \"texture\" or \"animation\", not both"
+            ));
+        }
         let animation = if let Some(value) = optional(object, "animation") {
             let animation_object = as_object(value, &context)?;
             reject_unknown(
