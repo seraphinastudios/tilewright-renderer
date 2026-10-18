@@ -171,6 +171,7 @@ impl WgpuRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let (depth_view, depth_allocated) = self.ensure_surface_depth();
         let prepared = self.prepare_sprites(request.scene, request.resources.as_ref())?;
+        self.check_vertex_stream(request.scene)?;
         let vertices = vertices(request.scene);
         let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
         let pipeline = self.ensure_surface_pipeline(configuration.format);
@@ -378,6 +379,7 @@ impl WgpuRenderer {
         resources: &dyn ResourceProvider,
     ) -> Result<(Vec<u8>, SemanticPlanes, FrameWork), Error> {
         let prepared = self.prepare_sprites(scene, resources)?;
+        self.check_vertex_stream(scene)?;
         let vertices = vertices(scene);
         let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
         let allocated = self.ensure_offscreen_target()?;
@@ -474,6 +476,16 @@ impl WgpuRenderer {
         ))
     }
 
+    /// Rejects a scene whose vertex stream the device cannot hold, before the
+    /// stream is generated.
+    fn check_vertex_stream(&self, scene: &SceneBundle) -> Result<(), Error> {
+        let required = u64::try_from(scene.quads().len())
+            .ok()
+            .and_then(|quads| quads.checked_mul(6 * std::mem::size_of::<Vertex>() as u64))
+            .ok_or(Error::LimitExceeded)?;
+        vertex_buffer_capacity(required, self.device.limits().max_buffer_size).map(|_| ())
+    }
+
     fn ensure_vertex_buffer(&mut self, vertices: &[Vertex]) -> Result<(wgpu::Buffer, u64), Error> {
         let contents = bytemuck::cast_slice(vertices);
         let required = u64::try_from(contents.len().max(4)).map_err(|_| Error::LimitExceeded)?;
@@ -482,9 +494,7 @@ impl WgpuRenderer {
             .as_ref()
             .is_none_or(|cache| cache.capacity < required)
         {
-            let capacity = required
-                .checked_next_power_of_two()
-                .ok_or(Error::LimitExceeded)?;
+            let capacity = vertex_buffer_capacity(required, self.device.limits().max_buffer_size)?;
             self.vertices = Some(VertexCache {
                 buffer: self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Tilewright shared frame vertices"),
@@ -513,57 +523,78 @@ impl WgpuRenderer {
         scene: &SceneBundle,
         resources: &dyn ResourceProvider,
     ) -> Result<Vec<PreparedSprite>, Error> {
-        let mut prepared = Vec::with_capacity(scene.quads().len());
-        let distinct = scene
-            .quads()
-            .iter()
-            .map(|quad| {
-                (
-                    quad.resource_id,
-                    quad.resource_revision,
-                    quad.resource_digest,
-                )
-            })
-            .collect::<HashSet<_>>();
-        let missing = distinct
-            .iter()
-            .filter(|key| !self.textures.contains_key(*key))
-            .count();
-        if texture_cache_must_clear(self.textures.len(), distinct.len(), missing)? {
-            self.textures.clear();
-            self.texture_bytes = 0;
-        }
-        let mut working_set = HashSet::with_capacity(distinct.len());
-        let mut working_set_bytes = 0_u64;
-        for quad in scene.quads() {
-            let key = (
+        let key_of = |quad: &Quad| {
+            (
                 quad.resource_id,
                 quad.resource_revision,
                 quad.resource_digest,
-            );
-            let uploaded_bytes = if self.textures.contains_key(&key) {
-                0
-            } else {
-                self.load_texture(key, resources)?
-            };
-            let cached = self
-                .textures
-                .get(&key)
-                .ok_or_else(|| Error::Internal("texture cache insertion failed".to_owned()))?;
-            if working_set.insert(key) {
+            )
+        };
+        let distinct = scene.quads().iter().map(key_of).collect::<HashSet<_>>();
+        if distinct.len() > MAXIMUM_CACHED_TEXTURES {
+            return Err(Error::LimitExceeded);
+        }
+        // Decode every missing texture before the cache changes, so the
+        // scene's whole working set is known and bounded first.
+        let mut working_set_bytes = 0_u64;
+        for key in &distinct {
+            if let Some(cached) = self.textures.get(key) {
                 working_set_bytes =
                     add_working_set_bytes(working_set_bytes, cached.image.pixels().len() as u64)
                         .map_err(|_| Error::LimitExceeded)?;
             }
-            let image = cached.image.clone();
+        }
+        let mut decoded = Vec::new();
+        let mut requested = HashSet::new();
+        for quad in scene.quads() {
+            let key = key_of(quad);
+            if !self.textures.contains_key(&key) && requested.insert(key) {
+                let image = self.decode_texture(key, resources)?;
+                working_set_bytes =
+                    add_working_set_bytes(working_set_bytes, image.pixels().len() as u64)
+                        .map_err(|_| Error::LimitExceeded)?;
+                decoded.push((key, image));
+            }
+        }
+        let missing_bytes = decoded
+            .iter()
+            .map(|(_, image)| image.pixels().len() as u64)
+            .sum::<u64>();
+        // Evict only textures this scene does not use. Afterwards the cache
+        // holds exactly the scene's working set, within both bounds.
+        if texture_cache_must_evict(
+            self.textures.len(),
+            self.texture_bytes,
+            decoded.len(),
+            missing_bytes,
+        ) {
+            self.textures.retain(|key, _| distinct.contains(key));
+            self.texture_bytes = self
+                .textures
+                .values()
+                .map(|cached| cached.image.pixels().len() as u64)
+                .sum();
+        }
+        let mut uploads = HashMap::with_capacity(decoded.len());
+        for (key, image) in decoded {
+            uploads.insert(key, self.upload_texture(key, image)?);
+        }
+        let mut prepared = Vec::with_capacity(scene.quads().len());
+        for quad in scene.quads() {
+            let key = key_of(quad);
+            let cached = self
+                .textures
+                .get(&key)
+                .ok_or_else(|| Error::Internal("texture cache insertion failed".to_owned()))?;
             let bind_group = match quad.sampling {
                 Sampling::Nearest => cached.nearest.clone(),
                 Sampling::Linear => cached.linear.clone(),
             };
             prepared.push(PreparedSprite {
                 bind_group,
-                image,
-                uploaded_bytes,
+                image: cached.image.clone(),
+                // The first quad naming a newly loaded texture carries its upload.
+                uploaded_bytes: uploads.remove(&key).unwrap_or(0),
                 key,
                 sampling: quad.sampling,
             });
@@ -571,11 +602,11 @@ impl WgpuRenderer {
         Ok(prepared)
     }
 
-    fn load_texture(
-        &mut self,
+    fn decode_texture(
+        &self,
         key: TextureKey,
         resources: &dyn ResourceProvider,
-    ) -> Result<u64, Error> {
+    ) -> Result<Arc<Rgba8Image>, Error> {
         let blob = resources
             .load(ResourceRequest {
                 id: key.0,
@@ -584,14 +615,17 @@ impl WgpuRenderer {
                 maximum_bytes: DEFAULT_MAXIMUM_RESOURCE_BYTES,
             })
             .map_err(|error| Error::Resource(error.to_string()))?;
-        let image = Arc::new(
+        Ok(Arc::new(
             Rgba8Image::decode(
                 &blob,
                 self.limits.maximum_dimension,
                 self.limits.maximum_pixels,
             )
             .map_err(|error| Error::Resource(error.to_string()))?,
-        );
+        ))
+    }
+
+    fn upload_texture(&mut self, key: TextureKey, image: Arc<Rgba8Image>) -> Result<u64, Error> {
         let size = wgpu::Extent3d {
             width: image.width(),
             height: image.height(),
@@ -636,14 +670,6 @@ impl WgpuRenderer {
             wgpu::FilterMode::Linear,
         );
         let uploaded_bytes = image.pixels().len() as u64;
-        if self
-            .texture_bytes
-            .checked_add(uploaded_bytes)
-            .is_none_or(|bytes| bytes > DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES)
-        {
-            self.textures.clear();
-            self.texture_bytes = 0;
-        }
         self.texture_bytes = self
             .texture_bytes
             .checked_add(uploaded_bytes)
@@ -1051,15 +1077,30 @@ fn vertices(scene: &SceneBundle) -> Vec<Vertex> {
     output
 }
 
-/// Admits a scene's distinct textures to the cache. A scene naming more than
-/// [`MAXIMUM_CACHED_TEXTURES`] identities is rejected, counting the ones
-/// already cached, so loading after a clear never exceeds the cap. Returns
-/// whether the cache must clear first to fit the `missing` identities.
-fn texture_cache_must_clear(cached: usize, distinct: usize, missing: usize) -> Result<bool, Error> {
-    if distinct > MAXIMUM_CACHED_TEXTURES {
+/// Bytes to allocate for a vertex stream of `required` bytes: the next power
+/// of two, capped at the device's largest buffer (kept 4-byte aligned).
+/// Streams larger than that buffer are rejected.
+fn vertex_buffer_capacity(required: u64, maximum: u64) -> Result<u64, Error> {
+    let maximum = maximum & !3;
+    if required > maximum {
         return Err(Error::LimitExceeded);
     }
-    Ok(cached.saturating_add(missing) > MAXIMUM_CACHED_TEXTURES)
+    Ok(required
+        .checked_next_power_of_two()
+        .map_or(maximum, |capacity| capacity.min(maximum)))
+}
+
+/// Whether admitting `missing` textures of `missing_bytes` to a cache that
+/// holds `cached` textures of `cached_bytes` would exceed its entry or byte
+/// bound, so textures the next scene does not use must be evicted first.
+fn texture_cache_must_evict(
+    cached: usize,
+    cached_bytes: u64,
+    missing: usize,
+    missing_bytes: u64,
+) -> bool {
+    cached.saturating_add(missing) > MAXIMUM_CACHED_TEXTURES
+        || cached_bytes.saturating_add(missing_bytes) > DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES
 }
 
 fn depth_value(quad: &Quad) -> f32 {
@@ -1142,15 +1183,76 @@ mod tests {
     };
 
     #[test]
-    fn texture_cache_admits_at_most_its_cap_per_scene() {
-        use super::{MAXIMUM_CACHED_TEXTURES as CAP, texture_cache_must_clear};
-        // A full cache plus as many new identities: the scene alone names
-        // twice the cap, so clearing and reloading would overflow it.
-        assert!(texture_cache_must_clear(CAP, CAP * 2, CAP).is_err());
-        assert!(texture_cache_must_clear(0, CAP + 1, CAP + 1).is_err());
-        assert_eq!(texture_cache_must_clear(CAP, CAP, CAP), Ok(true));
-        assert_eq!(texture_cache_must_clear(CAP, CAP, 0), Ok(false));
-        assert_eq!(texture_cache_must_clear(10, 20, 10), Ok(false));
+    fn vertex_buffers_stay_within_the_device_buffer_limit() {
+        use super::vertex_buffer_capacity;
+        let limit = 256 << 20;
+        // 700,000 quads of six 72-byte vertices need about 302 MiB.
+        assert!(vertex_buffer_capacity(700_000 * 432, limit).is_err());
+        // Rounding up to a power of two never passes the device limit.
+        assert_eq!(vertex_buffer_capacity(150 << 20, limit), Ok(limit));
+        assert_eq!(vertex_buffer_capacity(100 << 20, limit), Ok(128 << 20));
+        assert_eq!(vertex_buffer_capacity(432, limit), Ok(512));
+        assert_eq!(vertex_buffer_capacity(limit, limit + 3), Ok(limit));
+    }
+
+    #[test]
+    fn texture_cache_evicts_before_exceeding_either_bound() {
+        use super::{
+            DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES as BYTES, MAXIMUM_CACHED_TEXTURES as CAP,
+            texture_cache_must_evict,
+        };
+        assert!(!texture_cache_must_evict(10, 1 << 20, 10, 1 << 20));
+        assert!(!texture_cache_must_evict(CAP - 1, 0, 1, 0));
+        assert!(texture_cache_must_evict(CAP, 0, 1, 0));
+        assert!(!texture_cache_must_evict(1, BYTES - 1, 1, 1));
+        assert!(texture_cache_must_evict(1, BYTES - 1, 1, 2));
+        assert!(texture_cache_must_evict(1, u64::MAX, 1, 1));
+    }
+
+    #[test]
+    fn scenes_reuse_and_evict_cached_textures_by_working_set() {
+        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(16, 16)) else {
+            eprintln!("skipping GPU cache test: no supported adapter");
+            return;
+        };
+        let scene = synthetic_scene(16, 16).unwrap();
+        let render = |renderer: &mut WgpuRenderer| {
+            renderer
+                .render(RenderRequest {
+                    scene: &scene,
+                    resources: synthetic_provider().unwrap(),
+                })
+                .unwrap()
+                .metrics
+        };
+        assert_eq!(render(&mut renderer).resource_requests, 1);
+        assert_eq!(render(&mut renderer).resource_requests, 0);
+        // A full cache of unused textures is evicted, but the scene's own
+        // texture stays cached and is not requested again.
+        let unused = renderer.textures.values().next().map(|entry| {
+            (
+                entry.image.clone(),
+                entry.nearest.clone(),
+                entry.linear.clone(),
+            )
+        });
+        let (image, nearest, linear) = unused.unwrap();
+        for index in 0..super::MAXIMUM_CACHED_TEXTURES as u64 {
+            renderer.textures.insert(
+                (
+                    tilewright_scene::ResourceId(1_000 + index),
+                    1,
+                    tilewright_scene::Digest256([9; 32]),
+                ),
+                super::TextureCacheEntry {
+                    image: image.clone(),
+                    nearest: nearest.clone(),
+                    linear: linear.clone(),
+                },
+            );
+        }
+        assert_eq!(render(&mut renderer).resource_requests, 0);
+        assert!(renderer.textures.len() <= super::MAXIMUM_CACHED_TEXTURES);
     }
 
     #[test]

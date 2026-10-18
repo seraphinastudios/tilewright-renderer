@@ -109,14 +109,17 @@ target, private depth/stencil target, at most 255 bytes of readback row padding
 per row, and 432 bytes of transient vertices per quad (six 72-byte vertices). Checked arithmetic
 precedes every size-derived allocation. Offscreen targets/readback buffers are
 reused until resize; immutable textures are reused by ID/revision/digest with a
-hard 4,096-entry cache that clears as one bounded unit before admitting a new
-working set; a scene naming more than 4,096 distinct textures is rejected.
-Retained texture pixels and each scene's distinct texture working
-set are also capped at 256 MiB, and prepared quads share decoded immutable
-pixels instead of cloning them. The shared vertex buffer grows geometrically to the next power of
-two and is reused by offscreen and surface presentation until a larger scene is
-submitted; per-texture nearest/linear bind groups are created only on cache
-misses.
+hard 4,096-entry cache. A scene's missing textures are decoded before the cache
+changes; when admitting them would exceed the entry or byte bound, textures the
+scene does not use are evicted first, so the cache never holds more than one
+bounded working set. A scene naming more than 4,096 distinct textures is
+rejected. Retained texture pixels and each scene's distinct texture working set
+are also capped at 256 MiB, and prepared quads share decoded immutable pixels
+instead of cloning them. The shared vertex buffer grows geometrically to the
+next power of two, capped at the device's largest buffer (larger streams are
+rejected before they are generated), and is reused by offscreen and surface
+presentation until a larger scene is submitted; per-texture nearest/linear
+bind groups are created only on cache misses.
 
 No public dependency or type points to a client, editor, protocol, server, or
 game implementation. `tools/check-architecture.sh` validates exact direct
