@@ -432,6 +432,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compressed_png_metadata_is_never_inflated() {
+        // A PNG carrying a compressed ICC profile and text chunks of every
+        // kind: the texture decoder must skip them all.
+        let mut info = png::Info::with_size(1, 1);
+        info.color_type = png::ColorType::Rgba;
+        info.bit_depth = png::BitDepth::Eight;
+        info.icc_profile = Some(vec![7; 4_096].into());
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::with_info(&mut bytes, info).unwrap();
+            encoder
+                .add_ztxt_chunk("Comment".to_owned(), "a".repeat(4_096))
+                .unwrap();
+            encoder
+                .add_text_chunk("Title".to_owned(), "plain".to_owned())
+                .unwrap();
+            encoder
+                .add_itxt_chunk("Author".to_owned(), "b".repeat(4_096))
+                .unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[1, 2, 3, 255]).unwrap();
+        }
+        let reader = view_file::png_decoder(&bytes).read_info().unwrap();
+        let metadata = reader.info();
+        assert!(metadata.icc_profile.is_none());
+        assert!(metadata.compressed_latin1_text.is_empty());
+        assert!(metadata.uncompressed_latin1_text.is_empty());
+        assert!(metadata.utf8_text.is_empty());
+        let (width, height, atx1) = view_file::png_to_atx1(&bytes, usize::MAX).unwrap();
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(&atx1[12..], [1, 2, 3, 255]);
+    }
+
     fn crc32(bytes: &[u8]) -> u32 {
         let mut crc = u32::MAX;
         for byte in bytes {

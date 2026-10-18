@@ -280,15 +280,23 @@ pub fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// A PNG decoder for view textures. Text and ICC metadata are unused, so
+/// they are skipped: no compressed metadata is ever inflated or stored.
+pub(crate) fn png_decoder(bytes: &[u8]) -> png::Decoder<std::io::Cursor<&[u8]>> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    decoder.set_ignore_text_chunk(true);
+    decoder.set_ignore_iccp_chunk(true);
+    decoder
+}
+
 /// Decodes a PNG into an `ATX1` texture envelope of at most `maximum_bytes`.
 /// The size is checked from the header before any pixel buffer is allocated.
 ///
 /// # Errors
 /// Returns a message for malformed or oversized images.
 pub fn png_to_atx1(bytes: &[u8], maximum_bytes: usize) -> Result<(u32, u32, Vec<u8>)> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder
+    let mut reader = png_decoder(bytes)
         .read_info()
         .map_err(|error| format!("invalid PNG: {error}"))?;
     let (width, height) = {

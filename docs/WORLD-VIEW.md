@@ -40,7 +40,8 @@ The output path must not exist; the write is atomic and never overwrites.
   scene must also fit the default scene limits, including 268,435,456 raster
   samples of overdraw and glow work.
 - PNG input may be RGBA, RGB, greyscale, greyscale with alpha, or indexed;
-  16-bit channels are reduced to 8 bits.
+  16-bit channels are reduced to 8 bits. Text and ICC metadata chunks are
+  skipped unread, so no compressed metadata is inflated.
 - Every object is validated whether or not it is in view, and every animation
   frame whether or not the clock selects it, so panning or advancing the clock
   never turns a valid view into an invalid one. Object IDs are nonzero and
