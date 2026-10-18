@@ -420,7 +420,11 @@ fn raster_samples(quad: &Quad, viewport: Viewport) -> u64 {
         Some(glow) if glow.radius_uv.iter().any(|radius| *radius > 0.0) => GLOW_SAMPLES_PER_PIXEL,
         _ => 1,
     };
-    span(min_x, max_x, viewport.width) * span(min_y, max_y, viewport.height) * per_pixel
+    // Custom limits may admit viewports whose products overflow `u64`;
+    // saturating keeps such a scene over any budget.
+    span(min_x, max_x, viewport.width)
+        .saturating_mul(span(min_y, max_y, viewport.height))
+        .saturating_mul(per_pixel)
 }
 
 fn valid_color(color: [f32; 4]) -> bool {
@@ -630,6 +634,26 @@ mod tests {
             Err(super::Error::LimitExceeded)
         );
         assert!(render(halo(0.0), 64).is_ok());
+        // Permissive custom limits must not let the count overflow.
+        let huge = Viewport {
+            width: u32::MAX,
+            height: u32::MAX,
+            scale_milli: 1000,
+        };
+        let open = SceneLimits {
+            maximum_quads: 4,
+            maximum_dimension: u32::MAX,
+            maximum_pixels: u64::MAX,
+            maximum_raster_samples: u64::MAX - 1,
+        };
+        let cover = Quad {
+            positions: [[0.0, 0.0], [4.0e9, 0.0], [4.0e9, 4.0e9], [0.0, 4.0e9]],
+            ..halo(0.1)
+        };
+        assert_eq!(
+            SceneBundle::from_quads(1, 0, huge, [0.0; 4], [cover], open),
+            Err(super::Error::LimitExceeded)
+        );
     }
 
     #[test]
