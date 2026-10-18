@@ -28,29 +28,30 @@ Default limits are 131,072 quads, 8,192 pixels on either axis, 16,777,216 total
 pixels, 8× scale, 268,435,456 raster samples, and 16 MiB per resource request.
 Raster samples bound overdraw: an axis-aligned quad counts its viewport-clipped
 bounding box in pixels and any other quad the boxes of both its triangles, 33
-times over for a glow quad with a nonzero radius. The GPU device is created
-with downlevel limits except for the 2D texture dimension, which follows the
-adapter up to the same 8,192 bound; targets and textures beyond the device's
-bound are rejected with a typed error. All float inputs must be finite; color
-channels are within 0–1; zero identities/revisions and all-zero digests are
-rejected. Each (semantic ID, part) pair is unique, so one object may own several
-quads, and a scene names at most 4,096 distinct textures. Sorting is stable by layer, depth, painter order, semantic ID, then part.
+times over for a glow quad with a nonzero radius. The GPU device is created with
+downlevel limits except for the 2D texture dimension, which follows the adapter
+up to the same 8,192 bound; targets and textures beyond the device's bound are
+rejected with a typed error. All float inputs must be finite; color channels are
+within 0–1; zero identities/revisions and all-zero digests are rejected. Each
+(semantic ID, part) pair is unique, so one object may own several quads, and a
+scene names at most 4,096 distinct textures. Sorting is stable by layer, depth,
+painter order, semantic ID, then part.
 
 ## Quads, rasterisation and effects
 
 A quad is four screen-space corners (top-left, top-right, bottom-right,
 bottom-left) with matching texture coordinates. It carries a color tint with
 alpha, a greyscale amount, an optional glow, sampling, a pickable flag, and the
-legacy effect fields. Axis-aligned quads use half-open rectangle coverage.
-Every other quad is split into the triangles (0, 1, 2) and (0, 2, 3), snapped
-to 1/256 px, and filled with an exact integer edge test. Only pixel centres
-inside each triangle's clipped bounding box are tested, and the top-left tie
-rule gives each pixel on a shared edge to exactly one triangle, as GPU
-rasterisers do. The CPU reference and the GPU picking planes share this rasteriser, so
-semantic, depth, and coverage planes match exactly on every backend and cover
-the pixels the GPU colours. The GPU backend submits positions already rounded
-to the same 1/256 px grid, so drivers with different snapping and rounding
-rules start from identical fixed-point corners.
+legacy effect fields. Axis-aligned quads use half-open rectangle coverage. Every
+other quad is split into the triangles (0, 1, 2) and (0, 2, 3), snapped to 1/256
+px, and filled with an exact integer edge test. Only pixel centres inside each
+triangle's clipped bounding box are tested, and the top-left tie rule gives each
+pixel on a shared edge to exactly one triangle, as GPU rasterisers do. The CPU
+reference and the GPU picking planes share this rasteriser, so semantic, depth,
+and coverage planes match exactly on every backend and cover the pixels the GPU
+colours. The GPU backend submits positions already rounded to the same 1/256 px
+grid, so drivers with different snapping and rounding rules start from identical
+fixed-point corners.
 
 Texture lookups outside 0–1 are transparent. A glow quad extends its art by
 the glow radius and draws a halo from 16 fixed sample directions around the
@@ -118,18 +119,19 @@ per row, and 432 bytes of transient vertices per quad (six 72-byte vertices).
 Checked arithmetic precedes every size-derived allocation. Offscreen
 targets/readback buffers are reused until resize; immutable textures are reused
 by ID/revision/digest with a hard 4,096-entry cache. A scene's missing textures
-are decoded before the cache changes; cached and staged textures share the 256
-MiB CPU budget, and textures the scene does not use are evicted before a decode
-or admission would exceed it or the entry bound, so the cache never holds more
-than one bounded working set. Scene validation and every renderer, the CPU
-reference included, reject a scene naming more than 4,096 distinct textures
-before loading any. Retained texture pixels and each scene's distinct texture
-working set are also capped at 256 MiB, and prepared quads share decoded
-immutable pixels instead of cloning them. The shared vertex buffer grows
-geometrically to the next power of two, capped at the device's largest buffer
-(larger streams are rejected before they are generated), and is reused by
-offscreen and surface presentation until a larger scene is submitted; per-
-texture nearest/linear bind groups are created only on cache misses.
+are decoded before the cache changes; cached and staged textures share the
+256 MiB CPU budget, and textures the scene does not use are evicted before a
+decode or admission would exceed it or the entry bound, and a texture that still
+does not fit is refused before it is decoded, so the cache never holds more than
+one bounded working set. Scene validation and every renderer, the CPU reference
+included, reject a scene naming more than 4,096 distinct textures before loading
+any. Retained texture pixels and each scene's distinct texture working set are
+also capped at 256 MiB, and prepared quads share decoded immutable pixels
+instead of cloning them. The shared vertex buffer grows geometrically to the
+next power of two, capped at the device's largest buffer (larger streams are
+rejected before they are generated), and is reused by offscreen and surface
+presentation until a larger scene is submitted; per-texture nearest/linear bind
+groups are created only on cache misses.
 
 No public dependency or type points to a client, editor, protocol, server, or
 game implementation. `tools/check-architecture.sh` validates exact direct

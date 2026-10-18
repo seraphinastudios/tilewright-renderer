@@ -553,21 +553,33 @@ impl WgpuRenderer {
         let mut decoded = Vec::new();
         let mut requested = HashSet::new();
         let mut staged_bytes = 0_u64;
-        let mut evicted = false;
+        // Bytes held by cached textures this scene does not use: the most an
+        // eviction can free.
+        let mut unused_bytes = self
+            .textures
+            .iter()
+            .filter(|(key, _)| !distinct.contains(*key))
+            .map(|(_, cached)| cached.image.pixels().len() as u64)
+            .sum::<u64>();
         for quad in scene.quads() {
             let key = key_of(quad);
             if self.textures.contains_key(&key) || !requested.insert(key) {
                 continue;
             }
             let blob = load_blob(key, resources)?;
-            // Cached and staged textures share one CPU budget. Before
-            // decoding one that would not fit beside them, evict the cached
-            // textures this scene does not use; the working-set bound then
-            // keeps what remains within the budget.
-            let incoming = blob.bytes().len() as u64;
-            if !evicted && decoding_needs_room(self.texture_bytes, staged_bytes, incoming) {
-                self.evict_unused(&distinct);
-                evicted = true;
+            // Cached and staged textures share one CPU budget. A texture that
+            // would not fit beside them is decoded only after evicting cached
+            // textures this scene does not use, and not at all if even that
+            // leaves no room. An envelope holds a 12-byte header before its
+            // pixels.
+            let incoming = (blob.bytes().len() as u64).saturating_sub(12);
+            match decode_admission(self.texture_bytes, unused_bytes, staged_bytes, incoming) {
+                Admission::Fits => {}
+                Admission::EvictUnused => {
+                    self.evict_unused(&distinct);
+                    unused_bytes = 0;
+                }
+                Admission::Exceeds => return Err(Error::LimitExceeded),
             }
             let image = Arc::new(
                 Rgba8Image::decode(
@@ -1088,6 +1100,26 @@ fn decoding_needs_room(cached: u64, staged: u64, incoming: u64) -> bool {
         > DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum Admission {
+    Fits,
+    EvictUnused,
+    Exceeds,
+}
+
+/// Whether a texture of `incoming` decoded bytes fits beside the `cached`
+/// and `staged` ones, fits once the `unused` cached bytes are evicted, or
+/// cannot fit at all.
+fn decode_admission(cached: u64, unused: u64, staged: u64, incoming: u64) -> Admission {
+    if !decoding_needs_room(cached, staged, incoming) {
+        Admission::Fits
+    } else if unused > 0 && !decoding_needs_room(cached.saturating_sub(unused), staged, incoming) {
+        Admission::EvictUnused
+    } else {
+        Admission::Exceeds
+    }
+}
+
 fn load_blob(key: TextureKey, resources: &dyn ResourceProvider) -> Result<ResourceBlob, Error> {
     resources
         .load(ResourceRequest {
@@ -1293,13 +1325,25 @@ mod tests {
 
     #[test]
     fn staged_decodes_share_the_budget_with_the_cache() {
-        use super::{DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES as BYTES, decoding_needs_room};
+        use super::{
+            Admission, DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES as BYTES, decode_admission,
+            decoding_needs_room,
+        };
         // A nearly full cache must make room before a disjoint scene decodes
         // its own nearly full working set.
         assert!(decoding_needs_room(BYTES - 1, 0, 16));
         assert!(decoding_needs_room(BYTES / 2, BYTES / 2, 1));
         assert!(!decoding_needs_room(BYTES / 2, BYTES / 4, BYTES / 4));
         assert!(decoding_needs_room(u64::MAX, 1, 1));
+        assert_eq!(decode_admission(BYTES / 2, 0, 0, 16), Admission::Fits);
+        assert_eq!(
+            decode_admission(BYTES - 8, BYTES - 8, 0, 16),
+            Admission::EvictUnused
+        );
+        // When the scene reuses every cached texture, eviction frees nothing
+        // and the texture is refused before it is decoded.
+        assert_eq!(decode_admission(BYTES - 8, 0, 0, 16), Admission::Exceeds);
+        assert_eq!(decode_admission(BYTES - 8, 4, 0, 16), Admission::Exceeds);
     }
 
     #[test]
