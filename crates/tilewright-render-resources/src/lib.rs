@@ -153,10 +153,23 @@ pub struct PixelBounds {
 pub const SUBPIXEL_STEPS: i64 = 256;
 const SUBPIXEL_SCALE: f64 = 256.0;
 
-/// Pixel bounds of a quad, clipped to the target.
+/// The quad with every corner on the shared subpixel grid. Every renderer
+/// path rasterises this geometry.
+fn snapped(quad: &Quad) -> Quad {
+    Quad {
+        positions: quad.positions.map(|point| point.map(subpixel_position)),
+        ..*quad
+    }
+}
+
+/// Pixel bounds of a quad on the shared subpixel grid, clipped to the target.
 #[must_use]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn quad_pixel_bounds(quad: &Quad, width: u32, height: u32) -> PixelBounds {
+    snapped_bounds(&snapped(quad), width, height)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn snapped_bounds(quad: &Quad, width: u32, height: u32) -> PixelBounds {
     let (min_x, max_x, min_y, max_y) = quad.positions.iter().fold(
         (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
         |(min_x, max_x, min_y, max_y), point| {
@@ -177,10 +190,11 @@ pub fn quad_pixel_bounds(quad: &Quad, width: u32, height: u32) -> PixelBounds {
 }
 
 /// Visits each covered pixel centre of a quad with its interpolated texture
-/// coordinates. Axis-aligned quads use half-open rectangle coverage. Other
-/// quads are split into the triangles (0, 1, 2) and (0, 2, 3), snapped to
-/// [`SUBPIXEL_STEPS`] and filled with an exact integer edge test whose tie rule
-/// gives every pixel on a shared edge to exactly one triangle. The reference
+/// coordinates. Corners are first snapped to [`SUBPIXEL_STEPS`], exactly as
+/// GPU backends submit them. Axis-aligned quads then use half-open rectangle
+/// coverage. Other quads are split into the triangles (0, 1, 2) and
+/// (0, 2, 3) and filled with an exact integer edge test whose tie rule gives
+/// every pixel on a shared edge to exactly one triangle. The reference
 /// renderer and the GPU picking planes both use this function.
 #[allow(
     clippy::cast_possible_truncation,
@@ -193,10 +207,11 @@ pub fn for_each_quad_pixel(
     height: u32,
     mut visit: impl FnMut(u32, u32, usize, f32, f32),
 ) {
+    let quad = &snapped(quad);
     if let Some(rect) = quad.aligned_rect() {
         let rect_width = rect.right - rect.left;
         let rect_height = rect.bottom - rect.top;
-        let bounds = quad_pixel_bounds(quad, width, height);
+        let bounds = snapped_bounds(quad, width, height);
         for y in bounds.top..bounds.bottom {
             for x in bounds.left..bounds.right {
                 let index = y as usize * width as usize + x as usize;
@@ -461,7 +476,40 @@ mod tests {
         Rgba8Image, add_working_set_bytes,
     };
     use sha2::{Digest, Sha256};
-    use tilewright_scene::{Digest256, ResourceId};
+    use tilewright_scene::{Digest256, Layer, Quad, ResourceId, Sampling, SemanticId};
+
+    fn rect_quad(left: f32, right: f32) -> Quad {
+        Quad {
+            semantic_id: SemanticId(1),
+            part: 0,
+            resource_id: ResourceId(1),
+            resource_revision: 1,
+            resource_digest: Digest256([1; 32]),
+            positions: [[left, 0.0], [right, 0.0], [right, 1.0], [left, 1.0]],
+            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            depth: 0,
+            painter_order: 0,
+            color: [1.0; 4],
+            grayscale: 0.0,
+            glow: None,
+            pickable: true,
+            sampling: Sampling::Nearest,
+            layer: Layer::World,
+        }
+    }
+
+    #[test]
+    fn aligned_quads_cover_their_snapped_geometry() {
+        // 0.5 + 1/1024 rounds to the pixel centre 0.5 on the 1/256 grid, so
+        // the snapped left edge covers pixel 0 exactly as the GPU does.
+        let mut covered = Vec::new();
+        super::for_each_quad_pixel(&rect_quad(0.500_976_56, 2.0), 4, 1, |x, _, _, _, _| {
+            covered.push(x);
+        });
+        assert_eq!(covered, [0, 1]);
+        let bounds = super::quad_pixel_bounds(&rect_quad(0.500_976_56, 2.0), 4, 1);
+        assert_eq!((bounds.left, bounds.right), (0, 2));
+    }
 
     #[test]
     fn rejects_empty_and_oversized_blobs() {

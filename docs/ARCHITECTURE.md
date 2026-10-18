@@ -65,7 +65,9 @@ knows nothing about any game or content format.
   surrounding tile heights; neighbours beyond an optional cliff threshold keep
   a hard edge. A flat tile is one rectangle. A bent isometric tile maps its art
   onto a 4 × 4 bilinear mesh one art pixel larger than the lattice cell, so
-  neighbouring meshes overlap instead of leaving hairline seams.
+  neighbouring meshes overlap instead of leaving hairline seams. Top-down
+  ground shifts up by its tile height without bending. Isometric tiles must be
+  wider than twice the seam bleed, and tile coordinates stay within ±2⁴⁰.
 - **Standing art** sits with its bottom centre on the front of its footprint,
   raised by the tile height and the object's `z`. Multi-tile footprints order
   by their front tile.

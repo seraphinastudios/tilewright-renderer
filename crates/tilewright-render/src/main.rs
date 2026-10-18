@@ -281,13 +281,108 @@ mod tests {
         path
     }
 
+    /// Rewrites the view's texture list.
+    fn set_textures(view: &std::path::Path, textures: &str) {
+        let text = fs::read_to_string(view).unwrap();
+        let start = text.find("\"textures\"").unwrap();
+        let end = start + text[start..].find("],").unwrap() + 1;
+        fs::write(
+            view,
+            format!("{}\"textures\": {textures}{}", &text[..start], &text[end..]),
+        )
+        .unwrap();
+    }
+
+    fn png_entry(directory: &std::path::Path, name: &str, id: u64, side: u32) -> String {
+        let pixels = vec![9_u8; side as usize * side as usize * 4];
+        let png = view_file::encode_png(side, side, &pixels).unwrap();
+        fs::write(directory.join(name), &png).unwrap();
+        format!(
+            "{{\"id\": {id}, \"path\": \"{name}\", \"sha256\": \"{}\"}}",
+            view_file::hex(&Sha256::digest(&png))
+        )
+    }
+
+    #[test]
+    fn texture_paths_stay_inside_the_view_directory() {
+        let outer = tempfile::tempdir().unwrap();
+        let directory = outer.path().join("view");
+        fs::create_dir(&directory).unwrap();
+        let view = write_view(&directory, None);
+        let digest = view_file::hex(&Sha256::digest(
+            fs::read(directory.join("square.png")).unwrap(),
+        ));
+        fs::copy(
+            directory.join("square.png"),
+            outer.path().join("outside.png"),
+        )
+        .unwrap();
+        let absolute = outer.path().join("outside.png").display().to_string();
+        let mut paths = vec![
+            "../outside.png".to_owned(),
+            absolute,
+            "./square.png".to_owned(),
+        ];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                outer.path().join("outside.png"),
+                directory.join("link.png"),
+            )
+            .unwrap();
+            paths.push("link.png".to_owned());
+        }
+        for path in paths {
+            set_textures(
+                &view,
+                &format!("[{{\"id\": 7, \"path\": \"{path}\", \"sha256\": \"{digest}\"}}]"),
+            );
+            let error = view_file::load(&view).err().unwrap_or_default();
+            assert!(
+                error.contains("must be relative") || error.contains("leaves the view"),
+                "{path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn decoded_textures_respect_resource_and_aggregate_budgets() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        // 2048² RGBA plus the 12-byte header exceeds the 16 MiB resource limit.
+        set_textures(
+            &view,
+            &format!("[{}]", png_entry(directory.path(), "big.png", 7, 2048)),
+        );
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("over the 16777216-byte limit"), "{error}");
+
+        let entries: Vec<String> = (0..3)
+            .map(|index| png_entry(directory.path(), &format!("t{index}.png"), 7 + index, 64))
+            .collect();
+        set_textures(&view, &format!("[{}]", entries.join(", ")));
+        assert!(view_file::load_within(&view, 3 * (12 + 64 * 64 * 4)).is_ok());
+        let error = view_file::load_within(&view, 3 * (12 + 64 * 64 * 4) - 1)
+            .err()
+            .unwrap();
+        assert!(error.contains("textures[2]"), "{error}");
+
+        let many: Vec<String> = (1..=4097)
+            .map(|id| format!("{{\"id\": {id}, \"path\": \"missing.png\", \"sha256\": \"00\"}}"))
+            .collect();
+        set_textures(&view, &format!("[{}]", many.join(",")));
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("at most 4096 textures"), "{error}");
+    }
+
     #[test]
     fn world_views_render_through_the_reference_path() {
         let directory = tempfile::tempdir().unwrap();
         let view = write_view(directory.path(), None);
         let output = directory.path().join("frame.png");
         render_world(&view, &output, true).unwrap();
-        let (width, height, atx1) = view_file::png_to_atx1(&fs::read(&output).unwrap()).unwrap();
+        let (width, height, atx1) =
+            view_file::png_to_atx1(&fs::read(&output).unwrap(), usize::MAX).unwrap();
         assert_eq!((width, height), (8, 8));
         let pixel = |x: usize, y: usize| &atx1[12 + (y * 8 + x) * 4..][..4];
         assert_eq!(pixel(1, 1), [200, 40, 40, 255]);

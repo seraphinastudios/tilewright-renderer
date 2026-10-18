@@ -54,7 +54,8 @@ pub struct TextureRef {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Anchor {
     /// Ground art covering the tile: a diamond in isometric projection, the
-    /// tile square in top-down. Isometric ground bends with terrain heights.
+    /// tile square in top-down. Isometric ground bends with terrain heights;
+    /// top-down ground shifts up by its tile's height without bending.
     Ground,
     /// Art standing on the tile: its bottom centre sits at the front of the
     /// object's footprint, raised by the tile's height and the object's `z`.
@@ -357,13 +358,26 @@ fn unit(values: &[f32]) -> bool {
         .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
 }
 
+/// Largest tile coordinate magnitude a view may use. It keeps footprint and
+/// diagonal arithmetic far from `i64` overflow and pixel positions exact in
+/// `f64`.
+pub const MAXIMUM_TILE_COORDINATE: i64 = 1 << 40;
+
 fn validate(view: &WorldView) -> Result<(), Error> {
     let camera = &view.camera;
+    let coordinate =
+        |value: i64| (-MAXIMUM_TILE_COORDINATE..=MAXIMUM_TILE_COORDINATE).contains(&value);
+    // Bent isometric tiles divide by half the tile width less the seam bleed,
+    // so that must stay positive.
     let projection_ok = match camera.projection {
         Projection::Isometric {
             tile_width,
             tile_height,
-        } => (2..=1024).contains(&tile_width) && (2..=1024).contains(&tile_height),
+        } => {
+            (2..=1024).contains(&tile_width)
+                && f64::from(tile_width) / 2.0 > SEAM_BLEED_PX
+                && (2..=1024).contains(&tile_height)
+        }
         Projection::TopDown { tile_size } => (1..=1024).contains(&tile_size),
     };
     let heights = &view.heights;
@@ -377,8 +391,10 @@ fn validate(view: &WorldView) -> Result<(), Error> {
         && view.stretch.pixels_per_unit >= 0.0
         && view.stretch.cliff_threshold.is_none_or(|value| value >= 0)
         && usize::try_from(cells).is_ok_and(|cells| cells == heights.heights.len())
+        && heights.origin.iter().all(|value| coordinate(*value))
         && view.objects.iter().all(|object| {
-            object.footprint[0] >= 1
+            object.tile.iter().all(|value| coordinate(*value))
+                && object.footprint[0] >= 1
                 && object.footprint[1] >= 1
                 && !object.animation.frames.is_empty()
                 && object
@@ -664,8 +680,11 @@ impl Projector {
                 }
                 Projection::TopDown { tile_size } => {
                     #[allow(clippy::cast_precision_loss)]
-                    let origin =
-                        self.screen(self.world(object.tile[0] as f64, object.tile[1] as f64, 0.0));
+                    let origin = self.screen(self.world(
+                        object.tile[0] as f64,
+                        object.tile[1] as f64,
+                        f64::from(tile_height),
+                    ));
                     let size = f64::from(tile_size) * self.zoom;
                     push(Quad {
                         positions: rect(
@@ -700,7 +719,7 @@ impl Projector {
             Projection::TopDown { .. } => self.screen(self.world(
                 head_x + footprint[0] / 2.0,
                 head_y + footprint[1],
-                f64::from(object.z),
+                elevation,
             )),
         };
         let width = art_w * f64::from(object.scale[0]) * self.zoom;

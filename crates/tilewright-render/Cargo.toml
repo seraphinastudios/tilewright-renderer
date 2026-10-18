@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 tilewright-render-api.workspace = true
+tilewright-render-resources.workspace = true
 tilewright-render-sdl3 = { workspace = true, optional = true }
 tilewright-render-testkit.workspace = true
 tilewright-render-wgpu.workspace = true

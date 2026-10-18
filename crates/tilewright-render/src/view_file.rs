@@ -7,7 +7,15 @@
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tilewright_render_resources::{
+    DEFAULT_MAXIMUM_RESOURCE_BYTES, DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES,
+};
 use tilewright_render_testkit::FakeResourceProvider;
 use tilewright_render_world::{
     Anchor, Animation, Camera, CornerRule, GlowEffect, HeightField, Projection, Stretch,
@@ -19,6 +27,8 @@ use tilewright_scene::{Digest256, ResourceId, Sampling, SemanticId};
 const MAXIMUM_VIEW_BYTES: u64 = 64 * 1024 * 1024;
 /// Largest accepted texture file.
 const MAXIMUM_TEXTURE_BYTES: u64 = 16 * 1024 * 1024;
+/// Most textures one view may list, matching the renderer's texture cache.
+const MAXIMUM_TEXTURES: usize = 4_096;
 
 pub struct LoadedView {
     pub view: WorldView,
@@ -116,11 +126,12 @@ pub fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// Decodes a PNG into an `ATX1` texture envelope.
+/// Decodes a PNG into an `ATX1` texture envelope of at most `maximum_bytes`.
+/// The size is checked from the header before any pixel buffer is allocated.
 ///
 /// # Errors
 /// Returns a message for malformed or oversized images.
-pub fn png_to_atx1(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+pub fn png_to_atx1(bytes: &[u8], maximum_bytes: usize) -> Result<(u32, u32, Vec<u8>)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder
@@ -132,6 +143,15 @@ pub fn png_to_atx1(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     };
     if width == 0 || height == 0 || width > 8_192 || height > 8_192 {
         return Err("PNG dimensions out of range".to_owned());
+    }
+    let envelope = (u64::from(width) * u64::from(height))
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(12))
+        .ok_or("PNG too large")?;
+    if envelope > u64::try_from(maximum_bytes).unwrap_or(u64::MAX) {
+        return Err(format!(
+            "a {width}x{height} texture decodes to {envelope} bytes, over the {maximum_bytes}-byte limit"
+        ));
     }
     let buffer_size = reader
         .output_buffer_size()
@@ -192,8 +212,48 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-#[allow(clippy::too_many_lines)]
+/// Resolves a texture path written in a view: relative, `/`-separated, with
+/// no empty, `.` or `..` components, and still inside `base` once symbolic
+/// links are resolved.
+fn confined(base: &Path, relative: &str) -> Result<PathBuf> {
+    let components: Vec<&str> = relative.split('/').collect();
+    if relative.is_empty()
+        || relative.contains('\\')
+        || relative.contains(':')
+        || components
+            .iter()
+            .any(|component| component.is_empty() || *component == "." || *component == "..")
+    {
+        return Err(format!(
+            "texture path \"{relative}\" must be relative to the view, without . or .. components"
+        ));
+    }
+    let joined = components
+        .iter()
+        .fold(base.to_path_buf(), |path, component| path.join(component));
+    let resolved = fs::canonicalize(&joined)
+        .map_err(|error| format!("cannot resolve {}: {error}", joined.display()))?;
+    if resolved.starts_with(base) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "texture path \"{relative}\" leaves the view's directory"
+        ))
+    }
+}
+
+/// Reads a view and its textures with the renderer's default budgets.
 pub fn load(path: &Path) -> Result<LoadedView> {
+    load_within(
+        path,
+        usize::try_from(DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES).unwrap_or(usize::MAX),
+    )
+}
+
+/// Reads a view whose decoded textures together fit in `texture_budget`
+/// bytes.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn load_within(path: &Path, texture_budget: usize) -> Result<LoadedView> {
     let bytes = read_bounded(path, MAXIMUM_VIEW_BYTES)?;
     let document: Value =
         serde_json::from_slice(&bytes).map_err(|error| format!("invalid view JSON: {error}"))?;
@@ -217,7 +277,10 @@ pub fn load(path: &Path) -> Result<LoadedView> {
     if field(root, "format", "view")?.as_str() != Some("tilewright.view/1") {
         return Err("view: format must be \"tilewright.view/1\"".to_owned());
     }
-    let base = path.parent().unwrap_or(Path::new("."));
+    let base = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
 
     let camera_object = as_object(field(root, "camera", "view")?, "camera")?;
     reject_unknown(
@@ -325,12 +388,17 @@ pub fn load(path: &Path) -> Result<LoadedView> {
 
     let provider = Arc::new(FakeResourceProvider::default());
     let mut textures: HashMap<u64, TextureRef> = HashMap::new();
-    for (index, entry) in field(root, "textures", "view")?
+    let entries = field(root, "textures", "view")?
         .as_array()
-        .ok_or("textures must be an array")?
-        .iter()
-        .enumerate()
-    {
+        .ok_or("textures must be an array")?;
+    if entries.len() > MAXIMUM_TEXTURES {
+        return Err(format!("a view lists at most {MAXIMUM_TEXTURES} textures"));
+    }
+    let base = fs::canonicalize(base)
+        .map_err(|error| format!("cannot resolve {}: {error}", base.display()))?;
+    // Decoded textures share the renderer's working-set budget.
+    let mut remaining = texture_budget;
+    for (index, entry) in entries.iter().enumerate() {
         let context = format!("textures[{index}]");
         let object = as_object(entry, &context)?;
         reject_unknown(object, &["id", "path", "sha256"], &context)?;
@@ -341,12 +409,17 @@ pub fn load(path: &Path) -> Result<LoadedView> {
         let expected = field(object, "sha256", &context)?
             .as_str()
             .ok_or_else(|| format!("{context}: sha256 must be a string"))?;
-        let file = read_bounded(&base.join(relative), MAXIMUM_TEXTURE_BYTES)?;
+        let texture_path =
+            confined(&base, relative).map_err(|error| format!("{context}: {error}"))?;
+        let file = read_bounded(&texture_path, MAXIMUM_TEXTURE_BYTES)?;
         if hex(&Sha256::digest(&file)) != expected.to_ascii_lowercase() {
             return Err(format!("{context}: sha256 does not match {relative}"));
         }
         let (width, height, atx1) =
-            png_to_atx1(&file).map_err(|error| format!("{context}: {error}"))?;
+            png_to_atx1(&file, DEFAULT_MAXIMUM_RESOURCE_BYTES.min(remaining)).map_err(|error| {
+                format!("{context}: {error} (all textures together may decode to at most {texture_budget} bytes)")
+            })?;
+        remaining -= atx1.len();
         let digest = Digest256(Sha256::digest(&atx1).into());
         if id == 0 || textures.contains_key(&id) {
             return Err(format!("{context}: id must be unique and nonzero"));

@@ -397,3 +397,59 @@ fn compiling_is_deterministic_and_validates_input() {
         Err(Error::InvalidValue)
     );
 }
+
+#[test]
+fn top_down_ground_and_standing_art_rise_with_tile_height() {
+    let mut view = iso_view(Vec::new(), HeightField::empty());
+    view.camera.projection = Projection::TopDown { tile_size: 32 };
+    view.camera.center = [1.0, 1.0];
+    view.objects = vec![
+        WorldObject::new(SemanticId(1), [1, 1], 0, Anchor::Ground, texture(1, 32, 32)),
+        WorldObject::new(
+            SemanticId(2),
+            [1, 1],
+            3,
+            Anchor::Standing,
+            texture(2, 32, 48),
+        ),
+    ];
+    let flat = compile(&view, SceneLimits::default()).unwrap();
+    view.heights = HeightField {
+        origin: [1, 1],
+        width: 1,
+        height: 1,
+        heights: vec![Some(10)],
+    };
+    let raised = compile(&view, SceneLimits::default()).unwrap();
+    for (before, after) in flat.quads().iter().zip(raised.quads()) {
+        let (before, after) = (
+            before.aligned_rect().unwrap(),
+            after.aligned_rect().unwrap(),
+        );
+        assert!((before.top - after.top - 10.0).abs() < 1e-4);
+        assert!((before.bottom - after.bottom - 10.0).abs() < 1e-4);
+    }
+}
+
+#[test]
+fn coordinates_and_tile_widths_are_bounded() {
+    let mut far = iso_view(vec![ground(1, [i64::MAX, 0])], HeightField::empty());
+    assert_eq!(
+        compile(&far, SceneLimits::default()),
+        Err(crate::Error::InvalidValue)
+    );
+    far.objects[0].tile = [
+        super::MAXIMUM_TILE_COORDINATE,
+        -super::MAXIMUM_TILE_COORDINATE,
+    ];
+    assert!(compile(&far, SceneLimits::default()).is_ok());
+    let mut narrow = iso_view(vec![ground(1, [0, 0])], HeightField::empty());
+    narrow.camera.projection = Projection::Isometric {
+        tile_width: 2,
+        tile_height: 2,
+    };
+    assert_eq!(
+        compile(&narrow, SceneLimits::default()),
+        Err(crate::Error::InvalidValue)
+    );
+}

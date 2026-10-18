@@ -1012,6 +1012,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tilewright-render-api",
+ "tilewright-render-resources",
  "tilewright-render-sdl3",
  "tilewright-render-testkit",
  "tilewright-render-wgpu",
