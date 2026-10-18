@@ -13,8 +13,8 @@ use tilewright_render_resources::{
 };
 use tilewright_render_testkit::FakeResourceProvider;
 use tilewright_render_world::{
-    Anchor, Animation, Camera, CornerRule, GlowEffect, HeightField, Projection, Stretch,
-    TextureRef, WorldObject, WorldView,
+    Anchor, Animation, Camera, CornerRule, GlowEffect, HeightField, MAXIMUM_ANIMATION_FRAMES,
+    Projection, Stretch, TextureRef, WorldObject, WorldView,
 };
 use tilewright_scene::{Digest256, ResourceId, Sampling, SemanticId};
 
@@ -33,10 +33,9 @@ const MAXIMUM_TEXTURE_PATH_BYTES: usize = 4_096;
 const MAXIMUM_TEXTURES: usize = 4_096;
 /// Most objects one view may list, matching the default scene's draw budget.
 const MAXIMUM_OBJECTS: usize = 131_072;
-/// Most frames one animation may list.
-const MAXIMUM_ANIMATION_FRAMES: usize = 1_024;
-/// Most frame references all of a view's animations may list together.
-const MAXIMUM_FRAME_REFERENCES: usize = 262_144;
+/// Most frame references all of a view's animations may list together:
+/// twice the default draw budget, as the compiler allows.
+const MAXIMUM_FRAME_REFERENCES: usize = 2 * MAXIMUM_OBJECTS;
 
 pub struct LoadedView {
     pub view: WorldView,

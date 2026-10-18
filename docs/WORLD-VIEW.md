@@ -42,8 +42,8 @@ The output path must not exist; the write is atomic and never overwrites.
   never turns a valid view into an invalid one. Object IDs are nonzero and
   unique, and each object names exactly one of `texture` and `animation`.
   Ground objects take no `offset`, `z`, `scale`, `rotation` or `glow`,
-  isometric ground keeps the 1 × 1 footprint, and no ground object sits on a
-  tile whose height is `null`. A glow radius is at most the width and height
+  isometric ground keeps the 1 × 1 footprint, and no ground footprint covers
+  a tile whose height is `null`. A glow radius is at most the width and height
   of every frame of its object. `double_draw` is for opaque art: it is
   rejected together with an `alpha` below 1 or a `glow`, and translucent
   texels inside double-drawn art still composite twice by design.

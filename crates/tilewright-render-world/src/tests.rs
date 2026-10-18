@@ -810,3 +810,72 @@ fn ground_cannot_fill_height_field_holes() {
     let outside = iso_view(vec![ground(1, [0, 0]), ground(3, [5, 5]), tree], field);
     assert!(compile(&outside, SceneLimits::default()).is_ok());
 }
+
+#[test]
+fn ground_footprints_cannot_cover_holes() {
+    let mut view = iso_view(Vec::new(), HeightField::empty());
+    view.camera.projection = Projection::TopDown { tile_size: 32 };
+    view.heights = HeightField {
+        origin: [0, 0],
+        width: 3,
+        height: 2,
+        heights: vec![Some(0), None, Some(0), Some(0), Some(0), Some(0)],
+    };
+    let wide = |tile, footprint| {
+        let mut object =
+            WorldObject::new(SemanticId(1), tile, 0, Anchor::Ground, texture(1, 32, 32));
+        object.footprint = footprint;
+        object
+    };
+    // The head tile [0, 0] has ground, but the footprint reaches the hole.
+    view.objects = vec![wide([0, 0], [2, 1])];
+    assert_eq!(
+        compile(&view, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+    view.objects = vec![wide([-5, -5], [7, 6])];
+    assert_eq!(
+        compile(&view, SceneLimits::default()),
+        Err(Error::InvalidValue)
+    );
+    // Footprints that miss the hole, or lie outside the field, are fine.
+    for (tile, footprint) in [([0, 1], [3, 1]), ([2, 0], [1, 2]), ([5, 5], [9, 9])] {
+        view.objects = vec![wide(tile, footprint)];
+        assert!(
+            compile(&view, SceneLimits::default()).is_ok(),
+            "{tile:?} {footprint:?}"
+        );
+    }
+}
+
+#[test]
+fn animation_frames_are_bounded_before_traversal() {
+    let animated = |id, frames: usize| {
+        let mut object = WorldObject::new(
+            SemanticId(id),
+            [40, 40],
+            3,
+            Anchor::Standing,
+            texture(2, 16, 16),
+        );
+        object.animation.frames = vec![texture(2, 16, 16); frames];
+        object
+    };
+    let limit = Err(Error::Scene(tilewright_scene::Error::LimitExceeded));
+    let view = |objects| iso_view(objects, HeightField::empty());
+    assert!(compile(&view(vec![animated(1, 1_024)]), SceneLimits::default()).is_ok());
+    assert_eq!(
+        compile(&view(vec![animated(1, 1_025)]), SceneLimits::default()),
+        limit
+    );
+    // Together, a view's animations list at most twice the quad budget.
+    let small = SceneLimits {
+        maximum_quads: 2,
+        ..SceneLimits::default()
+    };
+    assert!(compile(&view(vec![animated(1, 2), animated(2, 2)]), small).is_ok());
+    assert_eq!(
+        compile(&view(vec![animated(1, 3), animated(2, 2)]), small),
+        limit
+    );
+}

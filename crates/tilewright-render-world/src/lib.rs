@@ -15,6 +15,9 @@ use tilewright_scene::{
     Viewport,
 };
 
+/// Most frames one animation may list.
+pub const MAXIMUM_ANIMATION_FRAMES: usize = 1_024;
+
 /// Art pixels by which bent isometric ground overlaps its neighbours.
 pub const SEAM_BLEED_PX: f64 = 1.0;
 
@@ -62,8 +65,8 @@ pub enum Anchor {
     /// top-down ground shifts up by its tile's height without bending.
     ///
     /// Ground keeps the neutral offset, `z`, scale and rotation and has no
-    /// glow; isometric ground covers exactly one tile, and no ground sits on
-    /// a tile the height field marks as having none. [`compile`] rejects
+    /// glow; isometric ground covers exactly one tile, and no ground footprint
+    /// covers a tile the height field marks as having none. [`compile`] rejects
     /// other values rather than ignoring them.
     Ground,
     /// Art standing on the tile: its bottom centre sits at the front of the
@@ -189,8 +192,8 @@ pub struct HeightField {
     pub origin: [i64; 2],
     pub width: u32,
     pub height: u32,
-    /// Row-major; `None` means no ground on that tile, so ground objects may
-    /// not be placed there. Tiles outside the field count as height 0.
+    /// Row-major; `None` means no ground on that tile, so no ground
+    /// footprint may cover it. Tiles outside the field count as height 0.
     pub heights: Vec<Option<i32>>,
 }
 
@@ -213,13 +216,6 @@ impl HeightField {
             .and_then(|index| self.heights.get(index).copied().flatten())
     }
 
-    /// Whether the field covers the tile and marks it as having no ground.
-    fn is_hole(&self, x: i64, y: i64) -> bool {
-        self.index(x, y)
-            .and_then(|index| self.heights.get(index))
-            .is_some_and(Option::is_none)
-    }
-
     fn index(&self, x: i64, y: i64) -> Option<usize> {
         let column = x.checked_sub(self.origin[0])?;
         let row = y.checked_sub(self.origin[1])?;
@@ -230,6 +226,68 @@ impl HeightField {
         row.checked_mul(i64::from(self.width))?
             .checked_add(column)
             .and_then(|index| usize::try_from(index).ok())
+    }
+}
+
+/// Prefix sums of a height field's holes, so whether a rectangle of tiles
+/// covers one is answered in constant time.
+struct Holes {
+    origin: [i64; 2],
+    width: usize,
+    height: usize,
+    /// `(width + 1) × (height + 1)` running counts; empty when the field has
+    /// no holes.
+    sums: Vec<u64>,
+}
+
+impl Holes {
+    /// Counts the holes of a field whose cell count is already validated.
+    fn new(field: &HeightField) -> Option<Self> {
+        let width = usize::try_from(field.width).ok()?;
+        let height = usize::try_from(field.height).ok()?;
+        let mut holes = Self {
+            origin: field.origin,
+            width,
+            height,
+            sums: Vec::new(),
+        };
+        if !field.heights.iter().any(Option::is_none) {
+            return Some(holes);
+        }
+        let stride = width.checked_add(1)?;
+        holes.sums = vec![0; stride.checked_mul(height.checked_add(1)?)?];
+        for (row, cells) in field.heights.chunks_exact(width).enumerate() {
+            let mut line = 0;
+            for (column, cell) in cells.iter().enumerate() {
+                line += u64::from(cell.is_none());
+                holes.sums[(row + 1) * stride + column + 1] =
+                    holes.sums[row * stride + column + 1] + line;
+            }
+        }
+        Some(holes)
+    }
+
+    /// Whether any tile of the footprint starting at `tile` is a hole.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn cover(&self, tile: [i64; 2], footprint: [u16; 2]) -> bool {
+        if self.sums.is_empty() {
+            return false;
+        }
+        // Tile coordinates are bounded to ±2⁴⁰, so this cannot overflow.
+        let clip = |start: i64, extent: u16, origin: i64, size: usize| {
+            let size = i64::try_from(size).unwrap_or(i64::MAX);
+            let low = (start - origin).clamp(0, size);
+            let high = (start - origin + i64::from(extent)).clamp(0, size);
+            (low as usize, high as usize)
+        };
+        let (left, right) = clip(tile[0], footprint[0], self.origin[0], self.width);
+        let (top, bottom) = clip(tile[1], footprint[1], self.origin[1], self.height);
+        if left >= right || top >= bottom {
+            return false;
+        }
+        let stride = self.width + 1;
+        let at = |x: usize, y: usize| self.sums[y * stride + x];
+        at(right, bottom) + at(left, top) > at(left, bottom) + at(right, top)
     }
 }
 
@@ -308,16 +366,24 @@ impl std::error::Error for Error {}
 /// Returns [`Error::InvalidValue`] for an invalid view and [`Error::Scene`]
 /// for a repeated semantic ID or when the view or the produced scene exceeds
 /// its limits. A view holds at most [`SceneLimits::maximum_quads`] draws: one
-/// per object plus one per double-drawn repeat, counted before culling.
+/// per object plus one per double-drawn repeat, counted before culling. An
+/// animation lists at most [`MAXIMUM_ANIMATION_FRAMES`] frames, and a view's
+/// animations at most twice [`SceneLimits::maximum_quads`] together.
 pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Error> {
-    // Bound ordering work by the scene budget before allocating anything.
-    let draws = view
+    // Bound ordering and frame work by the scene budget before allocating or
+    // traversing anything.
+    let (draws, _) = view
         .objects
         .iter()
-        .try_fold(0_usize, |count, object| {
-            count
+        .try_fold((0_usize, 0_usize), |(draws, frames), object| {
+            let count = object.animation.frames.len();
+            let draws = draws
                 .checked_add(1 + usize::from(object.double_draw))
-                .filter(|count| *count <= limits.maximum_quads)
+                .filter(|draws| *draws <= limits.maximum_quads)?;
+            let frames = frames
+                .checked_add(count)
+                .filter(|frames| *frames <= limits.maximum_quads.saturating_mul(2))?;
+            (count <= MAXIMUM_ANIMATION_FRAMES).then_some((draws, frames))
         })
         .ok_or(Error::Scene(tilewright_scene::Error::LimitExceeded))?;
     validate(view, limits)?;
@@ -435,11 +501,17 @@ fn validate(view: &WorldView, limits: SceneLimits) -> Result<(), Error> {
             && (1..=limits.maximum_dimension).contains(&frame.width)
             && (1..=limits.maximum_dimension).contains(&frame.height)
     };
+    let heights = &view.heights;
+    let cells = u64::from(heights.width) * u64::from(heights.height);
+    if !usize::try_from(cells).is_ok_and(|cells| cells == heights.heights.len()) {
+        return Err(Error::InvalidValue);
+    }
+    let holes = Holes::new(heights).ok_or(Error::InvalidValue)?;
     // Ground art ignores placement effects, so it must not request them, and
-    // it cannot sit on a tile the height field marks as having no ground.
+    // no tile it covers may be one the height field marks as having no ground.
     let ground_ok = |object: &WorldObject| {
         object.anchor != Anchor::Ground
-            || (!view.heights.is_hole(object.tile[0], object.tile[1])
+            || (!holes.cover(object.tile, object.footprint)
                 && object.offset_px == [0.0, 0.0]
                 && object.z == 0
                 && object.scale == [1.0, 1.0]
@@ -462,8 +534,6 @@ fn validate(view: &WorldView, limits: SceneLimits) -> Result<(), Error> {
         }
         Projection::TopDown { tile_size } => (1..=1024).contains(&tile_size),
     };
-    let heights = &view.heights;
-    let cells = u64::from(heights.width) * u64::from(heights.height);
     #[allow(clippy::cast_precision_loss)]
     let center_bound = MAXIMUM_TILE_COORDINATE as f64;
     let valid = projection_ok
@@ -477,7 +547,6 @@ fn validate(view: &WorldView, limits: SceneLimits) -> Result<(), Error> {
         && view.stretch.pixels_per_unit.is_finite()
         && view.stretch.pixels_per_unit >= 0.0
         && view.stretch.cliff_threshold.is_none_or(|value| value >= 0)
-        && usize::try_from(cells).is_ok_and(|cells| cells == heights.heights.len())
         && heights.origin.iter().all(|value| coordinate(*value))
         && view.objects.iter().all(|object| {
             let frames = &object.animation.frames;
