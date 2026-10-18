@@ -575,6 +575,30 @@ mod tests {
     }
 
     #[test]
+    fn json_structure_is_bounded_before_parsing() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let original = fs::read_to_string(&view).unwrap();
+        // An unknown key would be rejected only after parsing, so the value
+        // count must stop the document before it is built.
+        let padded = |values: usize| {
+            let zeros = vec!["0"; values].join(",");
+            original.replacen('{', &format!("{{\"padding\": [{zeros}],"), 1)
+        };
+        fs::write(&view, padded(2_097_152)).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("at most 2097152 JSON values"), "{error}");
+        fs::write(&view, padded(1_000)).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("unknown key \"padding\""), "{error}");
+        // Commas, brackets and escaped quotes inside strings are not values.
+        assert_eq!(
+            view_file::json_values(br#"{"a": "x,[{\"y", "b": [1, 2]}"#),
+            5
+        );
+    }
+
+    #[test]
     fn bounded_reads_limit_the_bytes_actually_read() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ten.bin");

@@ -24,6 +24,9 @@ const MAXIMUM_VIEW_BYTES: u64 = 64 * 1024 * 1024;
 const MAXIMUM_TEXTURE_BYTES: u64 = 16 * 1024 * 1024;
 /// Most bytes all of a view's texture files may hold together.
 const MAXIMUM_TEXTURE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+/// Most JSON values (containers, object members and array items) a view may
+/// hold. It bounds the parsed document's memory before the document is built.
+const MAXIMUM_JSON_VALUES: usize = 2_097_152;
 /// Most textures one view may list, matching the renderer's texture cache.
 const MAXIMUM_TEXTURES: usize = 4_096;
 /// Most objects one view may list, matching the default scene's draw budget.
@@ -157,6 +160,33 @@ fn open_nonblocking(path: &Path) -> std::io::Result<fs::File> {
 #[cfg(not(unix))]
 fn open_nonblocking(path: &Path) -> std::io::Result<fs::File> {
     fs::File::open(path)
+}
+
+/// An upper bound on the values in a JSON document, found without parsing
+/// it: outside strings, every value but the first follows a `,` or opens a
+/// container. Malformed documents are left for the parser to reject.
+pub(crate) fn json_values(bytes: &[u8]) -> usize {
+    let mut count = 1_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b',' | b'[' | b'{' => count += 1,
+                _ => {}
+            }
+        }
+    }
+    count
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -359,6 +389,11 @@ pub(crate) fn load_within(
     file_budget: u64,
 ) -> Result<LoadedView> {
     let bytes = read_bounded(path, MAXIMUM_VIEW_BYTES)?;
+    if json_values(&bytes) > MAXIMUM_JSON_VALUES {
+        return Err(format!(
+            "a view holds at most {MAXIMUM_JSON_VALUES} JSON values"
+        ));
+    }
     let document: Value =
         serde_json::from_slice(&bytes).map_err(|error| format!("invalid view JSON: {error}"))?;
     let root = as_object(&document, "view")?;
