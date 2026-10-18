@@ -293,15 +293,20 @@ pub fn subpixel_position(value: f32) -> f32 {
     (snap(value) as f64 / SUBPIXEL_SCALE) as f32
 }
 
-const fn edge(a: (i64, i64), b: (i64, i64), point: (i64, i64)) -> i64 {
-    (b.0 - a.0) * (point.1 - a.1) - (b.1 - a.1) * (point.0 - a.0)
+/// The edge function in `i128`: fixed-point coordinate differences can
+/// exceed 2³² under permissive scene limits, so their products need more
+/// than 64 bits.
+fn edge(a: (i64, i64), b: (i64, i64), point: (i64, i64)) -> i128 {
+    let difference = |to: i64, from: i64| i128::from(to) - i128::from(from);
+    difference(b.0, a.0) * difference(point.1, a.1)
+        - difference(b.1, a.1) * difference(point.0, a.0)
 }
 
 /// Whether a pixel centre with this edge weight is inside. Triangles are
 /// wound so inside weights are positive in y-down screen space; there a top
 /// edge runs rightward and a left edge runs upward, and only those edges keep
 /// the centres lying exactly on them.
-const fn covers(weight: i64, a: (i64, i64), b: (i64, i64)) -> bool {
+const fn covers(weight: i128, a: (i64, i64), b: (i64, i64)) -> bool {
     weight > 0 || (weight == 0 && (b.1 < a.1 || (b.1 == a.1 && b.0 > a.0)))
 }
 
@@ -547,6 +552,22 @@ mod tests {
                 "##..###.", "###.###.", "###.###.", "###..###", "###.....", "..#.....",
             ]
         );
+    }
+
+    #[test]
+    fn huge_skewed_quads_rasterise_without_overflow() {
+        // Corners billions of pixels apart, as permissive custom limits allow,
+        // make 64-bit edge products overflow.
+        let mut quad = rect_quad(0.0, 1.0);
+        quad.positions = [
+            [-4.0e9, -4.0e9],
+            [4.0e9, -3.0e9],
+            [4.0e9, 4.0e9],
+            [-4.0e9, 4.0e9],
+        ];
+        let mut covered = 0;
+        super::for_each_quad_pixel(&quad, 4, 4, |_, _, _, _, _| covered += 1);
+        assert_eq!(covered, 16);
     }
 
     #[test]
