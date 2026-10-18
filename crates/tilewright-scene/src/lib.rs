@@ -281,13 +281,21 @@ impl SceneBundle {
         }
         let mut values = Vec::new();
         let mut samples = 0_u64;
+        // Distinct textures are counted as quads arrive, so an oversized
+        // input stops at the first identity past the bound.
+        let mut textures = HashSet::new();
         for quad in quads {
             if values.len() >= limits.maximum_quads {
                 return Err(Error::LimitExceeded);
             }
             validate_quad(&quad, limits.maximum_dimension)?;
             samples = samples.saturating_add(raster_samples(&quad, viewport));
-            if samples > limits.maximum_raster_samples {
+            textures.insert((
+                quad.resource_id,
+                quad.resource_revision,
+                quad.resource_digest,
+            ));
+            if samples > limits.maximum_raster_samples || textures.len() > MAXIMUM_SCENE_TEXTURES {
                 return Err(Error::LimitExceeded);
             }
             values.push(quad);
@@ -298,17 +306,6 @@ impl SceneBundle {
             .any(|quad| !identities.insert((quad.semantic_id, quad.part)))
         {
             return Err(Error::DuplicateSemanticId);
-        }
-        let mut textures = HashSet::new();
-        for quad in &values {
-            textures.insert((
-                quad.resource_id,
-                quad.resource_revision,
-                quad.resource_digest,
-            ));
-            if textures.len() > MAXIMUM_SCENE_TEXTURES {
-                return Err(Error::LimitExceeded);
-            }
         }
         values.sort_by_key(|quad| {
             (
@@ -568,6 +565,26 @@ mod tests {
             SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], named(count + 1), limits),
             Err(super::Error::LimitExceeded)
         );
+        // Collection stops at the first identity past the bound, even for an
+        // unbounded input under permissive limits.
+        let open = SceneLimits {
+            maximum_quads: usize::MAX,
+            maximum_raster_samples: u64::MAX,
+            ..limits
+        };
+        let mut taken = 0_u64;
+        let endless = (0_u64..).map(|index| {
+            taken += 1;
+            Quad::from(Sprite {
+                resource_id: ResourceId(index + 1),
+                ..sprite(u32::try_from(index % 1_000_000).unwrap(), 0)
+            })
+        });
+        assert_eq!(
+            SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], endless, open),
+            Err(super::Error::LimitExceeded)
+        );
+        assert_eq!(taken, count + 1);
     }
 
     #[test]
