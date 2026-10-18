@@ -123,6 +123,7 @@ fn reject_unknown(object: &Map<String, Value>, allowed: &[&str], context: &str) 
 /// without blocking on FIFOs or devices; its type and size are checked on
 /// that handle and the read stops after `maximum + 1` bytes, so the limit
 /// holds even if the file is replaced or grows while it is read.
+#[cfg(any(test, not(unix)))]
 pub(crate) fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     let file = open_nonblocking(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -147,7 +148,7 @@ fn read_handle(file: fs::File, maximum: u64, name: &str) -> Result<Vec<u8>> {
 }
 
 /// Opens a path for reading without waiting for a FIFO writer.
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn open_nonblocking(path: &Path) -> std::io::Result<fs::File> {
     use rustix::fs::{Mode, OFlags};
     let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
@@ -309,74 +310,136 @@ fn components(relative: &str) -> Result<Vec<&str>> {
     Ok(components)
 }
 
-/// Opens a texture beneath the view's directory `base`. On Unix each
-/// component is opened relative to the previous directory handle without
-/// following symbolic links, and the file without blocking, so the path
-/// cannot leave `base` or stall even if the directory changes concurrently.
+/// The directory holding a view, opened once. The view file and every
+/// texture are resolved relative to this one handle, so replacing the
+/// directory or any of its ancestors while the view loads cannot redirect
+/// them elsewhere.
 #[cfg(unix)]
-fn open_confined(base: &Path, relative: &str) -> Result<fs::File> {
-    use rustix::{
-        fs::{Mode, OFlags, open, openat},
-        io::Errno,
-    };
-    let components = components(relative)?;
-    let failure = |error: Errno| {
-        // `O_NOFOLLOW` reports a symbolic link as ELOOP (EMLINK on BSDs), and
-        // as ENOTDIR together with `O_DIRECTORY`.
-        if error == Errno::LOOP || error == Errno::MLINK || error == Errno::NOTDIR {
+struct ViewDirectory(std::os::fd::OwnedFd);
+
+/// The directory holding a view, resolved once.
+#[cfg(not(unix))]
+struct ViewDirectory(std::path::PathBuf);
+
+#[cfg(unix)]
+impl ViewDirectory {
+    fn open(parent: &Path) -> Result<Self> {
+        use rustix::fs::{Mode, OFlags, open};
+        open(
+            parent,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(Self)
+        .map_err(|error| {
             format!(
-                "texture path \"{relative}\" may not pass through a symbolic link or a non-directory"
-            )
-        } else {
-            format!(
-                "cannot open \"{relative}\": {}",
+                "cannot open {}: {}",
+                parent.display(),
                 std::io::Error::from(error)
             )
+        })
+    }
+
+    /// Reads the view file `name` in this directory without blocking.
+    fn read_view(&self, path: &Path, name: &std::ffi::OsStr) -> Result<Vec<u8>> {
+        use rustix::fs::{Mode, OFlags, openat};
+        let file = openat(
+            &self.0,
+            name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            format!(
+                "cannot read {}: {}",
+                path.display(),
+                std::io::Error::from(error)
+            )
+        })?;
+        read_handle(
+            fs::File::from(file),
+            MAXIMUM_VIEW_BYTES,
+            &path.display().to_string(),
+        )
+    }
+
+    /// Opens a texture beneath this directory: each component relative to
+    /// the previous directory handle without following symbolic links, and
+    /// the file without blocking, so the path cannot leave the directory or
+    /// stall even if the directory changes concurrently.
+    fn open_texture(&self, relative: &str) -> Result<fs::File> {
+        use rustix::{
+            fs::{Mode, OFlags, openat},
+            io::Errno,
+        };
+        let components = components(relative)?;
+        let failure = |error: Errno| {
+            // `O_NOFOLLOW` reports a symbolic link as ELOOP (EMLINK on BSDs),
+            // and as ENOTDIR together with `O_DIRECTORY`.
+            if error == Errno::LOOP || error == Errno::MLINK || error == Errno::NOTDIR {
+                format!(
+                    "texture path \"{relative}\" may not pass through a symbolic link or a non-directory"
+                )
+            } else {
+                format!(
+                    "cannot open \"{relative}\": {}",
+                    std::io::Error::from(error)
+                )
+            }
+        };
+        let (file, parents) = components
+            .split_last()
+            .ok_or_else(|| failure(Errno::INVAL))?;
+        let mut directory = None;
+        for parent in parents {
+            directory = Some(
+                openat(
+                    directory.as_ref().unwrap_or(&self.0),
+                    *parent,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(failure)?,
+            );
         }
-    };
-    let (file, parents) = components
-        .split_last()
-        .ok_or_else(|| failure(Errno::INVAL))?;
-    let mut directory = open(
-        base,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(failure)?;
-    for parent in parents {
-        directory = openat(
-            &directory,
-            *parent,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        let file = openat(
+            directory.as_ref().unwrap_or(&self.0),
+            *file,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(failure)?;
+        Ok(fs::File::from(file))
     }
-    let file = openat(
-        &directory,
-        *file,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(failure)?;
-    Ok(fs::File::from(file))
 }
 
-/// Opens a texture that, once symbolic links are resolved, stays inside the
-/// view's directory `base`.
 #[cfg(not(unix))]
-fn open_confined(base: &Path, relative: &str) -> Result<fs::File> {
-    let joined = components(relative)?
-        .iter()
-        .fold(base.to_path_buf(), |path, component| path.join(component));
-    let resolved = fs::canonicalize(&joined)
-        .map_err(|error| format!("cannot resolve {}: {error}", joined.display()))?;
-    if !resolved.starts_with(base) {
-        return Err(format!(
-            "texture path \"{relative}\" leaves the view's directory"
-        ));
+impl ViewDirectory {
+    fn open(parent: &Path) -> Result<Self> {
+        fs::canonicalize(parent)
+            .map(Self)
+            .map_err(|error| format!("cannot resolve {}: {error}", parent.display()))
     }
-    fs::File::open(&resolved).map_err(|error| format!("cannot open \"{relative}\": {error}"))
+
+    fn read_view(&self, path: &Path, _name: &std::ffi::OsStr) -> Result<Vec<u8>> {
+        read_bounded(path, MAXIMUM_VIEW_BYTES)
+    }
+
+    /// Opens a texture that, once symbolic links are resolved, stays inside
+    /// the view's directory.
+    fn open_texture(&self, relative: &str) -> Result<fs::File> {
+        let joined = components(relative)?
+            .iter()
+            .fold(self.0.clone(), |path, component| path.join(component));
+        let resolved = fs::canonicalize(&joined)
+            .map_err(|error| format!("cannot resolve {}: {error}", joined.display()))?;
+        if !resolved.starts_with(&self.0) {
+            return Err(format!(
+                "texture path \"{relative}\" leaves the view's directory"
+            ));
+        }
+        fs::File::open(&resolved).map_err(|error| format!("cannot open \"{relative}\": {error}"))
+    }
 }
 
 /// Reads a view and its textures with the renderer's default budgets.
@@ -396,7 +459,15 @@ pub(crate) fn load_within(
     texture_budget: usize,
     file_budget: u64,
 ) -> Result<LoadedView> {
-    let bytes = read_bounded(path, MAXIMUM_VIEW_BYTES)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{} does not name a view file", path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let directory = ViewDirectory::open(parent)?;
+    let bytes = directory.read_view(path, name)?;
     if json_values(&bytes) > MAXIMUM_JSON_VALUES {
         return Err(format!(
             "a view holds at most {MAXIMUM_JSON_VALUES} JSON values"
@@ -424,10 +495,6 @@ pub(crate) fn load_within(
     if field(root, "format", "view")?.as_str() != Some("tilewright.view/1") {
         return Err("view: format must be \"tilewright.view/1\"".to_owned());
     }
-    let base = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
 
     let camera_object = as_object(field(root, "camera", "view")?, "camera")?;
     reject_unknown(
@@ -445,6 +512,18 @@ pub(crate) fn load_within(
         ],
         "camera",
     )?;
+    // Each projection takes only its own tile keys, so a stale key from the
+    // other one fails instead of being silently ignored.
+    let foreign: &[&str] = match field(camera_object, "projection", "camera")?.as_str() {
+        Some("isometric") => &["tile_size"],
+        Some("top_down") => &["tile_width", "tile_height"],
+        _ => &[],
+    };
+    if let Some(key) = foreign.iter().find(|key| camera_object.contains_key(**key)) {
+        return Err(format!(
+            "camera: \"{key}\" does not apply to this projection"
+        ));
+    }
     let projection = match field(camera_object, "projection", "camera")?.as_str() {
         Some("isometric") => Projection::Isometric {
             tile_width: bounded(field(camera_object, "tile_width", "camera")?, "tile_width")?,
@@ -541,8 +620,6 @@ pub(crate) fn load_within(
     if entries.len() > MAXIMUM_TEXTURES {
         return Err(format!("a view lists at most {MAXIMUM_TEXTURES} textures"));
     }
-    let base = fs::canonicalize(base)
-        .map_err(|error| format!("cannot resolve {}: {error}", base.display()))?;
     // Decoded textures share the renderer's working-set budget.
     let mut remaining = texture_budget;
     let mut encoded_remaining = file_budget;
@@ -557,8 +634,9 @@ pub(crate) fn load_within(
         let expected = field(object, "sha256", &context)?
             .as_str()
             .ok_or_else(|| format!("{context}: sha256 must be a string"))?;
-        let handle =
-            open_confined(&base, relative).map_err(|error| format!("{context}: {error}"))?;
+        let handle = directory
+            .open_texture(relative)
+            .map_err(|error| format!("{context}: {error}"))?;
         // Texture files share one encoded-byte budget, so repeated or padded
         // files cannot make the loader read and hash without bound.
         let file = read_handle(
@@ -755,4 +833,32 @@ pub(crate) fn load_within(
         },
         provider,
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::ViewDirectory;
+    use std::{fs, io::Read as _};
+
+    #[test]
+    fn textures_resolve_beneath_the_directory_opened_first() {
+        let outer = tempfile::tempdir().unwrap();
+        let view = outer.path().join("view");
+        let other = outer.path().join("other");
+        fs::create_dir(&view).unwrap();
+        fs::create_dir(&other).unwrap();
+        fs::write(view.join("art.png"), b"inside").unwrap();
+        fs::write(other.join("art.png"), b"outside").unwrap();
+        let directory = ViewDirectory::open(&view).unwrap();
+        // Swap the view's directory for a link elsewhere after it is opened.
+        fs::rename(&view, outer.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(&other, &view).unwrap();
+        let mut bytes = Vec::new();
+        directory
+            .open_texture("art.png")
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"inside");
+    }
 }

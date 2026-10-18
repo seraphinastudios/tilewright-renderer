@@ -14,25 +14,27 @@ The output path must not exist; the write is atomic and never overwrites.
 
 - Every texture is listed explicitly with a path relative to the view file
   and the SHA-256 of the file's bytes. Paths are at most 4,096 bytes,
-  `/`-separated, with no empty, `.` or `..` components. On Unix they are opened one directory at a time
-  beneath the view's directory without following symbolic links, and files
-  are opened without waiting on FIFOs, so a path can neither leave the
-  directory nor stall even if the directory changes while the view loads.
+  `/`-separated, with no empty, `.` or `..` components. On Unix the view's directory is opened once, and the
+  view file and each texture are opened through that handle, one directory at
+  a time without following symbolic links and without waiting on FIFOs, so a
+  path can neither leave the directory nor stall even if the directory or its
+  ancestors change while the view loads.
   Elsewhere a path must stay inside the directory once symbolic links are
   resolved. A mismatch fails before anything is drawn. Nothing else is read
   from disk and nothing is fetched.
 - Unknown keys are errors, so a misspelled field fails rather than being
-  silently ignored.
+  silently ignored. A camera takes only its own projection's tile keys.
 - View files are capped at 64 MiB, and texture files at 16 MiB each and
   256 MiB together; reads stop at the cap even if a file grows while it is
   read. A view holds at most 2,097,152 JSON values, counted before the file is
   parsed, and lists at most 4,096 textures, 131,072 objects, 1,024 frames per
-  animation and 262,144 animation frames in total, and 131,072 draws: one per
-  object plus one per double-drawn repeat, counted before off-screen objects
-  are culled. Counts are checked before their entries are read. Each image is
-  at most 8,192 px per side and decodes to at most 16 MiB; all textures
-  together decode to at most 256 MiB. Sizes are checked from the PNG header before decoding. The GPU
-  device may impose a lower bound, which is reported as an error. The compiled
+  animation and 262,144 animation frames in total, 4,194,304 height-field
+  cells, and 131,072 draws: one per object plus one per double-drawn repeat,
+  counted before off-screen objects are culled. Counts are checked before
+  their entries are read. Each image is at most 8,192 px per side and decodes
+  to at most 16 MiB; all textures together decode to at most 256 MiB. Sizes
+  are checked from the PNG header before decoding. The GPU device may impose
+  a lower bound, which is reported as an error. The compiled
   scene must also fit the default scene limits, including 268,435,456 raster
   samples of overdraw and glow work.
 - PNG input may be RGBA, RGB, greyscale, greyscale with alpha, or indexed;

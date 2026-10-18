@@ -493,6 +493,26 @@ mod tests {
     }
 
     #[test]
+    fn cameras_take_only_their_projection_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = write_view(directory.path(), None);
+        let text = fs::read_to_string(&view).unwrap();
+        let stale = text.replace("\"tile_size\": 4,", "\"tile_size\": 4, \"tile_width\": 48,");
+        assert_ne!(stale, text);
+        fs::write(&view, &stale).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("\"tile_width\" does not apply"), "{error}");
+        let isometric = text.replace(
+            "\"projection\": \"top_down\", \"tile_size\": 4,",
+            "\"projection\": \"isometric\", \"tile_width\": 8, \"tile_height\": 4, \"tile_size\": 4,",
+        );
+        assert_ne!(isometric, text);
+        fs::write(&view, &isometric).unwrap();
+        let error = view_file::load(&view).err().unwrap();
+        assert!(error.contains("\"tile_size\" does not apply"), "{error}");
+    }
+
+    #[test]
     fn objects_name_either_a_texture_or_an_animation() {
         let directory = tempfile::tempdir().unwrap();
         let view = write_view(directory.path(), None);
