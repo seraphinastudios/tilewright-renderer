@@ -12,15 +12,7 @@ version=$(cargo metadata --locked --offline --no-deps --format-version 1 \
 verification=$(mktemp -d /tmp/tilewright-renderer-crates.XXXXXX)
 trap 'rm -rf -- "${verification}"' EXIT
 
-crates=(
-  tilewright-scene
-  tilewright-render-resources
-  tilewright-render-api
-  tilewright-render-testkit
-  tilewright-render-wgpu
-  tilewright-render-sdl3
-  tilewright-render-ui
-)
+mapfile -t crates < <(jq -er '.crates[].name' policy/crate-release.json)
 
 for crate in "${crates[@]}"; do
   tar -xzf "${packages}/${crate}-${version}.crate" -C "${verification}"
