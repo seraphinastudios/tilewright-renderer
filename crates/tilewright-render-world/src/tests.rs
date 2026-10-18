@@ -661,3 +661,17 @@ fn projection_overflow_is_rejected_rather_than_culled() {
         Err(Error::InvalidValue)
     );
 }
+
+#[test]
+fn height_lookups_never_overflow() {
+    // A malformed field whose dimensions overflow the row arithmetic.
+    let field = HeightField {
+        origin: [0, 0],
+        width: u32::MAX,
+        height: u32::MAX,
+        heights: vec![Some(5)],
+    };
+    assert_eq!(field.get(0, 0), Some(5));
+    assert_eq!(field.get(1, 3_000_000_000), None);
+    assert_eq!(field.get(i64::MIN, 0), None);
+}

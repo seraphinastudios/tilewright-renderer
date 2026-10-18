@@ -208,7 +208,10 @@ impl HeightField {
         {
             return None;
         }
-        let index = usize::try_from(row * i64::from(self.width) + column).ok()?;
+        let index = row
+            .checked_mul(i64::from(self.width))?
+            .checked_add(column)
+            .and_then(|index| usize::try_from(index).ok())?;
         self.heights.get(index).copied().flatten()
     }
 }
