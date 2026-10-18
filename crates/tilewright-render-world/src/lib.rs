@@ -370,11 +370,12 @@ impl std::error::Error for Error {}
 /// Returns [`Error::InvalidValue`] for an invalid view and [`Error::Scene`]
 /// for a repeated semantic ID or when the view or the produced scene exceeds
 /// its limits, or its height field holds more than
-/// [`MAXIMUM_HEIGHT_FIELD_CELLS`] cells. A view holds at most
-/// [`SceneLimits::maximum_quads`] draws: one
-/// per object plus one per double-drawn repeat, counted before culling. An
-/// animation lists at most [`MAXIMUM_ANIMATION_FRAMES`] frames, and a view's
-/// animations at most twice [`SceneLimits::maximum_quads`] together.
+/// [`MAXIMUM_HEIGHT_FIELD_CELLS`] cells. Every quad the view's objects and
+/// double-draw repeats would emit, counted before culling (a bent isometric
+/// tile emits 16 and a glowing object 2), must fit
+/// [`SceneLimits::maximum_quads`]. An animation lists at most
+/// [`MAXIMUM_ANIMATION_FRAMES`] frames, and a view's animations at most twice
+/// [`SceneLimits::maximum_quads`] together.
 pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Error> {
     // Bound ordering and frame work by the scene budget before allocating or
     // traversing anything.
@@ -394,6 +395,17 @@ pub fn compile(view: &WorldView, limits: SceneLimits) -> Result<SceneBundle, Err
         .ok_or(Error::Scene(tilewright_scene::Error::LimitExceeded))?;
     validate(view, limits)?;
     let projector = Projector::new(view, limits);
+    // Every quad each draw will emit is counted before culling, from the
+    // view's own geometry, so the budget does not depend on the camera.
+    view.objects
+        .iter()
+        .try_fold(0_usize, |total, object| {
+            let repeats = 1 + usize::from(object.double_draw);
+            total
+                .checked_add(projector.quads_per_draw(view, object) * repeats)
+                .filter(|total| *total <= limits.maximum_quads)
+        })
+        .ok_or(Error::Scene(tilewright_scene::Error::LimitExceeded))?;
     let mut entries: Vec<Entry<'_>> = Vec::with_capacity(draws);
     for (index, object) in view.objects.iter().enumerate() {
         let sequence = u32::try_from(index).map_err(|_| Error::InvalidValue)?;
@@ -728,6 +740,36 @@ impl Projector {
         }
     }
 
+    fn tile_height(view: &WorldView, object: &WorldObject) -> i32 {
+        view.heights
+            .get(object.tile[0], object.tile[1])
+            .unwrap_or(0)
+    }
+
+    /// The heights of a ground tile's four corners, from the field alone.
+    fn ground_corners(&self, view: &WorldView, object: &WorldObject) -> [f64; 4] {
+        let [x, y] = object.tile;
+        let own = Self::tile_height(view, object);
+        [[x, y], [x + 1, y], [x + 1, y + 1], [x, y + 1]]
+            .map(|corner| self.corner_height(&view.heights, corner, own))
+    }
+
+    /// Quads one draw of an object emits before culling: a bent isometric
+    /// tile is a mesh, and a glow adds a halo.
+    fn quads_per_draw(&self, view: &WorldView, object: &WorldObject) -> usize {
+        match (object.anchor, self.projection) {
+            (Anchor::Ground, Projection::Isometric { .. }) => {
+                if flat(&self.ground_corners(view, object)) {
+                    1
+                } else {
+                    usize::from(MESH_STEPS * MESH_STEPS)
+                }
+            }
+            (Anchor::Ground, Projection::TopDown { .. }) => 1,
+            (Anchor::Standing, _) => 1 + usize::from(object.glow.is_some()),
+        }
+    }
+
     fn corner_height(&self, heights: &HeightField, corner: [i64; 2], own: i32) -> f64 {
         if !self.stretch.enabled {
             return f64::from(own);
@@ -772,10 +814,7 @@ impl Projector {
         mut quads: Option<&mut Vec<Quad>>,
     ) -> Result<(), Error> {
         let part_base: u16 = if repeat { 0x8000 } else { 0 };
-        let tile_height = view
-            .heights
-            .get(object.tile[0], object.tile[1])
-            .unwrap_or(0);
+        let tile_height = Self::tile_height(view, object);
         let base = Quad {
             semantic_id: object.semantic_id,
             part: part_base,
@@ -833,12 +872,7 @@ impl Projector {
                     tile_height: diamond_height,
                 } => {
                     let [tile_x, tile_y] = object.tile;
-                    let heights = [
-                        self.corner_height(&view.heights, [tile_x, tile_y], tile_height),
-                        self.corner_height(&view.heights, [tile_x + 1, tile_y], tile_height),
-                        self.corner_height(&view.heights, [tile_x + 1, tile_y + 1], tile_height),
-                        self.corner_height(&view.heights, [tile_x, tile_y + 1], tile_height),
-                    ];
+                    let heights = self.ground_corners(view, object);
                     #[allow(clippy::cast_precision_loss)]
                     let lattice = [
                         (tile_x as f64, tile_y as f64),
@@ -888,9 +922,7 @@ impl Projector {
                         }
                         point
                     };
-                    #[allow(clippy::float_cmp)]
-                    let flat = heights.iter().all(|value| *value == heights[0]);
-                    if flat {
+                    if flat(&heights) {
                         let center = self.screen(self.world(
                             lattice[0].0 + 0.5,
                             lattice[0].1 + 0.5,
@@ -901,7 +933,7 @@ impl Projector {
                         let (width, height) = (art_w * self.zoom, art_h * self.zoom);
                         push(base, rect(left, top, width, height), [width, height])?;
                     } else {
-                        let steps = 4_u16;
+                        let steps = MESH_STEPS;
                         for row in 0..steps {
                             for column in 0..steps {
                                 let image = |c: u16, r: u16| {
@@ -1082,6 +1114,14 @@ fn rect(left: f64, top: f64, width: f64, height: f64) -> [[f64; 2]; 4] {
     let right = left + width;
     let bottom = top + height;
     [[left, top], [right, top], [right, bottom], [left, bottom]]
+}
+
+/// Rows and columns of the mesh a bent isometric tile becomes.
+const MESH_STEPS: u16 = 4;
+
+#[allow(clippy::float_cmp)]
+fn flat(heights: &[f64; 4]) -> bool {
+    heights.iter().all(|value| *value == heights[0])
 }
 
 /// Whether a quad's corners lie on one line, so it covers no pixels.

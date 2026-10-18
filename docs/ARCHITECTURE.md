@@ -91,19 +91,20 @@ knows nothing about any game or content format.
 - **Pixel grid.** Axis-aligned art snaps its top-left corner to whole pixels,
   rounding halves up, so pixel centres sample texel centres and every backend
   picks the same texels. Quads entirely outside the viewport are culled.
-- **Validation.** Draws (objects plus double-draw repeats) are counted against
-  the scene's quad budget before anything is ordered, animations list at most
-  1,024 frames each and twice that budget together, and height fields hold at
-  most 4,194,304 cells. Every object and every
+- **Validation.** Every quad the objects and their double-draw repeats will
+  emit (16 for a bent isometric tile, 2 for a glowing object) is counted
+  against the scene's quad budget before anything is ordered or culled,
+  animations list at most 1,024 frames each and twice that budget together,
+  and height fields hold at most 4,194,304 cells. Every object and every
   animation frame is validated before culling or frame selection, so a view's
   validity never depends on the camera or clock: semantic IDs are nonzero and
   unique, frames carry full resource identities within the scene's dimension
   limit, every quad an object produces (after scale, rotation, glow padding
   and terrain bending) spans at most that limit less one pixel, and a glow
-  radius stays within every frame. Ground objects reject the
-  offset, `z`, scale, rotation and glow they cannot apply, isometric ground
-  covers one tile, and no ground footprint covers a tile the height field
-  marks as having none.
+  radius stays within every frame. Ground objects reject the offset, `z`,
+  scale, rotation and glow they cannot apply, isometric ground covers one
+  tile, and no ground footprint covers a tile the height field marks as having
+  none.
 
 Lighting and weather are not part of this version.
 

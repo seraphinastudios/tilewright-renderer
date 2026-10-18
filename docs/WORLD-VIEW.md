@@ -29,7 +29,8 @@ The output path must not exist; the write is atomic and never overwrites.
   read. A view holds at most 2,097,152 JSON values, counted before the file is
   parsed, and lists at most 4,096 textures, 131,072 objects, 1,024 frames per
   animation and 262,144 animation frames in total, 4,194,304 height-field
-  cells, and 131,072 draws: one per object plus one per double-drawn repeat,
+  cells, and 131,072 quads: every quad the objects and their double-drawn
+  repeats emit (16 for a bent isometric tile, 2 for a glowing object),
   counted before off-screen objects are culled. Counts are checked before
   their entries are read. Each image is at most 8,192 px per side and decodes
   to at most 16 MiB; all textures together decode to at most 256 MiB. Sizes

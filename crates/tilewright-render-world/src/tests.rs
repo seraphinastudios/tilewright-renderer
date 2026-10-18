@@ -901,3 +901,46 @@ fn height_fields_are_bounded_before_scanning() {
     view.heights.heights.truncate(2_048 * 2_048);
     assert!(compile(&view, SceneLimits::default()).is_ok());
 }
+
+#[test]
+fn every_emitted_quad_is_counted_before_culling() {
+    let limits = |maximum_quads| SceneLimits {
+        maximum_quads,
+        ..SceneLimits::default()
+    };
+    // A glowing object emits a halo and its art, in view or not.
+    for tile in [[0, 0], [40, 40]] {
+        let mut lamp =
+            WorldObject::new(SemanticId(1), tile, 3, Anchor::Standing, texture(3, 20, 20));
+        lamp.glow = Some(GlowEffect {
+            color: [1.0; 4],
+            radius_px: 2.0,
+            pulse_millis: 0,
+        });
+        let view = iso_view(vec![lamp], HeightField::empty());
+        assert_eq!(
+            compile(&view, limits(1)),
+            Err(Error::Scene(tilewright_scene::Error::LimitExceeded)),
+            "{tile:?}"
+        );
+        assert!(compile(&view, limits(2)).is_ok(), "{tile:?}");
+    }
+    // A bent isometric tile emits its whole mesh; a flat one a single quad.
+    for tile in [[0, 0], [40, 40]] {
+        let heights = HeightField {
+            origin: tile,
+            width: 2,
+            height: 1,
+            heights: vec![Some(0), Some(8)],
+        };
+        let bent = iso_view(vec![ground(1, tile)], heights);
+        assert_eq!(
+            compile(&bent, limits(15)),
+            Err(Error::Scene(tilewright_scene::Error::LimitExceeded)),
+            "{tile:?}"
+        );
+        assert!(compile(&bent, limits(16)).is_ok(), "{tile:?}");
+        let flat = iso_view(vec![ground(1, tile)], HeightField::empty());
+        assert!(compile(&flat, limits(1)).is_ok(), "{tile:?}");
+    }
+}
