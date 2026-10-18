@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -809,6 +810,27 @@ class StablePackageTests(unittest.TestCase):
         with patch.object(P.subprocess, 'check_output', return_value=R.canonical(metadata)):
             with self.assertRaisesRegex(ValueError, 'publish=false'):
                 P.source_only_packages(CONFIG, ['example-cli'])
+
+
+class PackageVerifierTests(unittest.TestCase):
+    def test_unreadable_or_empty_policy_fails_before_verifying_nothing(self):
+        script = Path(__file__).resolve().parent / 'verify-packages.sh'
+        for policy in ('{"crates": []}', '{}', 'not json'):
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / 'policy').mkdir()
+                (root / 'policy/crate-release.json').write_text(policy)
+                (root / 'bin').mkdir()
+                cargo = root / 'bin/cargo'
+                cargo.write_text('#!/usr/bin/env bash\n'
+                                 'if [ "$1" = metadata ]; then echo \'{"packages":[{"version":"0.1.0"}]}\'; '
+                                 'else echo "$*" >>"$0.log"; fi\n')
+                cargo.chmod(0o755)
+                subprocess.run(['git', 'init', '-q', str(root)], check=True)
+                result = subprocess.run(['bash', str(script), str(root)], cwd=root, capture_output=True,
+                                        env={**os.environ, 'PATH': f'{root / "bin"}:{os.environ["PATH"]}'})
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((root / 'bin/cargo.log').exists())
 
 
 if __name__ == '__main__':

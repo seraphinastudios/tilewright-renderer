@@ -12,7 +12,11 @@ version=$(cargo metadata --locked --offline --no-deps --format-version 1 \
 verification=$(mktemp -d /tmp/tilewright-renderer-crates.XXXXXX)
 trap 'rm -rf -- "${verification}"' EXIT
 
-mapfile -t crates < <(jq -er '.crates[].name' policy/crate-release.json)
+# A failing command substitution stops the script; a failing process
+# substitution would leave mapfile with an empty list and verify nothing.
+crate_names=$(jq -er '.crates | if length > 0 then .[].name
+  else error("the release policy lists no crates") end' policy/crate-release.json)
+mapfile -t crates <<<"${crate_names}"
 
 for crate in "${crates[@]}"; do
   tar -xzf "${packages}/${crate}-${version}.crate" -C "${verification}"
