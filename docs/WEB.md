@@ -84,10 +84,16 @@ requestAnimationFrame(frame);
   after `auto` chose WebGPU cannot switch that canvas to WebGL2.
 - `uploadTexture({ id, revision, width, height, rgba })` stores unpremultiplied
   RGBA8 pixels and returns a handle with the texture's SHA-256. The texture
-  goes through the same verified resource contract as native textures.
-  `uploadImage` reads an image through a 2D canvas, which can round partly
-  transparent texels; upload exact pixels where that matters.
-  `removeTexture` forgets a texture.
+  goes through the same verified resource contract as native textures. A
+  stored identity and revision never change: uploading the same pixels again
+  is accepted, and different pixels must use a new revision. Sizes and pixel
+  lengths are checked before any pixels are copied into WebAssembly.
+  `uploadImage` takes `ImageData` exactly, and reads other image sources at
+  their intrinsic size through a 2D canvas, which can round partly
+  transparent texels. `removeTexture` forgets a texture.
+- Quads name a texture by its full identity, the handle's ID, revision and
+  digest, so a stale handle is refused (`unknown-texture`) rather than
+  drawing other pixels. Reuse handles: digests are parsed once per handle.
 - `SceneBuilder` (or `renderer.scene()`) packs quads and sprites with every
   scene field: frames, UVs, depth, painter order, tint, greyscale, glow,
   pickability, sampling and layer. `reset` keeps its buffer, so rebuilding a
@@ -99,19 +105,23 @@ requestAnimationFrame(frame);
   `resize(width, height)` changes the drawing buffer (submit a scene of the
   new size next).
 - `readFrame()` renders offscreen and resolves with RGBA plus the exact
-  semantic, depth and coverage planes. `renderReference()` returns the CPU
-  reference frame for the same scene.
-- `metrics()` reports work counts; `destroy()` releases the device.
+  semantic, depth and coverage planes. From the call until it settles the
+  renderer is busy: every other call fails with `busy`. `renderReference()`
+  returns the CPU reference frame for the same scene.
+- `metrics()` reports work counts. `destroy()` releases the device and its
+  textures; a readback in flight then rejects with `destroyed`, and so does
+  every later call.
 
 Errors are `TilewrightError`s with a stable `code` (see `src/errors.ts`),
 such as `invalid-scene`, `unknown-texture`, `resource` (including a frame
 outside its texture), `limit-exceeded`, `backend-unavailable`,
-`surface-lost`, `device-lost` and `busy` (a call made while `readFrame` is in
-flight).
+`surface-lost`, `device-lost` (recreate the renderer), `busy` and
+`destroyed`. Arguments are checked before they reach WebAssembly, so a
+fractional or out-of-range size never wraps.
 
 ## Packed scenes
 
-A scene crosses into WebAssembly as one buffer of 156-byte little-endian
+A scene crosses into WebAssembly as one buffer of 188-byte little-endian
 records, one per quad, so a frame of thousands of quads costs one copy. The
 scene-wide values (revision, clock, viewport, scale and clear colour) travel
 beside it. `SceneBuilder` writes the records; Rust code can use
@@ -132,10 +142,13 @@ beside it. `SceneBuilder` writes the records; Rust code can use
 | 32 | greyscale (`f32`) |
 | 33–36 | glow colour (`f32` RGBA; zero without the glow flag) |
 | 37–38 | glow radius (`f32` u/v; zero without the glow flag) |
+| bytes 156–187 | the texture's SHA-256 digest |
 
 Unknown flags, an unknown layer, frame or glow values without their flag, a
 buffer that is not whole records, more quads than the scene limit (checked
-before decoding) and a texture the store does not hold are rejected. The
+before decoding) and a texture the store does not hold under that exact
+digest are rejected. `SceneBuilder` stops at the same quad limit before it
+allocates more. The
 decoded quads then pass the full scene validation.
 
 ## Limits

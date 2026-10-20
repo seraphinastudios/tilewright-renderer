@@ -81,6 +81,10 @@ impl From<TextureError> for CodedError {
                 "limit-exceeded",
                 "the texture or the texture store exceeds its bound",
             ),
+            TextureError::Conflict => Self::new(
+                "invalid-texture",
+                "this identity and revision already hold different pixels; upload them as a new revision",
+            ),
             TextureError::Unavailable => Self::new("internal", "the texture store is unavailable"),
         }
     }

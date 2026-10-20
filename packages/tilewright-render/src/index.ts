@@ -13,6 +13,7 @@ import { SceneBuilder, type SceneOptions, type TextureIdentity } from './scene.j
 
 export { TilewrightError, type TilewrightErrorCode } from './errors.js';
 export {
+  MAXIMUM_QUADS,
   QUAD_RECORD_BYTES,
   SceneBuilder,
   SpriteSheet,
@@ -63,9 +64,10 @@ export interface TextureUpload extends Partial<Pick<TextureIdentity, 'revision'>
 export interface TextureHandle extends TextureIdentity {
   readonly width: number;
   readonly height: number;
-  /** SHA-256 of the texture's envelope, in hexadecimal. */
-  readonly digest: string;
 }
+
+/** An image `uploadImage` can read. */
+export type ImageSource = CanvasImageSource | ImageData;
 
 /** One frame read back: colour plus the exact picking planes. */
 export interface Frame {
@@ -90,6 +92,68 @@ export interface Metrics {
   readonly vertexAllocationBytes: number;
   readonly skippedFrames: number;
   readonly surfaceReconfigurations: number;
+}
+
+/** Largest texture side the renderer accepts, in pixels. */
+export const MAXIMUM_TEXTURE_SIDE = 8_192;
+/**
+ * Most bytes one texture may take: its RGBA8 pixels plus a 12-byte header
+ * must fit one 16 MiB resource, about 4.2 megapixels.
+ */
+export const MAXIMUM_TEXTURE_BYTES = 16 * 1024 * 1024;
+
+/** Rejects a drawing-buffer size that is not a positive 32-bit integer. */
+function checkTargetSize(width: number, height: number): void {
+  for (const [name, side] of [
+    ['width', width],
+    ['height', height],
+  ] as const) {
+    if (!Number.isInteger(side) || side < 1 || side > 0xffff_ffff) {
+      throw new TilewrightError('invalid-argument', `${name} must be a positive integer`);
+    }
+  }
+}
+
+/** The size an image source draws at, which is not always its `width`. */
+function intrinsicSize(image: CanvasImageSource): [number, number] {
+  if (typeof HTMLImageElement !== 'undefined' && image instanceof HTMLImageElement) {
+    return [image.naturalWidth, image.naturalHeight];
+  }
+  if (typeof HTMLVideoElement !== 'undefined' && image instanceof HTMLVideoElement) {
+    return [image.videoWidth, image.videoHeight];
+  }
+  if (typeof VideoFrame !== 'undefined' && image instanceof VideoFrame) {
+    return [image.displayWidth, image.displayHeight];
+  }
+  if (typeof SVGImageElement !== 'undefined' && image instanceof SVGImageElement) {
+    return [image.width.baseVal.value, image.height.baseVal.value];
+  }
+  const sized = image as { width: number; height: number };
+  return [sized.width, sized.height];
+}
+
+/**
+ * Rejects a texture size the renderer would refuse, before any pixels are
+ * read or copied.
+ */
+function checkTextureSize(width: number, height: number): void {
+  for (const [name, side] of [
+    ['width', width],
+    ['height', height],
+  ] as const) {
+    if (!Number.isInteger(side) || side < 1 || side > MAXIMUM_TEXTURE_SIDE) {
+      throw new TilewrightError(
+        'invalid-texture',
+        `texture ${name} must be an integer from 1 to ${MAXIMUM_TEXTURE_SIDE}`,
+      );
+    }
+  }
+  if (width * height * 4 + 12 > MAXIMUM_TEXTURE_BYTES) {
+    throw new TilewrightError(
+      'limit-exceeded',
+      `a ${width} × ${height} texture exceeds ${MAXIMUM_TEXTURE_BYTES} bytes`,
+    );
+  }
 }
 
 type WebRenderer = Awaited<ReturnType<BindingsModule['WebRenderer']['create']>>;
@@ -162,6 +226,7 @@ export class TilewrightRenderer {
     }
     const width = options.width ?? canvas.width;
     const height = options.height ?? canvas.height;
+    checkTargetSize(width, height);
     try {
       const bindings = await loadBindings(bundle, options.wasm?.[bundle]);
       const inner = await bindings.WebRenderer.create(canvas, width, height, backend);
@@ -188,7 +253,7 @@ export class TilewrightRenderer {
 
   #renderer(): WebRenderer {
     if (this.#inner === undefined) {
-      throw new TilewrightError('invalid-argument', 'the renderer was destroyed');
+      throw new TilewrightError('destroyed', 'the renderer was destroyed');
     }
     return this.#inner;
   }
@@ -209,6 +274,21 @@ export class TilewrightRenderer {
    */
   uploadTexture(texture: TextureUpload): TextureHandle {
     const revision = texture.revision ?? 1;
+    for (const [name, value] of [
+      ['id', texture.id],
+      ['revision', revision],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new TilewrightError('invalid-texture', `texture ${name} must be a positive safe integer`);
+      }
+    }
+    checkTextureSize(texture.width, texture.height);
+    if (texture.rgba.byteLength !== texture.width * texture.height * 4) {
+      throw new TilewrightError(
+        'invalid-texture',
+        `rgba must hold ${texture.width * texture.height * 4} bytes`,
+      );
+    }
     const rgba =
       texture.rgba instanceof Uint8Array
         ? texture.rgba
@@ -225,16 +305,38 @@ export class TilewrightRenderer {
    * precision to the canvas's premultiplied storage; upload exact pixels with
    * `uploadTexture`.
    */
-  uploadImage(id: number, image: CanvasImageSource & { width: number; height: number }, revision = 1): TextureHandle {
-    const width = image.width;
-    const height = image.height;
-    const canvas = new OffscreenCanvas(width, height);
-    const context = canvas.getContext('2d', { willReadFrequently: true });
-    if (context === null) {
-      throw new TilewrightError('unsupported', 'no 2D canvas context to read the image');
+  uploadImage(id: number, image: ImageSource, revision = 1): TextureHandle {
+    if (typeof ImageData !== 'undefined' && image instanceof ImageData) {
+      return this.uploadTexture({
+        id,
+        revision,
+        width: image.width,
+        height: image.height,
+        rgba: image.data,
+      });
     }
-    context.drawImage(image, 0, 0);
-    const pixels = context.getImageData(0, 0, width, height, { colorSpace: 'srgb' }).data;
+    const [width, height] = intrinsicSize(image as CanvasImageSource);
+    // Checked before the canvas and its pixels are allocated.
+    checkTextureSize(width, height);
+    if (typeof OffscreenCanvas === 'undefined') {
+      throw new TilewrightError('unsupported', 'reading an image needs OffscreenCanvas');
+    }
+    let pixels: Uint8ClampedArray;
+    try {
+      const context = new OffscreenCanvas(width, height).getContext('2d', {
+        willReadFrequently: true,
+      });
+      if (context === null) {
+        throw new Error('no 2D canvas context');
+      }
+      context.drawImage(image as CanvasImageSource, 0, 0, width, height);
+      pixels = context.getImageData(0, 0, width, height, { colorSpace: 'srgb' }).data;
+    } catch (error) {
+      // For example a cross-origin image that taints the canvas.
+      throw new TilewrightError('invalid-texture', `the image cannot be read: ${String(error)}`, {
+        cause: error,
+      });
+    }
     return this.uploadTexture({ id, revision, width, height, rgba: pixels });
   }
 
@@ -278,6 +380,7 @@ export class TilewrightRenderer {
 
   /** Resizes the drawing buffer; submit a scene of the new size next. */
   resize(width: number, height: number): void {
+    checkTargetSize(width, height);
     this.#call((inner) => inner.resize(width, height));
     this.#width = width;
     this.#height = height;
@@ -321,6 +424,9 @@ export class TilewrightRenderer {
 
   /** Releases the GPU device and every texture. The renderer is unusable afterwards. */
   destroy(): void {
+    // A readback still in flight rejects with `destroyed` and releases the
+    // device when it settles; otherwise the device is released now.
+    this.#inner?.destroy();
     this.#inner?.free();
     this.#inner = undefined;
   }

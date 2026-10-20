@@ -35,6 +35,9 @@ pub enum TextureError {
     /// The texture, or the store with it, would exceed its byte or count
     /// bound.
     LimitExceeded,
+    /// The identity and revision already hold different pixels. A stored
+    /// texture never changes; upload changed pixels as a new revision.
+    Conflict,
     /// The store's lock was poisoned by a panic.
     Unavailable,
 }
@@ -75,12 +78,14 @@ impl WebTextures {
         }
     }
 
-    /// Stores RGBA8 pixels as one texture identity and revision, replacing
-    /// any texture stored under the same pair, and returns its digest.
+    /// Stores RGBA8 pixels as one texture identity and revision and returns
+    /// its digest. Uploading the same pixels again is accepted; different
+    /// pixels under a stored pair are refused.
     ///
     /// # Errors
-    /// Returns [`TextureError::InvalidTexture`] for a malformed texture and
-    /// [`TextureError::LimitExceeded`] above the size or store bounds.
+    /// Returns [`TextureError::InvalidTexture`] for a malformed texture,
+    /// [`TextureError::Conflict`] for different pixels under a stored pair,
+    /// and [`TextureError::LimitExceeded`] above the size or store bounds.
     pub fn insert(
         &self,
         id: ResourceId,
@@ -113,14 +118,15 @@ impl WebTextures {
         envelope.extend_from_slice(rgba);
         let digest = Digest256(Sha256::digest(&envelope).into());
         let mut store = self.store.write().map_err(|_| TextureError::Unavailable)?;
-        let replaced = store
-            .textures
-            .get(&(id, revision))
-            .map_or(0, |texture| texture.envelope.len() as u64);
-        let bytes = store.bytes - replaced + length as u64;
-        if bytes > self.maximum_bytes
-            || (replaced == 0 && store.textures.len() >= self.maximum_textures)
-        {
+        if let Some(stored) = store.textures.get(&(id, revision)) {
+            return if stored.digest == digest {
+                Ok(digest)
+            } else {
+                Err(TextureError::Conflict)
+            };
+        }
+        let bytes = store.bytes + length as u64;
+        if bytes > self.maximum_bytes || store.textures.len() >= self.maximum_textures {
             return Err(TextureError::LimitExceeded);
         }
         store.bytes = bytes;
@@ -253,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn the_store_is_bounded_and_replacement_frees_bytes() {
+    fn the_store_is_bounded_and_removal_frees_bytes() {
         // Room for three 2 × 2 envelopes of 28 bytes each.
         let textures = WebTextures::with_limits(3 * 28, 16);
         let pixels = [0; 16];
@@ -264,8 +270,14 @@ mod tests {
             textures.insert(ResourceId(4), 1, 2, 2, &pixels),
             Err(TextureError::LimitExceeded)
         );
-        // Replacing a stored texture reuses its bytes.
-        assert!(textures.insert(ResourceId(1), 1, 2, 2, &[1; 16]).is_ok());
+        // A stored texture never changes: the same pixels are accepted again,
+        // different ones are refused.
+        assert!(textures.insert(ResourceId(1), 1, 2, 2, &pixels).is_ok());
+        assert_eq!(
+            textures.insert(ResourceId(1), 1, 2, 2, &[1; 16]),
+            Err(TextureError::Conflict)
+        );
+        assert!(textures.insert(ResourceId(1), 2, 2, 2, &[1; 16]).is_err());
         assert!(textures.remove(ResourceId(1), 1));
         assert!(!textures.remove(ResourceId(1), 1));
         assert_eq!(textures.stored_bytes(), 2 * 28);
@@ -287,8 +299,8 @@ mod tests {
             textures.insert(ResourceId(3), 1, 1, 1, &[0; 4]),
             Err(TextureError::LimitExceeded)
         );
-        // Replacing an existing texture does not add one.
-        assert!(textures.insert(ResourceId(1), 1, 1, 1, &[1; 4]).is_ok());
+        // Uploading a stored texture again does not add one.
+        assert!(textures.insert(ResourceId(1), 1, 1, 1, &[0; 4]).is_ok());
         assert_eq!(
             WebTextures::default().maximum_textures,
             super::MAXIMUM_STORED_TEXTURES

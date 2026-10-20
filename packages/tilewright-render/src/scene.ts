@@ -18,10 +18,16 @@ export interface TextureRect {
   readonly height: number;
 }
 
-/** The identity of an uploaded texture. */
+/**
+ * The full identity of an uploaded texture: its ID, revision and the
+ * SHA-256 `uploadTexture` returned. Scenes carry all three, so a stale
+ * identity is refused rather than drawing other pixels.
+ */
 export interface TextureIdentity {
   readonly id: number;
   readonly revision: number;
+  /** 64 hexadecimal digits. */
+  readonly digest: string;
 }
 
 export type Sampling = 'nearest' | 'linear';
@@ -86,9 +92,36 @@ export interface SceneOptions {
   readonly clockMillis?: number;
 }
 
-/** Bytes per packed quad record. */
-export const QUAD_RECORD_BYTES = 156;
+/** Bytes per packed quad record: 39 words, then the texture's digest. */
+export const QUAD_RECORD_BYTES = 188;
+const DIGEST_OFFSET = 156;
+/** Most quads one scene may hold: the renderer's scene limit. */
+export const MAXIMUM_QUADS = 131_072;
 const RECORD_WORDS = QUAD_RECORD_BYTES / 4;
+const digests = new WeakMap<TextureIdentity, Uint8Array>();
+
+/**
+ * A texture's 32 digest bytes, parsed once per identity object: reuse the
+ * handle `uploadTexture` returns rather than building identities per quad.
+ */
+function digestBytes(texture: TextureIdentity): Uint8Array {
+  let bytes = digests.get(texture);
+  if (bytes === undefined) {
+    const digest = texture.digest;
+    if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new TilewrightError(
+        'invalid-argument',
+        'texture digest must be 64 lowercase hexadecimal digits',
+      );
+    }
+    bytes = new Uint8Array(32);
+    for (let index = 0; index < 32; index += 1) {
+      bytes[index] = parseInt(digest.slice(index * 2, index * 2 + 2), 16);
+    }
+    digests.set(texture, bytes);
+  }
+  return bytes;
+}
 const FLAG_PICKABLE = 1;
 const FLAG_LINEAR = 1 << 1;
 const FLAG_GLOW = 1 << 2;
@@ -121,17 +154,21 @@ const SAFE_MAX = Number.MAX_SAFE_INTEGER;
 export class SceneBuilder {
   #words: Uint32Array;
   #floats: Float32Array;
+  #bytes: Uint8Array;
   #count = 0;
   #options: Required<SceneOptions>;
 
+  /** `capacity` quads are allocated up front, at most `MAXIMUM_QUADS`. */
   constructor(options: SceneOptions, capacity = 1_024) {
     if (!LITTLE_ENDIAN) {
       throw new TilewrightError('unsupported', 'packed scenes need a little-endian host');
     }
     this.#options = SceneBuilder.#resolve(options);
-    const buffer = new ArrayBuffer(Math.max(1, capacity) * QUAD_RECORD_BYTES);
+    const quads = integer(capacity, 'capacity', 0, MAXIMUM_QUADS);
+    const buffer = new ArrayBuffer(Math.max(1, quads) * QUAD_RECORD_BYTES);
     this.#words = new Uint32Array(buffer);
     this.#floats = new Float32Array(buffer);
+    this.#bytes = new Uint8Array(buffer);
   }
 
   static #resolve(options: SceneOptions): Required<SceneOptions> {
@@ -189,6 +226,13 @@ export class SceneBuilder {
 
   /** Adds a quad. Integer fields are checked here; the renderer validates the rest on submit. */
   quad(quad: QuadInput): this {
+    // The renderer would refuse a larger scene; stop before allocating for it.
+    if (this.#count >= MAXIMUM_QUADS) {
+      throw new TilewrightError(
+        'limit-exceeded',
+        `a scene holds at most ${MAXIMUM_QUADS} quads`,
+      );
+    }
     this.#reserve(this.#count + 1);
     const words = this.#words;
     const floats = this.#floats;
@@ -215,6 +259,7 @@ export class SceneBuilder {
       (quad.frame ? FLAG_FRAME : 0);
     const id = integer(quad.texture.id, 'texture id', 1, SAFE_MAX);
     const revision = integer(quad.texture.revision, 'texture revision', 1, SAFE_MAX);
+    const digest = digestBytes(quad.texture);
     words[base + 4] = id >>> 0;
     words[base + 5] = Math.floor(id / 0x1_0000_0000);
     words[base + 6] = revision >>> 0;
@@ -241,6 +286,7 @@ export class SceneBuilder {
     } else {
       words.fill(0, base + 33, base + 39);
     }
+    this.#bytes.set(digest, this.#count * QUAD_RECORD_BYTES + DIGEST_OFFSET);
     this.#count += 1;
     return this;
   }
@@ -249,12 +295,16 @@ export class SceneBuilder {
     if (count <= this.#words.length / RECORD_WORDS) {
       return;
     }
-    const capacity = Math.max(count, (this.#words.length / RECORD_WORDS) * 2);
+    const capacity = Math.min(
+      MAXIMUM_QUADS,
+      Math.max(count, (this.#words.length / RECORD_WORDS) * 2),
+    );
     const buffer = new ArrayBuffer(capacity * QUAD_RECORD_BYTES);
     const words = new Uint32Array(buffer);
     words.set(this.#words.subarray(0, this.#count * RECORD_WORDS));
     this.#words = words;
     this.#floats = new Float32Array(buffer);
+    this.#bytes = new Uint8Array(buffer);
   }
 }
 
@@ -317,17 +367,29 @@ export class SpriteSheet {
     );
   }
 
-  get frameCount(): number {
-    return this.columns * this.rows;
+  /** The number of frames, or `undefined` if it does not fit in 32 bits. */
+  get frameCount(): number | undefined {
+    const count = this.columns * this.rows;
+    return count <= U32_MAX ? count : undefined;
   }
 
-  /** The frame at a column and row. */
+  /**
+   * The frame at a column and row. Like the Rust `SpriteSheet`, every
+   * coordinate must fit in 32 bits; spacing lies only between frames.
+   */
   frameAt(column: number, row: number): TextureRect {
     integer(column, 'column', 0, this.columns - 1);
     integer(row, 'row', 0, this.rows - 1);
+    const offset = (origin: number, size: number, spacing: number, index: number): number => {
+      const start = origin + size * index + spacing * index;
+      if (size * index > U32_MAX || spacing * index > U32_MAX || start + size > U32_MAX) {
+        throw new TilewrightError('invalid-argument', 'frame coordinates must fit in 32 bits');
+      }
+      return start;
+    };
     return {
-      x: this.origin[0] + column * (this.frameWidth + this.spacing[0]),
-      y: this.origin[1] + row * (this.frameHeight + this.spacing[1]),
+      x: offset(this.origin[0], this.frameWidth, this.spacing[0], column),
+      y: offset(this.origin[1], this.frameHeight, this.spacing[1], row),
       width: this.frameWidth,
       height: this.frameHeight,
     };
@@ -335,7 +397,10 @@ export class SpriteSheet {
 
   /** Frame `index`, counting row by row. */
   frame(index: number): TextureRect {
-    integer(index, 'frame index', 0, this.frameCount - 1);
+    integer(index, 'frame index', 0, U32_MAX);
+    if (this.columns === 0) {
+      throw new TilewrightError('invalid-argument', 'the sheet has no frames');
+    }
     return this.frameAt(index % this.columns, Math.floor(index / this.columns));
   }
 }

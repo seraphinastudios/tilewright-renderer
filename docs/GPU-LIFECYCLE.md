@@ -57,6 +57,10 @@ Browsers cannot block on the GPU, so `Renderer::render` returns
 plane. Native `render` is `render_async` driven to completion. WebGPU
 resolves the readback mapping from the browser's event loop; on WebGL2 the
 renderer polls the device once per browser task until the mapping settles.
-Device creation uses wgpu's WebGL2 downlevel limits on a GL adapter. Device
-and surface loss surface as the same typed errors as natively; the page
-recreates the renderer.
+Device creation uses wgpu's WebGL2 downlevel limits on a GL adapter; a
+browser that offers an adapter but refuses the device reports
+`BackendUnavailable`. wgpu's device-lost notification marks the renderer
+lost, natively and in browsers: every later frame, and a readback waiting
+when it happens, fails with `DeviceLost`, and the owner recreates the
+renderer. A suboptimal owned surface presents its frame and is reconfigured
+before the next one.

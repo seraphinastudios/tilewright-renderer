@@ -13,8 +13,10 @@ use tilewright_scene::{
     Viewport,
 };
 
-/// Bytes per packed quad: 39 little-endian 32-bit words.
-pub const QUAD_RECORD_BYTES: usize = 156;
+/// Bytes per packed quad: 39 little-endian 32-bit words, then the
+/// texture's 32-byte SHA-256 digest.
+pub const QUAD_RECORD_BYTES: usize = 188;
+const DIGEST_OFFSET: usize = 156;
 
 /// The quad writes the semantic, depth and coverage planes.
 pub const FLAG_PICKABLE: u32 = 1;
@@ -43,14 +45,15 @@ pub enum DecodeError {
     /// The buffer is not whole records, or a record holds an unknown flag,
     /// layer, or a value its flags say must be zero.
     Malformed(&'static str),
-    /// A quad names a texture the store does not hold.
+    /// A quad names a texture the store does not hold with that digest.
     UnknownTexture { id: u64, revision: u64 },
     /// The records decode but the scene is invalid.
     Scene(tilewright_scene::Error),
 }
 
-/// Decodes packed records into a validated scene, resolving each texture's
-/// digest from the store.
+/// Decodes packed records into a validated scene. Each quad names its
+/// texture's full identity, digest included, and the store must hold that
+/// exact texture, so a stale identity can never pick up other pixels.
 ///
 /// # Errors
 /// Returns [`DecodeError`] for malformed records, an unknown texture, or a
@@ -72,7 +75,24 @@ pub fn decode_scene(
     let mut quads = Vec::with_capacity(count);
     let mut last_texture = None;
     for record in records.chunks_exact(QUAD_RECORD_BYTES) {
-        quads.push(decode_quad(record, textures, &mut last_texture)?);
+        let quad = decode_quad(record)?;
+        let identity = (
+            quad.resource_id,
+            quad.resource_revision,
+            quad.resource_digest,
+        );
+        if last_texture != Some(identity) {
+            if textures.digest(quad.resource_id, quad.resource_revision)
+                != Some(quad.resource_digest)
+            {
+                return Err(DecodeError::UnknownTexture {
+                    id: quad.resource_id.0,
+                    revision: quad.resource_revision,
+                });
+            }
+            last_texture = Some(identity);
+        }
+        quads.push(quad);
     }
     SceneBundle::from_quads(
         header.revision,
@@ -85,13 +105,7 @@ pub fn decode_scene(
     .map_err(DecodeError::Scene)
 }
 
-type CachedTexture = Option<((ResourceId, u64), tilewright_scene::Digest256)>;
-
-fn decode_quad(
-    record: &[u8],
-    textures: &WebTextures,
-    last_texture: &mut CachedTexture,
-) -> Result<Quad, DecodeError> {
+fn decode_quad(record: &[u8]) -> Result<Quad, DecodeError> {
     let word = |index: usize| {
         let start = index * 4;
         u32::from_le_bytes([
@@ -117,17 +131,9 @@ fn decode_quad(
     let depth = i16::from_le_bytes([record[6], record[7]]);
     let id = u64::from(word(4)) | (u64::from(word(5)) << 32);
     let revision = u64::from(word(6)) | (u64::from(word(7)) << 32);
-    let key = (ResourceId(id), revision);
-    let digest = match *last_texture {
-        Some((cached, digest)) if cached == key => digest,
-        _ => {
-            let digest = textures
-                .digest(key.0, key.1)
-                .ok_or(DecodeError::UnknownTexture { id, revision })?;
-            *last_texture = Some((key, digest));
-            digest
-        }
-    };
+    let mut digest = [0_u8; 32];
+    digest.copy_from_slice(&record[DIGEST_OFFSET..QUAD_RECORD_BYTES]);
+    let digest = tilewright_scene::Digest256(digest);
     let frame_words = [word(8), word(9), word(10), word(11)];
     let frame = if flags & FLAG_FRAME == 0 {
         if frame_words != [0; 4] {
@@ -159,7 +165,7 @@ fn decode_quad(
     Ok(Quad {
         semantic_id: SemanticId(word(0)),
         part,
-        resource_id: key.0,
+        resource_id: ResourceId(id),
         resource_revision: revision,
         resource_digest: digest,
         frame,
@@ -184,7 +190,7 @@ fn decode_quad(
 /// Rust callers and tests use this to build buffers.
 #[must_use]
 pub fn encode_quad(quad: &Quad) -> [u8; QUAD_RECORD_BYTES] {
-    let mut words = [0_u32; QUAD_RECORD_BYTES / 4];
+    let mut words = [0_u32; DIGEST_OFFSET / 4];
     let layer = match quad.layer {
         Layer::World => 0,
         Layer::Effect => 1,
@@ -229,9 +235,10 @@ pub fn encode_quad(quad: &Quad) -> [u8; QUAD_RECORD_BYTES] {
         }
     }
     let mut bytes = [0_u8; QUAD_RECORD_BYTES];
-    for (chunk, word) in bytes.chunks_exact_mut(4).zip(words) {
+    for (chunk, word) in bytes[..DIGEST_OFFSET].chunks_exact_mut(4).zip(words) {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
+    bytes[DIGEST_OFFSET..].copy_from_slice(&quad.resource_digest.0);
     bytes
 }
 
@@ -369,6 +376,18 @@ mod tests {
     #[test]
     fn unknown_textures_and_oversized_buffers_are_refused() {
         let (textures, digest) = store();
+        // A stale digest under a stored identity is refused too.
+        let stale = encode_quad(&Quad {
+            resource_digest: tilewright_scene::Digest256([7; 32]),
+            ..quad(digest)
+        });
+        assert_eq!(
+            decode_scene(header(), &stale, &textures, SceneLimits::default()),
+            Err(DecodeError::UnknownTexture {
+                id: (1 << 40) + 5,
+                revision: 1 << 33
+            })
+        );
         let missing = encode_quad(&Quad {
             resource_revision: 2,
             ..quad(digest)

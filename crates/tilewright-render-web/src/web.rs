@@ -3,15 +3,21 @@
 
 //! The `wasm-bindgen` surface. Browsers are single-threaded here: the
 //! renderer lives in an `Rc<RefCell<…>>` so an asynchronous readback can
-//! own it while it waits, and every call made during that wait fails with
-//! the `busy` code instead of blocking.
+//! own it while it waits. A shared state marks the renderer busy from the
+//! moment `readFrame` is called until it settles, so every call made in the
+//! meantime fails with the `busy` code instead of racing the frame, and
+//! marks it destroyed once `destroy` is called.
 
 use crate::{
     errors::{CodedError, safe_integer},
     packed::{SceneHeader, decode_scene},
     textures::WebTextures,
 };
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::Arc,
+};
 use tilewright_render_api::{
     BackendPreference, FrameOutput, RenderRequest, Renderer, TargetDescriptor, TargetKind,
 };
@@ -35,18 +41,58 @@ fn busy() -> JsError {
     ))
 }
 
+fn destroyed() -> JsError {
+    js_error(CodedError::new("destroyed", "the renderer was destroyed"))
+}
+
 struct Inner {
-    renderer: WgpuRenderer,
+    /// `None` once destroyed: the device and its caches are released.
+    renderer: Option<WgpuRenderer>,
     scene: Option<SceneBundle>,
+}
+
+impl Inner {
+    fn renderer(&mut self) -> Result<&mut WgpuRenderer, JsError> {
+        self.renderer.as_mut().ok_or_else(destroyed)
+    }
+}
+
+#[derive(Default)]
+struct State {
+    busy: Cell<bool>,
+    destroyed: Cell<bool>,
+}
+
+/// Marks the renderer busy until dropped.
+struct Busy(Rc<State>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.busy.set(false);
+    }
 }
 
 /// A renderer drawing into one canvas.
 #[wasm_bindgen]
 pub struct WebRenderer {
     inner: Rc<RefCell<Inner>>,
+    state: Rc<State>,
     textures: Arc<WebTextures>,
     backend: String,
     adapter: String,
+}
+
+impl WebRenderer {
+    /// Fails with `destroyed` or `busy` when the renderer cannot take a call.
+    fn ready(&self) -> Result<(), JsError> {
+        if self.state.destroyed.get() {
+            return Err(destroyed());
+        }
+        if self.state.busy.get() {
+            return Err(busy());
+        }
+        Ok(())
+    }
 }
 
 #[wasm_bindgen]
@@ -102,9 +148,10 @@ impl WebRenderer {
         let adapter = renderer.adapter().name.clone();
         Ok(Self {
             inner: Rc::new(RefCell::new(Inner {
-                renderer,
+                renderer: Some(renderer),
                 scene: None,
             })),
+            state: Rc::new(State::default()),
             textures: Arc::new(WebTextures::default()),
             backend,
             adapter,
@@ -140,6 +187,7 @@ impl WebRenderer {
         height: u32,
         rgba: &[u8],
     ) -> Result<String, JsError> {
+        self.ready()?;
         let id = safe_integer(id, "id").map_err(js_error)?;
         let revision = safe_integer(revision, "revision").map_err(js_error)?;
         let digest = self
@@ -163,6 +211,7 @@ impl WebRenderer {
     /// Throws `invalid-argument` for an identity that is not a safe integer.
     #[wasm_bindgen(js_name = removeTexture)]
     pub fn remove_texture(&self, id: f64, revision: f64) -> Result<bool, JsError> {
+        self.ready()?;
         let id = safe_integer(id, "id").map_err(js_error)?;
         let revision = safe_integer(revision, "revision").map_err(js_error)?;
         Ok(self.textures.remove(ResourceId(id), revision))
@@ -186,6 +235,7 @@ impl WebRenderer {
         clear: &[f32],
         quads: &[u8],
     ) -> Result<(), JsError> {
+        self.ready()?;
         let [red, green, blue, alpha] = clear else {
             return Err(js_error(CodedError::new(
                 "invalid-argument",
@@ -215,8 +265,10 @@ impl WebRenderer {
     /// `surface-unavailable` when the browser skipped the frame, and
     /// otherwise a resource or backend code, or `busy`.
     pub fn render(&self) -> Result<(), JsError> {
+        self.ready()?;
         let mut inner = self.inner.try_borrow_mut().map_err(|_| busy())?;
         let Inner { renderer, scene } = &mut *inner;
+        let renderer = renderer.as_mut().ok_or_else(destroyed)?;
         let scene = scene.as_ref().ok_or_else(no_scene)?;
         renderer
             .present(&RenderRequest {
@@ -234,36 +286,65 @@ impl WebRenderer {
     /// Throws `invalid-target` for a size outside the renderer's bounds, or
     /// `busy`.
     pub fn resize(&self, width: u32, height: u32) -> Result<(), JsError> {
+        self.ready()?;
         self.inner
             .try_borrow_mut()
             .map_err(|_| busy())?
-            .renderer
+            .renderer()?
             .resize(width, height)
             .map_err(|error| render_error(&error))
     }
 
     /// Renders the current scene offscreen and resolves with the frame's
-    /// colour, semantic, depth and coverage planes.
+    /// colour, semantic, depth and coverage planes. The renderer is busy
+    /// from this call until the promise settles. If it is destroyed
+    /// meanwhile, the promise rejects with `destroyed` and the device is
+    /// released.
     #[wasm_bindgen(js_name = readFrame)]
     pub fn read_frame(&self) -> js_sys::Promise {
+        if let Err(error) = self.ready() {
+            return js_sys::Promise::reject(&error.into());
+        }
+        self.state.busy.set(true);
+        let guard = Busy(Rc::clone(&self.state));
         let inner = Rc::clone(&self.inner);
         let textures = self.textures.clone();
-        // The borrow is held across the readback on purpose: calls made
-        // while it waits fail with `busy` rather than racing the frame.
+        // The borrow is held across the readback, while the busy state
+        // turns every other call away.
         #[allow(clippy::await_holding_refcell_ref)]
         wasm_bindgen_futures::future_to_promise(async move {
             let mut inner = inner.try_borrow_mut().map_err(|_| busy())?;
             let Inner { renderer, scene } = &mut *inner;
             let scene = scene.as_ref().ok_or_else(no_scene)?;
             let frame = renderer
+                .as_mut()
+                .ok_or_else(destroyed)?
                 .render_async(RenderRequest {
                     scene,
                     resources: textures,
                 })
-                .await
-                .map_err(|error| render_error(&error))?;
-            Ok(WebFrame::from(frame).into())
+                .await;
+            if guard.0.destroyed.get() {
+                inner.renderer = None;
+                inner.scene = None;
+                return Err(destroyed().into());
+            }
+            drop(guard);
+            Ok(WebFrame::from(frame.map_err(|error| render_error(&error))?).into())
         })
+    }
+
+    /// Releases the device and every cached texture; every later call fails
+    /// with `destroyed`. A readback in flight rejects with `destroyed` and
+    /// releases the device when it settles.
+    pub fn destroy(&self) {
+        self.state.destroyed.set(true);
+        if !self.state.busy.get()
+            && let Ok(mut inner) = self.inner.try_borrow_mut()
+        {
+            inner.renderer = None;
+            inner.scene = None;
+        }
     }
 
     /// Renders the current scene with the CPU reference renderer: the
@@ -274,6 +355,7 @@ impl WebRenderer {
     /// Throws `invalid-target` without a scene, a resource code, or `busy`.
     #[wasm_bindgen(js_name = renderReference)]
     pub fn render_reference(&self) -> Result<WebFrame, JsError> {
+        self.ready()?;
         let inner = self.inner.try_borrow().map_err(|_| busy())?;
         let scene = inner.scene.as_ref().ok_or_else(no_scene)?;
         let viewport = scene.viewport();
@@ -295,8 +377,9 @@ impl WebRenderer {
     /// # Errors
     /// Throws `busy` during a readback.
     pub fn metrics(&self) -> Result<WebMetrics, JsError> {
+        self.ready()?;
         let inner = self.inner.try_borrow().map_err(|_| busy())?;
-        let metrics = inner.renderer.metrics();
+        let metrics = inner.renderer.as_ref().ok_or_else(destroyed)?.metrics();
         #[allow(clippy::cast_precision_loss)]
         let number = |value: u64| value as f64;
         Ok(WebMetrics {

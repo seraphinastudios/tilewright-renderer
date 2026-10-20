@@ -74,6 +74,16 @@ for (const backend of ['webgl2', 'webgpu']) {
     assert.equal(result.unknownTexture, 'unknown-texture');
     assert.equal(result.frameOutside, 'resource');
     assert.equal(result.invalidScene, 'invalid-scene');
+    assert.equal(result.conflict, 'invalid-texture');
+    assert.equal(result.stale, 'unknown-texture');
+    assert.deepEqual(result.busyCodes, ['busy', 'busy', 'busy']);
+    assert.deepEqual(result.destroyedCodes, ['destroyed', 'destroyed']);
+    assert.deepEqual(result.oversized, [
+      'invalid-texture',
+      'limit-exceeded',
+      'limit-exceeded',
+      'invalid-texture',
+    ]);
     assert.deepEqual(result.resized.canvas, [56, 32]);
     assert.equal(result.resized.presented, true);
     assert.ok(result.resized.rgbaDifference <= 1);

@@ -15,6 +15,7 @@
  * - `surface-lost`, `device-lost`: recreate the renderer.
  * - `resource`: a texture failed to load or a frame lies outside its texture.
  * - `busy`: a readback is still in flight.
+ * - `destroyed`: the renderer was destroyed.
  * - `unsupported`: the host cannot run the package.
  * - `internal`: an unexpected renderer failure.
  */
@@ -31,6 +32,7 @@ export type TilewrightErrorCode =
   | 'device-lost'
   | 'resource'
   | 'busy'
+  | 'destroyed'
   | 'unsupported'
   | 'internal';
 
@@ -47,6 +49,7 @@ const CODES = new Set<string>([
   'device-lost',
   'resource',
   'busy',
+  'destroyed',
   'unsupported',
   'internal',
 ]);

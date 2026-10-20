@@ -93,7 +93,7 @@ async function run() {
   // Typed failures.
   const unknown = new SceneBuilder({ width: WIDTH, height: HEIGHT }).sprite({
     id: 1,
-    texture: { id: 999, revision: 1 },
+    texture: { id: 999, revision: 1, digest: 'ab'.repeat(32) },
     x: 0,
     y: 0,
     width: 4,
@@ -126,6 +126,46 @@ async function run() {
     ),
   );
 
+  // A stored texture never changes, and a stale identity is refused.
+  const conflict = await codeOf(() =>
+    renderer.uploadTexture({ id: ATLAS_ID, width: 1, height: 1, rgba: new Uint8Array(4) }),
+  );
+  const staleScene = new SceneBuilder({ width: WIDTH, height: HEIGHT }).sprite({
+    id: 1,
+    texture: { ...texture, digest: 'cd'.repeat(32) },
+    x: 0,
+    y: 0,
+    width: 4,
+    height: 4,
+  });
+  const stale = await codeOf(() => renderer.submit(staleScene));
+
+  // A readback makes the renderer busy from the call until it settles.
+  renderer.submit(scene(renderer, texture));
+  const pending = renderer.readFrame();
+  const busyCodes = [
+    await codeOf(() => renderer.submit(scene(renderer, texture))),
+    await codeOf(() => renderer.resize(40, 40)),
+    await codeOf(() =>
+      renderer.uploadTexture({ id: 60, width: 1, height: 1, rgba: new Uint8Array(4) }),
+    ),
+  ];
+  await pending;
+
+  // Oversized textures are refused before their pixels are read or copied.
+  const tooWide = await codeOf(() =>
+    renderer.uploadTexture({ id: 50, width: 8_193, height: 1, rgba: new Uint8Array(4) }),
+  );
+  const tooLarge = await codeOf(() =>
+    renderer.uploadTexture({ id: 51, width: 4_096, height: 4_096, rgba: new Uint8Array(4) }),
+  );
+  const imageTooLarge = await codeOf(() =>
+    renderer.uploadImage(52, { width: 4_096, height: 4_096 }),
+  );
+  const shortPixels = await codeOf(() =>
+    renderer.uploadTexture({ id: 53, width: 2, height: 2, rgba: new Uint8Array(15) }),
+  );
+
   // Resizing keeps the device, textures and caches.
   renderer.resize(56, 32);
   const resized = new SceneBuilder({ width: 56, height: 32, revision: 5 }).sprite({
@@ -142,7 +182,11 @@ async function run() {
   const resizedReference = renderer.renderReference();
   const resizedPresented = renderer.render();
   const resizedScreen = canvasPixels(canvas);
+
+  // Destroying during a readback rejects it; later calls fail too.
+  const inFlight = renderer.readFrame();
   renderer.destroy();
+  const destroyedCodes = [await codeOf(() => inFlight), await codeOf(() => renderer.readFrame())];
 
   return {
     backend: renderer.backend,
@@ -165,6 +209,11 @@ async function run() {
     unknownTexture,
     frameOutside,
     invalidScene,
+    oversized: [tooWide, tooLarge, imageTooLarge, shortPixels],
+    conflict,
+    stale,
+    busyCodes,
+    destroyedCodes,
     resized: {
       presented: resizedPresented,
       canvas: [canvas.width, canvas.height],

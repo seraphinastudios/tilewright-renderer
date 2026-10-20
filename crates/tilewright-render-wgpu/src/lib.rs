@@ -9,7 +9,10 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll, Waker},
 };
 use tilewright_render_api::{
@@ -46,6 +49,9 @@ pub struct PresentationDescription {
     pub height: u32,
     pub format: String,
     pub reconfigured: bool,
+    /// The surface no longer matches its configuration exactly; an owned
+    /// surface is reconfigured before its next frame.
+    pub suboptimal: bool,
 }
 
 pub struct WgpuRenderer {
@@ -70,6 +76,9 @@ pub struct WgpuRenderer {
     limits: TargetLimits,
     /// A surface the renderer owns, such as a browser canvas.
     owned_surface: Option<OwnedSurface>,
+    /// Set by wgpu when the device is lost; every later frame then fails
+    /// with [`Error::DeviceLost`].
+    lost: Arc<AtomicBool>,
 }
 
 /// A presentation surface created with the renderer, and its configuration
@@ -165,6 +174,11 @@ impl WgpuRenderer {
         }
         let (instance, surface, adapter_handle, device, queue, adapter) =
             initialize_gpu(target.backend, surface, startup).await?;
+        let lost = Arc::new(AtomicBool::new(false));
+        let lost_flag = Arc::clone(&lost);
+        device.set_device_lost_callback(move |_reason, _message| {
+            lost_flag.store(true, Ordering::Release);
+        });
         let limits = TargetLimits {
             maximum_dimension: device.limits().max_texture_dimension_2d,
             ..TargetLimits::default()
@@ -198,6 +212,7 @@ impl WgpuRenderer {
                 surface,
                 configuration: None,
             }),
+            lost,
         })
     }
 
@@ -268,14 +283,29 @@ impl WgpuRenderer {
             };
             let presented =
                 self.present_configured(&owned.surface, &configuration, request, started);
-            owned.configuration = Some(configuration);
+            // A suboptimal surface is reconfigured before the next frame.
+            if presented
+                .as_ref()
+                .is_ok_and(|description| !description.suboptimal)
+            {
+                owned.configuration = Some(configuration);
+            }
             presented
         })();
         self.owned_surface = Some(owned);
         result
     }
 
+    /// [`Error::DeviceLost`] once wgpu has reported the device lost.
+    fn check_device(&self) -> Result<(), Error> {
+        if self.lost.load(Ordering::Acquire) {
+            return Err(Error::DeviceLost);
+        }
+        Ok(())
+    }
+
     fn check_presentable(&self, request: &RenderRequest<'_>) -> Result<(), Error> {
+        self.check_device()?;
         if !matches!(self.target.kind, TargetKind::Window | TargetKind::Embedded)
             || request.scene.viewport().width != self.target.width
             || request.scene.viewport().height != self.target.height
@@ -292,7 +322,8 @@ impl WgpuRenderer {
         request: &RenderRequest<'_>,
         started: Stopwatch,
     ) -> Result<PresentationDescription, Error> {
-        let (frame, reconfigured) = self.acquire_surface_frame(surface, configuration)?;
+        let (frame, reconfigured, suboptimal) =
+            self.acquire_surface_frame(surface, configuration)?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -351,6 +382,7 @@ impl WgpuRenderer {
             height: self.target.height,
             format: format!("{:?}", configuration.format),
             reconfigured,
+            suboptimal,
         })
     }
 
@@ -396,15 +428,18 @@ impl WgpuRenderer {
         &mut self,
         surface: &wgpu::Surface<'_>,
         configuration: &wgpu::SurfaceConfiguration,
-    ) -> Result<(wgpu::SurfaceTexture, bool), Error> {
+    ) -> Result<(wgpu::SurfaceTexture, bool, bool), Error> {
+        // Returns the frame, whether the surface was reconfigured, and
+        // whether it is suboptimal and should be reconfigured after this
+        // frame.
         match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Ok((frame, false)),
+            wgpu::CurrentSurfaceTexture::Success(frame) => Ok((frame, false, false)),
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Ok((frame, false, true)),
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&self.device, configuration);
                 match surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(frame)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Ok((frame, true)),
+                    wgpu::CurrentSurfaceTexture::Success(frame) => Ok((frame, true, false)),
+                    wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Ok((frame, true, true)),
                     _ => Err(Error::SurfaceLost),
                 }
             }
@@ -598,13 +633,16 @@ impl WgpuRenderer {
     /// the mapping callback while polled to completion.
     #[cfg(not(target_arch = "wasm32"))]
     async fn wait_for_mapping(&self, mapped: MapFuture) -> Result<(), Error> {
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .map_err(|error| Error::Internal(error.to_string()))?;
-        mapped.await
+        let polled = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        self.check_device()?;
+        polled.map_err(|error| Error::Internal(error.to_string()))?;
+        mapped.await.or_else(|error| {
+            self.check_device()?;
+            Err(error)
+        })
     }
 
     /// Waits for a readback mapping without blocking the browser: WebGPU
@@ -614,11 +652,16 @@ impl WgpuRenderer {
     #[cfg(target_arch = "wasm32")]
     async fn wait_for_mapping(&self, mapped: MapFuture) -> Result<(), Error> {
         loop {
+            // A lost device may never settle the mapping, or fail it.
+            self.check_device()?;
             self.device
                 .poll(wgpu::PollType::Poll)
                 .map_err(|error| Error::Internal(error.to_string()))?;
             if let Some(result) = mapped.try_take()? {
-                return result;
+                return result.or_else(|error| {
+                    self.check_device()?;
+                    Err(error)
+                });
             }
             next_task().await;
         }
@@ -939,6 +982,7 @@ impl WgpuRenderer {
     /// # Errors
     /// Returns a typed target, resource, limit, or backend error.
     pub async fn render_async(&mut self, request: RenderRequest<'_>) -> Result<FrameOutput, Error> {
+        self.check_device()?;
         if request.scene.viewport().width != self.target.width
             || request.scene.viewport().height != self.target.height
         {
@@ -1044,7 +1088,11 @@ async fn initialize_gpu(
             trace: wgpu::Trace::Off,
         })
         .await
-        .map_err(|error| Error::Internal(error.to_string()))?;
+        .map_err(|error| {
+            Error::BackendUnavailable(format!(
+                "no device for requested {preference:?} backend policy: {error}"
+            ))
+        })?;
     let info = adapter.get_info();
     let description = AdapterDescription {
         name: info.name,
@@ -2041,6 +2089,25 @@ mod tests {
         }
         assert_eq!(render(&mut renderer).resource_requests, 0);
         assert!(renderer.textures.len() <= super::MAXIMUM_CACHED_TEXTURES);
+    }
+
+    #[test]
+    fn lost_devices_fail_with_device_lost() {
+        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(16, 16)) else {
+            eprintln!("skipping GPU device-loss test: no supported adapter");
+            return;
+        };
+        let scene = synthetic_scene(16, 16).unwrap();
+        let request = RenderRequest {
+            scene: &scene,
+            resources: synthetic_provider().unwrap(),
+        };
+        renderer.render(request.clone()).unwrap();
+        renderer.device.destroy();
+        assert_eq!(
+            renderer.render(request).err(),
+            Some(tilewright_render_api::Error::DeviceLost)
+        );
     }
 
     #[test]
