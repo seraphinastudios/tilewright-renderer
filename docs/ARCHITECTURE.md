@@ -13,7 +13,8 @@ scene <- resources <- render-api <- testkit
 ```
 
 `tilewright-scene` owns immutable, versioned, sorted render inputs: textured
-quads with per-quad effects. `render-api`
+quads with per-quad effects, each optionally drawing one frame of an atlas or
+sprite sheet (see the [scene contract](SCENE.md)). `render-api`
 owns targets, lifecycle errors, output planes, and a renderer trait. Resource
 providers receive explicit content identity, revision, SHA-256 digest, and byte
 budget; this grants no ambient path or URL access. The provider is deliberately
@@ -40,7 +41,8 @@ painter order, semantic ID, then part.
 ## Quads, rasterisation and effects
 
 A quad is four screen-space corners (top-left, top-right, bottom-right,
-bottom-left) with matching texture coordinates. It carries a color tint with
+bottom-left) with matching texture coordinates, relative to the quad's
+optional texture frame or else to the whole texture. It carries a color tint with
 alpha, a greyscale amount, an optional glow, sampling, a pickable flag, and the
 legacy effect fields. Axis-aligned quads use half-open rectangle coverage. Every
 other quad is split into the triangles (0, 1, 2) and (0, 2, 3), snapped to 1/256
@@ -53,7 +55,19 @@ colours. The GPU backend submits positions already rounded to the same 1/256 px
 grid, so drivers with different snapping and rounding rules start from identical
 fixed-point corners.
 
-Texture lookups outside 0–1 are transparent. A glow quad extends its art by
+Texture lookups outside 0–1 are transparent, and no lookup reads a texel
+outside the quad's frame: nearest and linear sampling clamp to the frame's
+edge, and renderers reject a frame that does not lie inside its texture. The
+GPU tests the frame-relative coordinate against 0–1 exactly as the
+reference does and lets the hardware sampler filter. A frame smaller than
+its texture is drawn by its own pipelines: nearest sampling picks the frame
+texel `floor(clamp(u, 0, 1 − ε) × width)` in frame space, as the reference
+does, and samples its centre; linear sampling maps the coordinate onto the
+frame and clamps the sample point half a texel inside it, which keeps the
+filter on the frame's own texels exactly as the reference's edge clamp does.
+Hardware filtering quantises its weights, so linear sampling is within the
+shared tolerance only where filter fractions are multiples of 1/256, as in
+every fixture. A glow quad extends its art by
 the glow radius and draws a halo from 16 fixed sample directions around the
 art's alpha (a zero radius samples only the centre); it is never pickable,
 and scene validation rejects a pickable glow quad. Greyscale uses Rec. 601 luma
@@ -118,7 +132,7 @@ CPU work is O(pixels + quads), GPU vertex generation is O(quads), and GPU
 readback is O(pixels). A completed frame owns 11 bytes per pixel across RGBA,
 semantic, depth, and coverage planes. The GPU path additionally owns a color
 target, private depth/stencil target, at most 255 bytes of readback row padding
-per row, and 432 bytes of transient vertices per quad (six 72-byte vertices).
+per row, and 504 bytes of transient vertices per quad (six 84-byte vertices).
 Checked arithmetic precedes every size-derived allocation. Offscreen
 targets/readback buffers are reused until resize; immutable textures are reused
 by ID/revision/digest with a hard 4,096-entry cache. A scene's missing textures
@@ -134,7 +148,41 @@ instead of cloning them. The shared vertex buffer grows geometrically to the
 next power of two, capped at the device's largest buffer (larger streams are
 rejected before they are generated), and is reused by offscreen and surface
 presentation until a larger scene is submitted; per-texture nearest/linear bind
-groups are created only on cache misses.
+groups are created only on cache misses, and consecutive quads of one texture
+with the same sampling and frame class (the whole texture, or a smaller frame
+drawn by the framed pipelines), such as layered characters drawn from one
+atlas, share a draw call whatever their frames.
+
+Fill cost is measured with the `fill_rate` example of `tilewright-render-wgpu`
+(32 translucent 1,024 × 1,024 layers, or 7 glow layers, readback included;
+median of three interleaved runs of the release build, Rust 1.97.1). All three
+devices ran on one Ryzen 9 9950X3D host under Linux 7.0, each selected with
+`VK_DRIVER_FILES`, through wgpu 30.0.1's Vulkan backend with the renderer's
+downlevel limits (2D textures up to 8,192 px):
+
+| Column | Adapter | Driver | Vulkan | Adapter limits |
+| --- | --- | --- | --- | --- |
+| lavapipe | llvmpipe (LLVM 21.1.8, 256 bits), CPU | Mesa 26.0.8 | 1.4.335 | 16,384 px textures, 2 GiB buffers |
+| RADV | AMD Ryzen 9 9950X3D iGPU (RAPHAEL_MENDOCINO), integrated | Mesa 26.0.8 | 1.4.335 | 16,384 px textures, 2 GiB buffers |
+| RTX 3090 | NVIDIA GeForce RTX 3090, discrete | NVIDIA 595.91.07 | 1.4.329 | 32,768 px textures, 4 GiB buffers |
+
+`tilewright-render probe` prints the adapter, driver, backend and limits for
+another machine.
+
+| Mode | lavapipe | RADV | RTX 3090 |
+| --- | --- | --- | --- |
+| whole texture, nearest | 11.0 → 10.9 ms | 7.1 → 7.0 ms | 1.8 → 1.4 ms |
+| whole texture, linear | 12.6 → 11.9 ms | 6.0 → 5.9 ms | 1.4 → 1.3 ms |
+| whole texture, glow | 13.9 → 13.3 ms | 12.6 → 13.7 ms | 1.4 → 1.4 ms |
+| frame, nearest | 13.0 ms | 8.5 ms | 1.4 ms |
+| frame, linear | 16.0 ms | 8.8 ms | 1.5 ms |
+| frame, glow | 29.1 ms | 21.1 ms | 1.6 ms |
+
+Arrows run from version 0.2 to 0.3. The budget is: whole-texture quads stay
+within 10% of 0.2 apart from run-to-run noise, and a frame smaller than its
+texture costs at most 1.7× a whole-texture quad, except glow halos on
+lavapipe, a software rasteriser, at up to 2.2×. The integrated GPU's frame
+rows are medians of six runs.
 
 No public dependency or type points to a client, editor, protocol, server, or
 game implementation. `tools/check-architecture.sh` validates exact direct
@@ -145,7 +193,8 @@ crate edges from Cargo metadata and rejects forbidden sibling sources.
 All nine crates are one compatibility set: they share one SemVer version and
 are packaged/released from one tag. Consumers pin the same exact version of
 every renderer crate. `SceneBundle::version` is the serialized logical-scene
-contract; the embedded shader ships in the matching `render-wgpu` crate.
+contract (version 3; see [scene contract](SCENE.md)); the embedded shader ships
+in the matching `render-wgpu` crate.
 
 - A scene field, identity, ordering, semantic mask, or serialized bundle change
   requires renderer, protocol producer, client adapter, editor adapter, and

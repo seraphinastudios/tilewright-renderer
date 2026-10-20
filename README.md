@@ -77,7 +77,9 @@ cargo run --locked --package tilewright-render -- world view.json /tmp/ref.png -
 
 `--reference` renders with the CPU reference instead of the GPU.
 
-See [architecture and limits](docs/ARCHITECTURE.md), [GPU lifecycle](docs/GPU-LIFECYCLE.md),
+Scenes are lists of textured quads; a quad can draw one frame of an atlas or
+sprite sheet, so layered character sheets share one texture. See the
+[scene contract](docs/SCENE.md), [architecture and limits](docs/ARCHITECTURE.md), [GPU lifecycle](docs/GPU-LIFECYCLE.md),
 [corpus policy](corpus/README.md), and [provenance](PROVENANCE.md).
 
 The eight renderer libraries publish to crates.io from verified source-release

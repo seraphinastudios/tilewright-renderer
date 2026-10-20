@@ -19,4 +19,11 @@ The corpus is generated solely from constants in
 `tilewright-renderer-synthetic-resource-v1`. The fixture contains colored
 rectangles only. `corpus/manifest.json`
 records exact RGBA and semantic-plane digests, clock, dimensions, and the sole
-allowed cross-backend visual tolerance.
+allowed cross-backend visual tolerance. The world and atlas scenarios draw
+procedural textures generated from constants in
+`tilewright-render-testkit` (`src/world.rs` and `src/atlas.rs`); the atlas's
+characters and ground tiles are original geometric shapes, not derived from
+any game or third-party art. `corpus/manifest.json` records every fixture
+texture's identity, size, SHA-256, source, author, license, transformation
+and notice; validation regenerates the identities and digests and checks the
+provenance fields.

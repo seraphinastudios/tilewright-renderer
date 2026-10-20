@@ -860,6 +860,7 @@ impl Projector {
             resource_id: texture.id,
             resource_revision: texture.revision,
             resource_digest: texture.digest,
+            frame: None,
             positions: [[0.0; 2]; 4],
             uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             depth: 0,

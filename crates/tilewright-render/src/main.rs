@@ -10,8 +10,8 @@ use tilewright_render_api::{
     BackendPreference, FrameOutput, RenderRequest, Renderer, TargetDescriptor, TargetKind,
 };
 use tilewright_render_testkit::{
-    ReferenceRenderer, dense_scene, iso_world_scene, structural_scene, synthetic_provider,
-    synthetic_scene, top_down_world_scene, world_provider,
+    ReferenceRenderer, atlas_provider, atlas_scene, dense_scene, iso_world_scene, structural_scene,
+    synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
 };
 use tilewright_render_wgpu::WgpuRenderer;
 use tilewright_scene::SceneLimits;
@@ -152,14 +152,43 @@ fn render_window() -> Result<(), String> {
 
 fn render_corpus() -> Result<(), String> {
     let cases = [
-        ("overlap-square", synthetic_scene(16, 16), false),
-        ("unaligned-wide", synthetic_scene(31, 17), false),
-        ("structural-fog-ui", structural_scene(48, 48), false),
-        ("high-density-1024", dense_scene(128, 128), false),
-        ("world-iso-terrain", iso_world_scene(192, 128), true),
-        ("world-top-down", top_down_world_scene(96, 64), true),
+        (
+            "overlap-square",
+            synthetic_scene(16, 16),
+            synthetic_provider(),
+        ),
+        (
+            "unaligned-wide",
+            synthetic_scene(31, 17),
+            synthetic_provider(),
+        ),
+        (
+            "structural-fog-ui",
+            structural_scene(48, 48),
+            synthetic_provider(),
+        ),
+        (
+            "high-density-1024",
+            dense_scene(128, 128),
+            synthetic_provider(),
+        ),
+        (
+            "world-iso-terrain",
+            iso_world_scene(192, 128),
+            world_provider(),
+        ),
+        (
+            "world-top-down",
+            top_down_world_scene(96, 64),
+            world_provider(),
+        ),
+        (
+            "atlas-layered-characters",
+            atlas_scene(112, 64),
+            atlas_provider(),
+        ),
     ];
-    for (name, scene, world) in cases {
+    for (name, scene, resources) in cases {
         let scene = scene.map_err(|error| error.to_string())?;
         let viewport = scene.viewport();
         let mut renderer = WgpuRenderer::new(target(viewport.width, viewport.height))
@@ -167,12 +196,7 @@ fn render_corpus() -> Result<(), String> {
         let frame = renderer
             .render(RenderRequest {
                 scene: &scene,
-                resources: if world {
-                    world_provider()
-                } else {
-                    synthetic_provider()
-                }
-                .map_err(|error| error.to_string())?,
+                resources: resources.map_err(|error| error.to_string())?,
             })
             .map_err(|error| error.to_string())?;
         println!(
