@@ -140,6 +140,15 @@ async function run() {
   });
   const stale = await codeOf(() => renderer.submit(staleScene));
 
+  // A scene of another size, or malformed records, never replace the
+  // current scene.
+  const wrongSize = await codeOf(() =>
+    renderer.submit(new SceneBuilder({ width: WIDTH + 1, height: HEIGHT })),
+  );
+  const forged = new SceneBuilder({ width: WIDTH, height: HEIGHT });
+  forged.records = () => new Uint8Array(10);
+  const forgedRecords = await codeOf(() => renderer.submit(forged));
+
   // A readback makes the renderer busy from the call until it settles.
   renderer.submit(scene(renderer, texture));
   const pending = renderer.readFrame();
@@ -183,10 +192,18 @@ async function run() {
   const resizedPresented = renderer.render();
   const resizedScreen = canvasPixels(canvas);
 
-  // Destroying during a readback rejects it; later calls fail too.
+  // Destroying during a readback rejects it; later calls fail too. A second
+  // renderer without a scene is destroyed before its readback starts.
   const inFlight = renderer.readFrame();
   renderer.destroy();
-  const destroyedCodes = [await codeOf(() => inFlight), await codeOf(() => renderer.readFrame())];
+  const spare = await TilewrightRenderer.create(new OffscreenCanvas(8, 8), { backend });
+  const early = spare.readFrame();
+  spare.destroy();
+  const destroyedCodes = [
+    await codeOf(() => inFlight),
+    await codeOf(() => renderer.readFrame()),
+    await codeOf(() => early),
+  ];
 
   return {
     backend: renderer.backend,
@@ -212,6 +229,8 @@ async function run() {
     oversized: [tooWide, tooLarge, imageTooLarge, shortPixels],
     conflict,
     stale,
+    wrongSize,
+    forgedRecords,
     busyCodes,
     destroyedCodes,
     resized: {

@@ -39,6 +39,18 @@ test('scenes stop at the renderer quad limit before allocating more', () => {
   assert.equal(scene.length, 0);
 });
 
+test('scene options are validated copies that cannot change', () => {
+  const clear = [0.1, 0.2, 0.3, 1];
+  const scene = new SceneBuilder({ width: 4, height: 4, clearColor: clear });
+  clear[0] = 1;
+  assert.equal(scene.options.clearColor[0], 0.1);
+  assert.throws(() => {
+    scene.options.width = 32.5;
+  }, TypeError);
+  assert.equal(scene.options.width, 4);
+  assert.equal(code(() => scene.reset({ width: 2 ** 32 + 32 })), 'invalid-argument');
+});
+
 test('records pack every field little-endian', () => {
   const scene = new SceneBuilder({ width: 4, height: 4 }).quad({
     id: 7,

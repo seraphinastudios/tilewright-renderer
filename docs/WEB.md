@@ -101,9 +101,11 @@ requestAnimationFrame(frame);
 - `SpriteSheet.grid`, `SpriteSheet.covering` and `new SpriteSheet({ origin,
   spacing, … })` number frames row by row, as `tilewright_scene::SpriteSheet`
   does.
-- `submit(scene)` validates and keeps a scene; `render()` presents it;
-  `resize(width, height)` changes the drawing buffer (submit a scene of the
-  new size next).
+- `submit(scene)` validates and keeps a scene; a scene that fails, including
+  one of another size than the drawing buffer, leaves the previous scene
+  current. `render()` presents it; `resize(width, height)` changes the
+  drawing buffer (submit a scene of the new size next). A builder's options
+  are validated and frozen; change them with `reset`.
 - `readFrame()` renders offscreen and resolves with RGBA plus the exact
   semantic, depth and coverage planes. From the call until it settles the
   renderer is busy: every other call fails with `busy`. `renderReference()`

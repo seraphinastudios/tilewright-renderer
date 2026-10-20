@@ -55,6 +55,12 @@ impl Inner {
     fn renderer(&mut self) -> Result<&mut WgpuRenderer, JsError> {
         self.renderer.as_mut().ok_or_else(destroyed)
     }
+
+    /// Releases the device, its caches and the scene.
+    fn release(&mut self) {
+        self.renderer = None;
+        self.scene = None;
+    }
 }
 
 #[derive(Default)]
@@ -254,7 +260,20 @@ impl WebRenderer {
         };
         let scene = decode_scene(header, quads, &self.textures, SceneLimits::default())
             .map_err(|error| js_error(&error))?;
-        self.inner.try_borrow_mut().map_err(|_| busy())?.scene = Some(scene);
+        let mut inner = self.inner.try_borrow_mut().map_err(|_| busy())?;
+        // A scene of another size could never be drawn; the previous scene
+        // stays current.
+        let target = inner.renderer()?.target();
+        if (width, height) != (target.width, target.height) {
+            return Err(js_error(CodedError::new(
+                "invalid-target",
+                format!(
+                    "the scene is {width} × {height} but the drawing buffer is {} × {}",
+                    target.width, target.height
+                ),
+            )));
+        }
+        inner.scene = Some(scene);
         Ok(())
     }
 
@@ -314,6 +333,11 @@ impl WebRenderer {
         #[allow(clippy::await_holding_refcell_ref)]
         wasm_bindgen_futures::future_to_promise(async move {
             let mut inner = inner.try_borrow_mut().map_err(|_| busy())?;
+            // Destroyed before the readback started: nothing else matters.
+            if guard.0.destroyed.get() {
+                inner.release();
+                return Err(destroyed().into());
+            }
             let Inner { renderer, scene } = &mut *inner;
             let scene = scene.as_ref().ok_or_else(no_scene)?;
             let frame = renderer
@@ -325,8 +349,7 @@ impl WebRenderer {
                 })
                 .await;
             if guard.0.destroyed.get() {
-                inner.renderer = None;
-                inner.scene = None;
+                inner.release();
                 return Err(destroyed().into());
             }
             drop(guard);
@@ -342,8 +365,7 @@ impl WebRenderer {
         if !self.state.busy.get()
             && let Ok(mut inner) = self.inner.try_borrow_mut()
         {
-            inner.renderer = None;
-            inner.scene = None;
+            inner.release();
         }
     }
 

@@ -587,7 +587,16 @@ impl WgpuRenderer {
         );
         self.queue.submit(Some(encoder.finish()));
         let slice = target.readback.slice(..);
-        self.wait_for_mapping(MapFuture::new(&slice)).await?;
+        // If this future is dropped while the mapping is pending, the guard
+        // unmaps the shared readback buffer, which cancels the mapping, so
+        // the next frame finds it usable.
+        let mut pending = PendingMap {
+            buffer: &target.readback,
+            armed: true,
+        };
+        let mapped = self.wait_for_mapping(MapFuture::new(&slice)).await;
+        pending.armed = false;
+        mapped?;
         let mapped = slice
             .get_mapped_range()
             .map_err(|error| Error::Internal(error.to_string()))?;
@@ -1151,6 +1160,20 @@ impl Stopwatch {
         #[cfg(target_arch = "wasm32")]
         {
             0
+        }
+    }
+}
+
+/// Unmaps a buffer whose mapping is still pending when dropped while armed.
+struct PendingMap<'a> {
+    buffer: &'a wgpu::Buffer,
+    armed: bool,
+}
+
+impl Drop for PendingMap<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.buffer.unmap();
         }
     }
 }

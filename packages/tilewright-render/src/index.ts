@@ -9,7 +9,13 @@
 
 import { type BindingsModule, type Bundle, loadBindings } from './bindings.js';
 import { TilewrightError } from './errors.js';
-import { SceneBuilder, type SceneOptions, type TextureIdentity } from './scene.js';
+import {
+  MAXIMUM_QUADS,
+  QUAD_RECORD_BYTES,
+  SceneBuilder,
+  type SceneOptions,
+  type TextureIdentity,
+} from './scene.js';
 
 export { TilewrightError, type TilewrightErrorCode } from './errors.js';
 export {
@@ -355,6 +361,28 @@ export class TilewrightRenderer {
   /** Validates a scene and makes it the one `render` and `readFrame` draw. */
   submit(scene: SceneBuilder): void {
     const options = scene.options;
+    // Checked again here: the bindings coerce numbers silently, and the
+    // records must stay within the scene limit before they are copied.
+    checkTargetSize(options.width, options.height);
+    for (const [name, value, minimum] of [
+      ['revision', options.revision, 1],
+      ['clockMillis', options.clockMillis, 0],
+      ['scaleMilli', options.scaleMilli, 1],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value < minimum) {
+        throw new TilewrightError('invalid-argument', `${name} must be a safe integer`);
+      }
+    }
+    if (options.scaleMilli > 0xffff_ffff) {
+      throw new TilewrightError('invalid-argument', 'scaleMilli must fit in 32 bits');
+    }
+    const records = scene.records();
+    if (!(records instanceof Uint8Array) || records.byteLength % QUAD_RECORD_BYTES !== 0) {
+      throw new TilewrightError('invalid-scene', 'records must be whole packed quad records');
+    }
+    if (records.byteLength > MAXIMUM_QUADS * QUAD_RECORD_BYTES) {
+      throw new TilewrightError('limit-exceeded', `a scene holds at most ${MAXIMUM_QUADS} quads`);
+    }
     const clear = new Float32Array(options.clearColor);
     this.#call((inner) =>
       inner.submit(
@@ -364,7 +392,7 @@ export class TilewrightRenderer {
         options.height,
         options.scaleMilli,
         clear,
-        scene.records(),
+        records,
       ),
     );
   }

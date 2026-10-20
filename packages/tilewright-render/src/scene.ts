@@ -172,14 +172,16 @@ export class SceneBuilder {
   }
 
   static #resolve(options: SceneOptions): Required<SceneOptions> {
-    return {
+    const clear = options.clearColor ?? [0, 0, 0, 1];
+    return Object.freeze({
       width: integer(options.width, 'width', 1, U32_MAX),
       height: integer(options.height, 'height', 1, U32_MAX),
-      clearColor: options.clearColor ?? [0, 0, 0, 1],
+      // A copy, so later changes to the caller's array have no effect.
+      clearColor: Object.freeze([clear[0], clear[1], clear[2], clear[3]] as const),
       scaleMilli: integer(options.scaleMilli ?? 1_000, 'scaleMilli', 1, U32_MAX),
       revision: integer(options.revision ?? 1, 'revision', 1, SAFE_MAX),
       clockMillis: integer(options.clockMillis ?? 0, 'clockMillis', 0, SAFE_MAX),
-    };
+    });
   }
 
   /** Empties the scene, keeping its buffer, and optionally changes its options. */
@@ -189,7 +191,7 @@ export class SceneBuilder {
     return this;
   }
 
-  /** The scene-wide options. */
+  /** The scene-wide options, validated and frozen. */
   get options(): Readonly<Required<SceneOptions>> {
     return this.#options;
   }
