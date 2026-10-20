@@ -8,9 +8,18 @@ scale, unaligned GPU readback rows, and a 1,024-quad density case. Two world
 scenarios run the world compiler on procedural art: an isometric hill with
 stretched terrain, double-drawn tall art, a pulsing glow, tint, greyscale,
 alpha, rotation and scale; and a top-down field with ground-first ordering, an
-animated object and a glow. The fixed
+animated object and a glow. An atlas scenario draws everything from frames
+of one procedural sprite-sheet atlas: abutting ground tiles, layered
+characters (body, tunic and hair parts of one object) at each walk step and
+at a fractional 1.5× scale, linearly filtered magnified frames whose edges must
+not blend with neighbouring frames, a rotated frame, a frame whose
+coordinates run past its edges, and a glowing frame above an opaque row. No
+quad edge or texel boundary in it falls on a pixel centre, and no pixel blends
+more than one translucent layer, so every backend stays within the shared
+tolerance. The fixed
 clock removes animation nondeterminism. Missing, digest-mismatched, corrupt, and
-oversized resource cases have exact expected error classes.
+oversized resource cases, and a frame outside its texture, have exact expected
+error classes.
 
 RGBA comparisons permit at most one 8-bit channel of backend rounding variance.
 Semantic ID, depth, and coverage planes are exact. No masks hide a pixel: each

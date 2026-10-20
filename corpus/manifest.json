@@ -5,7 +5,8 @@
     {"name": "missing-resource", "expected": "NotFound", "owner": "renderer"},
     {"name": "digest-mismatch", "expected": "DigestMismatch", "owner": "renderer"},
     {"name": "corrupt-texture-envelope", "expected": "InvalidFormat", "owner": "renderer"},
-    {"name": "oversized-resource", "expected": "LimitExceeded", "owner": "renderer"}
+    {"name": "oversized-resource", "expected": "LimitExceeded", "owner": "renderer"},
+    {"name": "frame-out-of-bounds", "expected": "FrameOutOfBounds", "owner": "renderer"}
   ],
   "cases": [
     {
@@ -20,7 +21,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 1296,
+        "vertex_allocation_bytes": 1440,
         "target_allocation_bytes": 2816
       },
       "digests": {
@@ -42,7 +43,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 1296,
+        "vertex_allocation_bytes": 1440,
         "target_allocation_bytes": 5797
       },
       "digests": {
@@ -64,7 +65,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 66,
-        "vertex_allocation_bytes": 4752,
+        "vertex_allocation_bytes": 5280,
         "target_allocation_bytes": 25344
       },
       "digests": {
@@ -86,7 +87,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 6144,
-        "vertex_allocation_bytes": 442368,
+        "vertex_allocation_bytes": 491520,
         "target_allocation_bytes": 180224
       },
       "digests": {
@@ -108,7 +109,7 @@
         "resource_requests": 4,
         "uploaded_bytes": 11792,
         "vertex_count": 3030,
-        "vertex_allocation_bytes": 218160,
+        "vertex_allocation_bytes": 242400,
         "target_allocation_bytes": 270336
       },
       "digests": {
@@ -130,7 +131,7 @@
         "resource_requests": 4,
         "uploaded_bytes": 5008,
         "vertex_count": 168,
-        "vertex_allocation_bytes": 12096,
+        "vertex_allocation_bytes": 13440,
         "target_allocation_bytes": 67584
       },
       "digests": {
@@ -138,6 +139,28 @@
         "semantic_u32le": "8bb543d7a7916bbbe5c9f587dbe051b39bbfd8a6fa9c5ac99c8e4d8c7b518ecb",
         "depth_i16le": "f3cc103136423a57975750907ebc1d367e2985ac6338976d4d5a439f50323f4a",
         "coverage_u8": "884929e08ec0c709c085488ca1b0c61bb9749b0f38bd253c97c073657116f5be"
+      }
+    },
+    {
+      "name": "atlas-layered-characters",
+      "width": 112,
+      "height": 64,
+      "clock_millis": 375,
+      "maximum_rgba_channel_difference": 1,
+      "performance": {
+        "maximum_cpu_micros": 200000,
+        "quad_count": 34,
+        "resource_requests": 1,
+        "uploaded_bytes": 16384,
+        "vertex_count": 204,
+        "vertex_allocation_bytes": 16320,
+        "target_allocation_bytes": 78848
+      },
+      "digests": {
+        "rgba8": "f0182d18da3c960ac0e7207298bd1b211fe3075f5fff22258fad16fa96f6de84",
+        "semantic_u32le": "94a3d178de4e962eba1992339eddbced6c2adfe3d8f0f4b6a9319af3ec31d860",
+        "depth_i16le": "2a5e94df47c81b0c9817e874b0025e9836f3f5521a57003dd27d3fb1f795bde6",
+        "coverage_u8": "8349cf7cfe334a623be5c9a650cf684ffe8b1ed5d1a9867db7d567710851995e"
       }
     }
   ]

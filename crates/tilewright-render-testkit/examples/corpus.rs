@@ -5,9 +5,17 @@ use sha2::{Digest, Sha256};
 use std::{fmt::Write as _, time::Instant};
 use tilewright_render_api::{RenderRequest, Renderer};
 use tilewright_render_testkit::{
-    ReferenceRenderer, dense_scene, iso_world_scene, offscreen_target, structural_scene,
-    synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
+    ReferenceRenderer, atlas_provider, atlas_scene, dense_scene, iso_world_scene, offscreen_target,
+    structural_scene, synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
 };
+
+/// The resources a corpus scenario draws from.
+#[derive(Clone, Copy)]
+enum Resources {
+    Synthetic,
+    World,
+    Atlas,
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{{\"schema_version\":1,\"cases\":[");
@@ -16,39 +24,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "overlap-square",
             synthetic_scene(16, 16)?,
             50_000_u64,
-            false,
+            Resources::Synthetic,
         ),
-        ("unaligned-wide", synthetic_scene(31, 17)?, 50_000, false),
+        (
+            "unaligned-wide",
+            synthetic_scene(31, 17)?,
+            50_000,
+            Resources::Synthetic,
+        ),
         (
             "structural-fog-ui",
             structural_scene(48, 48)?,
             75_000,
-            false,
+            Resources::Synthetic,
         ),
-        ("high-density-1024", dense_scene(128, 128)?, 250_000, false),
+        (
+            "high-density-1024",
+            dense_scene(128, 128)?,
+            250_000,
+            Resources::Synthetic,
+        ),
         (
             "world-iso-terrain",
             iso_world_scene(192, 128)?,
             400_000,
-            true,
+            Resources::World,
         ),
         (
             "world-top-down",
             top_down_world_scene(96, 64)?,
             200_000,
-            true,
+            Resources::World,
+        ),
+        (
+            "atlas-layered-characters",
+            atlas_scene(112, 64)?,
+            200_000,
+            Resources::Atlas,
         ),
     ];
-    for (index, (name, scene, maximum_cpu_micros, world)) in cases.into_iter().enumerate() {
+    for (index, (name, scene, maximum_cpu_micros, resources)) in cases.into_iter().enumerate() {
         let viewport = scene.viewport();
         let started = Instant::now();
         let frame = ReferenceRenderer::new(offscreen_target(viewport.width, viewport.height))?
             .render(RenderRequest {
                 scene: &scene,
-                resources: if world {
-                    world_provider()?
-                } else {
-                    synthetic_provider()?
+                resources: match resources {
+                    Resources::Synthetic => synthetic_provider()?,
+                    Resources::World => world_provider()?,
+                    Resources::Atlas => atlas_provider()?,
                 },
             })?;
         let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);

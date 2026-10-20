@@ -9,9 +9,9 @@ test -s THIRD_PARTY_NOTICES.md
 jq -e '
   .schema_version == 1
   and (.provenance | contains("synthetic MIT"))
-  and (.failure_cases | length == 4)
+  and (.failure_cases | length == 5)
   and all(.failure_cases[]; .name != "" and .expected != "" and .owner == "renderer")
-  and (.cases | length == 6)
+  and (.cases | length == 7)
   and (.cases | map(.name) | length == (unique | length))
   and all(.cases[];
     .width > 0 and .height > 0

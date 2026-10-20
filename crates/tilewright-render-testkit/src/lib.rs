@@ -3,7 +3,12 @@
 
 #![forbid(unsafe_code)]
 
+mod atlas;
 mod world;
+pub use atlas::{
+    ATLAS_FRAME_SIZE, ATLAS_ID, ATLAS_SHEET, atlas_digest, atlas_provider, atlas_resource,
+    atlas_scene, character_sheet,
+};
 pub use world::{iso_world_scene, top_down_world_scene, world_provider, world_texture};
 
 use sha2::{Digest, Sha256};
@@ -18,16 +23,17 @@ use tilewright_render_api::{
 use tilewright_render_resources::{
     DEFAULT_MAXIMUM_RESOURCE_BYTES, Error as ResourceError, MAXIMUM_SCENE_TEXTURES, ResourceBlob,
     ResourceProvider, ResourceRequest, Rgba8Image, add_working_set_bytes, for_each_quad_pixel,
-    glow_rgba8, sample_quad_rgba8, shade_quad_rgba8,
+    glow_rgba8, quad_frame, sample_quad_rgba8, shade_quad_rgba8,
 };
 use tilewright_scene::{
     Digest256, Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, Sprite,
-    Viewport,
+    TextureRect, Viewport,
 };
 
 /// Bytes per GPU vertex: position (3), colour (4), uv (2), effect, greyscale,
-/// glow colour (4), glow radius (2) and mode, all `f32`.
-pub const VERTEX_BYTES: u64 = 72;
+/// glow colour (4) and glow radius (2) as `f32`, a `u32` of flags, and the
+/// texture frame as four `u16`.
+pub const VERTEX_BYTES: u64 = 80;
 
 #[derive(Default)]
 pub struct FakeResourceProvider {
@@ -222,7 +228,15 @@ impl Renderer for ReferenceRenderer {
                 images.insert(key, image.clone());
                 image
             };
-            raster_quad(&mut output, quad, &image, request.scene.clock_millis());
+            let frame = quad_frame(quad, &image)
+                .map_err(|error| RenderError::Resource(error.to_string()))?;
+            raster_quad(
+                &mut output,
+                quad,
+                &image,
+                frame,
+                request.scene.clock_millis(),
+            );
         }
         output.metrics.frames_submitted = 1;
         output.metrics.resource_requests = resource_requests;
@@ -255,12 +269,18 @@ fn pixel_count(width: u32, height: u32) -> Result<usize, RenderError> {
         .ok_or(RenderError::LimitExceeded)
 }
 
-fn raster_quad(output: &mut FrameOutput, quad: &Quad, image: &Rgba8Image, clock_millis: u64) {
+fn raster_quad(
+    output: &mut FrameOutput,
+    quad: &Quad,
+    image: &Rgba8Image,
+    frame: TextureRect,
+    clock_millis: u64,
+) {
     for_each_quad_pixel(quad, output.width, output.height, |_x, _y, index, u, v| {
         let source = match quad.glow {
-            Some(glow) => glow_rgba8(image, u, v, &glow, quad.sampling),
+            Some(glow) => glow_rgba8(image, frame, u, v, &glow, quad.sampling),
             None => shade_quad_rgba8(
-                sample_quad_rgba8(image, u, v, quad.sampling),
+                sample_quad_rgba8(image, frame, u, v, quad.sampling),
                 quad,
                 clock_millis,
             ),
@@ -337,6 +357,7 @@ pub fn synthetic_scene(width: u32, height: u32) -> Result<SceneBundle, tilewrigh
                 resource_id: ResourceId(1),
                 resource_revision: 1,
                 resource_digest: synthetic_digest(),
+                frame: None,
                 x: 1.0,
                 y: 1.0,
                 width: (width / 2).max(1) as f32,
@@ -352,6 +373,7 @@ pub fn synthetic_scene(width: u32, height: u32) -> Result<SceneBundle, tilewrigh
                 resource_id: ResourceId(1),
                 resource_revision: 1,
                 resource_digest: synthetic_digest(),
+                frame: None,
                 x: (width / 3) as f32,
                 y: (height / 3) as f32,
                 width: (width / 2).max(1) as f32,
@@ -367,6 +389,7 @@ pub fn synthetic_scene(width: u32, height: u32) -> Result<SceneBundle, tilewrigh
                 resource_id: ResourceId(1),
                 resource_revision: 1,
                 resource_digest: synthetic_digest(),
+                frame: None,
                 x: -1.25,
                 y: height.saturating_sub(3) as f32,
                 width: width.saturating_add(2) as f32,
@@ -399,6 +422,7 @@ pub fn dense_scene(width: u32, height: u32) -> Result<SceneBundle, tilewright_sc
             resource_id: ResourceId(1),
             resource_revision: 1,
             resource_digest: synthetic_digest(),
+            frame: None,
             x: (column * 4) as f32,
             y: (row * 4) as f32,
             width: 4.0,
@@ -499,6 +523,7 @@ fn fixture_sprite(
         resource_id: ResourceId(1),
         resource_revision: 1,
         resource_digest: digest,
+        frame: None,
         x: bounds[0],
         y: bounds[1],
         width: bounds[2],
@@ -553,6 +578,7 @@ mod tests {
                 resource_id: ResourceId(u64::from(index) + 1),
                 resource_revision: 1,
                 resource_digest: Digest256([1; 32]),
+                frame: None,
                 positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 depth: 0,

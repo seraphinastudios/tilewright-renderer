@@ -5,7 +5,7 @@
 
 use sha2::{Digest, Sha256};
 use std::fmt;
-use tilewright_scene::{Digest256, Glow, Layer, Quad, ResourceId, Sampling};
+use tilewright_scene::{Digest256, Glow, Layer, Quad, ResourceId, Sampling, TextureRect};
 
 pub const DEFAULT_MAXIMUM_RESOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES: u64 = 256 * 1024 * 1024;
@@ -328,32 +328,93 @@ const fn covers(weight: i128, a: (i64, i64), b: (i64, i64)) -> bool {
     weight > 0 || (weight == 0 && (b.1 < a.1 || (b.1 == a.1 && b.0 > a.0)))
 }
 
+/// Samples a whole image at a texture coordinate, clamped to its edges.
+#[must_use]
+pub fn sample_rgba8(image: &Rgba8Image, u: f32, v: f32, sampling: Sampling) -> [u8; 4] {
+    sample_frame_rgba8(
+        image,
+        TextureRect::whole(image.width(), image.height()),
+        u,
+        v,
+        sampling,
+    )
+}
+
+/// Samples one frame of an image at a texture coordinate relative to the
+/// frame, clamped to the frame's edges: linear filtering never blends in a
+/// texel outside the frame. Texels outside the image read as transparent.
+///
+/// Nearest sampling reads texel `floor(clamp(u, 0, 1 − ε) × width)` of the
+/// frame. Linear sampling blends the two nearest texel columns at
+/// `u × width − 0.5`, then the two rows likewise, rounding each blend to
+/// 8 bits.
 #[must_use]
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-pub fn sample_rgba8(image: &Rgba8Image, u: f32, v: f32, sampling: Sampling) -> [u8; 4] {
+pub fn sample_frame_rgba8(
+    image: &Rgba8Image,
+    frame: TextureRect,
+    u: f32,
+    v: f32,
+    sampling: Sampling,
+) -> [u8; 4] {
+    if frame.width == 0 || frame.height == 0 {
+        return [0; 4];
+    }
+    let at = |x: u32, y: u32| match (frame.x.checked_add(x), frame.y.checked_add(y)) {
+        (Some(x), Some(y)) => texel(image, x, y),
+        _ => [0; 4],
+    };
     match sampling {
         Sampling::Nearest => {
-            let x = (u.clamp(0.0, 1.0 - f32::EPSILON) * image.width() as f32).floor() as u32;
-            let y = (v.clamp(0.0, 1.0 - f32::EPSILON) * image.height() as f32).floor() as u32;
-            texel(image, x, y)
+            let x = (u.clamp(0.0, 1.0 - f32::EPSILON) * frame.width as f32).floor() as u32;
+            let y = (v.clamp(0.0, 1.0 - f32::EPSILON) * frame.height as f32).floor() as u32;
+            at(x.min(frame.width - 1), y.min(frame.height - 1))
         }
         Sampling::Linear => {
-            let x = u.mul_add(image.width() as f32, -0.5);
-            let y = v.mul_add(image.height() as f32, -0.5);
-            let x0 = x.floor().max(0.0) as u32;
-            let y0 = y.floor().max(0.0) as u32;
-            let x1 = x0.saturating_add(1).min(image.width() - 1);
-            let y1 = y0.saturating_add(1).min(image.height() - 1);
+            let x = u.mul_add(frame.width as f32, -0.5);
+            let y = v.mul_add(frame.height as f32, -0.5);
+            let x0 = (x.floor().max(0.0) as u32).min(frame.width - 1);
+            let y0 = (y.floor().max(0.0) as u32).min(frame.height - 1);
+            let x1 = x0.saturating_add(1).min(frame.width - 1);
+            let y1 = y0.saturating_add(1).min(frame.height - 1);
             let fx = x.fract().max(0.0);
             let fy = y.fract().max(0.0);
-            let top = mix(texel(image, x0, y0), texel(image, x1, y0), fx);
-            let bottom = mix(texel(image, x0, y1), texel(image, x1, y1), fx);
+            let top = mix(at(x0, y0), at(x1, y0), fx);
+            let bottom = mix(at(x0, y1), at(x1, y1), fx);
             mix(top, bottom, fy)
         }
+    }
+}
+
+/// The texels a quad samples from its decoded texture: its frame, or the
+/// whole image when it has none.
+///
+/// # Errors
+/// Returns [`Error::FrameOutOfBounds`] when the frame does not lie inside
+/// the image.
+pub fn quad_frame(quad: &Quad, image: &Rgba8Image) -> Result<TextureRect, Error> {
+    frame_in_image(quad.frame, image.width(), image.height())
+}
+
+/// Resolves an optional frame against a `width` × `height` texture.
+///
+/// # Errors
+/// Returns [`Error::FrameOutOfBounds`] when the frame does not lie inside
+/// the texture.
+pub fn frame_in_image(
+    frame: Option<TextureRect>,
+    width: u32,
+    height: u32,
+) -> Result<TextureRect, Error> {
+    let frame = frame.unwrap_or(TextureRect::whole(width, height));
+    if frame.fits(width, height) {
+        Ok(frame)
+    } else {
+        Err(Error::FrameOutOfBounds)
     }
 }
 
@@ -378,13 +439,20 @@ pub fn shade_rgba8(texel: [u8; 4], color: [f32; 4], layer: Layer, clock_millis: 
     output
 }
 
-/// Samples a quad texture; coordinates outside 0–1 are transparent.
+/// Samples a quad's frame; coordinates outside 0–1 of the frame are
+/// transparent.
 #[must_use]
-pub fn sample_quad_rgba8(image: &Rgba8Image, u: f32, v: f32, sampling: Sampling) -> [u8; 4] {
+pub fn sample_quad_rgba8(
+    image: &Rgba8Image,
+    frame: TextureRect,
+    u: f32,
+    v: f32,
+    sampling: Sampling,
+) -> [u8; 4] {
     if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
         return [0; 4];
     }
-    sample_rgba8(image, u, v, sampling)
+    sample_frame_rgba8(image, frame, u, v, sampling)
 }
 
 /// Luma weights used for greyscale.
@@ -430,19 +498,27 @@ pub const GLOW_DIRECTIONS: [[f32; 2]; 16] = [
 ];
 
 /// The halo colour at a texture coordinate: the glow colour with alpha set
-/// by the strongest texture alpha at the centre and at full and half radius
-/// along [`GLOW_DIRECTIONS`]. A zero radius samples only the centre.
+/// by the strongest alpha of the frame at the centre and at full and half
+/// radius along [`GLOW_DIRECTIONS`]. A zero radius samples only the centre.
+/// Samples outside the frame are transparent.
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub fn glow_rgba8(image: &Rgba8Image, u: f32, v: f32, glow: &Glow, sampling: Sampling) -> [u8; 4] {
-    let mut alpha = sample_quad_rgba8(image, u, v, sampling)[3];
+pub fn glow_rgba8(
+    image: &Rgba8Image,
+    frame: TextureRect,
+    u: f32,
+    v: f32,
+    glow: &Glow,
+    sampling: Sampling,
+) -> [u8; 4] {
+    let mut alpha = sample_quad_rgba8(image, frame, u, v, sampling)[3];
     // A zero radius would sample the centre 32 more times for the same alpha.
     if glow.radius_uv.iter().any(|radius| *radius > 0.0) {
         for direction in GLOW_DIRECTIONS {
             for scale in [1.0_f32, 0.5] {
                 let sample_u = u + direction[0] * glow.radius_uv[0] * scale;
                 let sample_v = v + direction[1] * glow.radius_uv[1] * scale;
-                alpha = alpha.max(sample_quad_rgba8(image, sample_u, sample_v, sampling)[3]);
+                alpha = alpha.max(sample_quad_rgba8(image, frame, sample_u, sample_v, sampling)[3]);
             }
         }
     }
@@ -455,11 +531,17 @@ pub fn glow_rgba8(image: &Rgba8Image, u: f32, v: f32, glow: &Glow, sampling: Sam
     ]
 }
 
+/// One texel, or transparent outside the image.
 fn texel(image: &Rgba8Image, x: u32, y: u32) -> [u8; 4] {
+    if x >= image.width() || y >= image.height() {
+        return [0; 4];
+    }
     let index = (y as usize * image.width() as usize + x as usize) * 4;
-    image.pixels()[index..index + 4]
-        .try_into()
-        .expect("validated RGBA image index")
+    image
+        .pixels()
+        .get(index..index + 4)
+        .and_then(|pixel| pixel.try_into().ok())
+        .unwrap_or([0; 4])
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -491,6 +573,8 @@ pub enum Error {
     LimitExceeded,
     InvalidFormat,
     Unavailable,
+    /// A quad's frame does not lie inside its decoded texture.
+    FrameOutOfBounds,
 }
 
 impl fmt::Display for Error {
@@ -508,7 +592,169 @@ mod tests {
         Rgba8Image, add_working_set_bytes,
     };
     use sha2::{Digest, Sha256};
-    use tilewright_scene::{Digest256, Layer, Quad, ResourceId, Sampling, SemanticId};
+    use tilewright_scene::{
+        Digest256, Glow, Layer, Quad, ResourceId, Sampling, SemanticId, TextureRect,
+    };
+
+    fn image(width: u32, height: u32, pixels: &[[u8; 4]]) -> Rgba8Image {
+        let mut bytes = b"ATX1".to_vec();
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend(pixels.iter().flatten());
+        let request = ResourceRequest {
+            id: ResourceId(1),
+            revision: 1,
+            digest: Digest256(Sha256::digest(&bytes).into()),
+            maximum_bytes: bytes.len(),
+        };
+        Rgba8Image::decode(
+            &ResourceBlob::for_request(request, bytes).unwrap(),
+            64,
+            4_096,
+        )
+        .unwrap()
+    }
+
+    /// A 3 × 2 grid of 4 × 4 frames. Each frame has its own colour, a
+    /// distinct border, and a transparent texel in its top-left corner.
+    fn atlas() -> (Rgba8Image, Vec<Rgba8Image>) {
+        let colour = |frame: u32, x: u32, y: u32| -> [u8; 4] {
+            let base = u8::try_from(frame * 40).unwrap();
+            if x == 0 && y == 0 {
+                [0; 4]
+            } else if x == 3 || y == 3 {
+                [255 - base, base, 17, 200]
+            } else {
+                [base, 255 - base, u8::try_from(x * 50 + y * 9).unwrap(), 255]
+            }
+        };
+        let mut atlas = Vec::new();
+        for y in 0..8 {
+            for x in 0..12 {
+                atlas.push(colour(y / 4 * 3 + x / 4, x % 4, y % 4));
+            }
+        }
+        let frames = (0..6)
+            .map(|frame| {
+                let pixels: Vec<[u8; 4]> = (0..16).map(|i| colour(frame, i % 4, i / 4)).collect();
+                image(4, 4, &pixels)
+            })
+            .collect();
+        (image(12, 8, &atlas), frames)
+    }
+
+    fn atlas_frame(index: u32) -> TextureRect {
+        tilewright_scene::SpriteSheet::grid(4, 4, 3, 2)
+            .frame(index)
+            .unwrap()
+    }
+
+    #[test]
+    fn atlas_frames_sample_exactly_like_cropped_textures() {
+        let (atlas, frames) = atlas();
+        let glow = Glow {
+            color: [0.9, 0.5, 0.1, 0.8],
+            radius_uv: [0.4, 0.3],
+        };
+        for (index, cropped) in frames.iter().enumerate() {
+            let frame = atlas_frame(u32::try_from(index).unwrap());
+            let whole = TextureRect::whole(4, 4);
+            // Coordinates span past both edges of the frame, so clamping,
+            // transparency and halos are all compared.
+            for step_v in -8_i16..=40 {
+                for step_u in -8_i16..=40 {
+                    let (u, v) = (f32::from(step_u) / 32.0, f32::from(step_v) / 32.0);
+                    for sampling in [Sampling::Nearest, Sampling::Linear] {
+                        assert_eq!(
+                            super::sample_quad_rgba8(&atlas, frame, u, v, sampling),
+                            super::sample_quad_rgba8(cropped, whole, u, v, sampling),
+                            "frame {index} at ({u}, {v}) {sampling:?}"
+                        );
+                        assert_eq!(
+                            super::sample_frame_rgba8(&atlas, frame, u, v, sampling),
+                            super::sample_rgba8(cropped, u, v, sampling),
+                        );
+                        assert_eq!(
+                            super::glow_rgba8(&atlas, frame, u, v, &glow, sampling),
+                            super::glow_rgba8(cropped, whole, u, v, &glow, sampling),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn linear_sampling_never_blends_neighbouring_frames() {
+        let (atlas, _) = atlas();
+        let frame = atlas_frame(4);
+        // At the frame's right and bottom edges the blend stays on the
+        // frame's own border texels.
+        let border = super::sample_frame_rgba8(&atlas, frame, 1.0, 0.5, Sampling::Linear);
+        assert_eq!(border, super::texel(&atlas, 7, 6));
+        let corner = super::sample_frame_rgba8(&atlas, frame, 1.0, 1.0, Sampling::Linear);
+        assert_eq!(corner, super::texel(&atlas, 7, 7));
+        // The whole-image sample at the same spot blends across frames.
+        let u = 8.0 / 12.0;
+        let across = super::sample_rgba8(&atlas, u, 6.5 / 8.0, Sampling::Linear);
+        assert_ne!(across, border);
+    }
+
+    #[test]
+    fn frames_must_lie_inside_their_texture() {
+        let texture = image(4, 2, &[[1; 4]; 8]);
+        let quad = |frame| Quad {
+            frame,
+            ..rect_quad(0.0, 1.0)
+        };
+        assert_eq!(
+            super::quad_frame(&quad(None), &texture),
+            Ok(TextureRect::whole(4, 2))
+        );
+        let inside = TextureRect {
+            x: 3,
+            y: 1,
+            width: 1,
+            height: 1,
+        };
+        assert_eq!(super::quad_frame(&quad(Some(inside)), &texture), Ok(inside));
+        for outside in [
+            TextureRect { x: 4, ..inside },
+            TextureRect { y: 2, ..inside },
+            TextureRect { width: 2, ..inside },
+            TextureRect {
+                height: 0,
+                ..inside
+            },
+            TextureRect {
+                x: u32::MAX,
+                ..inside
+            },
+        ] {
+            assert_eq!(
+                super::quad_frame(&quad(Some(outside)), &texture),
+                Err(Error::FrameOutOfBounds),
+                "{outside:?}"
+            );
+        }
+        // Sampling an unchecked frame never reads past the image.
+        let wild = TextureRect {
+            x: u32::MAX - 1,
+            y: 7,
+            width: 9,
+            height: 9,
+        };
+        for sampling in [Sampling::Nearest, Sampling::Linear] {
+            assert_eq!(
+                super::sample_frame_rgba8(&texture, wild, 1.0, 1.0, sampling),
+                [0; 4]
+            );
+            assert_eq!(
+                super::sample_frame_rgba8(&texture, TextureRect::whole(0, 0), 0.5, 0.5, sampling),
+                [0; 4]
+            );
+        }
+    }
 
     fn rect_quad(left: f32, right: f32) -> Quad {
         Quad {
@@ -517,6 +763,7 @@ mod tests {
             resource_id: ResourceId(1),
             resource_revision: 1,
             resource_digest: Digest256([1; 32]),
+            frame: None,
             positions: [[left, 0.0], [right, 0.0], [right, 1.0], [left, 1.0]],
             uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             depth: 0,

@@ -7,12 +7,16 @@
 //!
 //! A [`SceneBundle`] is an immutable, validated list of textured [`Quad`]s in
 //! logical pixel space. [`Sprite`] is a convenience for axis-aligned quads.
+//! A quad may draw one [`TextureRect`] frame of an atlas or sprite sheet;
+//! [`SpriteSheet`] numbers the frames of a regular grid.
 
 use std::{collections::HashSet, fmt};
 
 /// Version of the logical scene contract. Version 2 replaced sprites with
-/// arbitrary textured quads carrying effect parameters.
-pub const SCENE_BUNDLE_VERSION: u32 = 2;
+/// arbitrary textured quads carrying effect parameters. Version 3 added
+/// optional texture frames: a quad can draw one rectangle of an atlas or
+/// sprite sheet, with its texture coordinates relative to that rectangle.
+pub const SCENE_BUNDLE_VERSION: u32 = 3;
 
 /// Largest accepted texture-coordinate magnitude. Coordinates outside 0–1
 /// are allowed so geometry can extend past an image (glow halos, bilinear
@@ -51,6 +55,111 @@ pub enum Layer {
     Interface,
 }
 
+/// A rectangle of texels inside a texture: one frame of an atlas or sprite
+/// sheet. `x` and `y` are the top-left texel; the width and height are
+/// positive. Renderers reject a frame that does not lie inside its decoded
+/// texture.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextureRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl TextureRect {
+    /// The rectangle covering a whole `width` × `height` texture.
+    #[must_use]
+    pub const fn whole(width: u32, height: u32) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    /// Whether the rectangle is nonempty and lies inside a `width` ×
+    /// `height` texture.
+    #[must_use]
+    pub fn fits(self, width: u32, height: u32) -> bool {
+        self.width > 0
+            && self.height > 0
+            && u64::from(self.x) + u64::from(self.width) <= u64::from(width)
+            && u64::from(self.y) + u64::from(self.height) <= u64::from(height)
+    }
+}
+
+/// A regular grid of equally sized frames in one texture, such as a
+/// character sheet. Frames are numbered row by row from the top-left frame,
+/// starting at 0.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SpriteSheet {
+    /// Top-left texel of frame 0.
+    pub origin: [u32; 2],
+    /// Width and height of every frame in texels.
+    pub frame_size: [u32; 2],
+    /// Texels between neighbouring frames along each axis.
+    pub spacing: [u32; 2],
+    pub columns: u32,
+    pub rows: u32,
+}
+
+impl SpriteSheet {
+    /// A gapless grid of `columns` × `rows` frames starting at the texture's
+    /// top-left texel.
+    #[must_use]
+    pub const fn grid(frame_width: u32, frame_height: u32, columns: u32, rows: u32) -> Self {
+        Self {
+            origin: [0, 0],
+            frame_size: [frame_width, frame_height],
+            spacing: [0, 0],
+            columns,
+            rows,
+        }
+    }
+
+    /// The number of frames, or `None` if it does not fit in `u32`.
+    #[must_use]
+    pub const fn frame_count(&self) -> Option<u32> {
+        self.columns.checked_mul(self.rows)
+    }
+
+    /// The frame at a column and row, or `None` outside the grid, for an
+    /// empty frame size, or when a coordinate does not fit in `u32`.
+    #[must_use]
+    pub fn frame_at(&self, column: u32, row: u32) -> Option<TextureRect> {
+        if column >= self.columns
+            || row >= self.rows
+            || self.frame_size[0] == 0
+            || self.frame_size[1] == 0
+        {
+            return None;
+        }
+        let offset = |origin: u32, size: u32, spacing: u32, index: u32| {
+            size.checked_add(spacing)?
+                .checked_mul(index)?
+                .checked_add(origin)
+                .filter(|start| start.checked_add(size).is_some())
+        };
+        Some(TextureRect {
+            x: offset(self.origin[0], self.frame_size[0], self.spacing[0], column)?,
+            y: offset(self.origin[1], self.frame_size[1], self.spacing[1], row)?,
+            width: self.frame_size[0],
+            height: self.frame_size[1],
+        })
+    }
+
+    /// Frame `index`, counting row by row; `None` past the last frame.
+    #[must_use]
+    pub fn frame(&self, index: u32) -> Option<TextureRect> {
+        if self.columns == 0 || index >= self.frame_count()? {
+            return None;
+        }
+        self.frame_at(index % self.columns, index / self.columns)
+    }
+}
+
 /// An axis-aligned textured rectangle with a positive width and height.
 /// Converted into a [`Quad`] whose corners run top-left, top-right,
 /// bottom-right, bottom-left.
@@ -60,6 +169,8 @@ pub struct Sprite {
     pub resource_id: ResourceId,
     pub resource_revision: u64,
     pub resource_digest: Digest256,
+    /// The atlas frame the sprite shows; `None` shows the whole texture.
+    pub frame: Option<TextureRect>,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -92,9 +203,15 @@ pub struct Quad {
     pub resource_id: ResourceId,
     pub resource_revision: u64,
     pub resource_digest: Digest256,
+    /// The atlas or sprite-sheet frame the quad samples; `None` samples the
+    /// whole texture. Texture coordinates are relative to the frame, and
+    /// samples outside it are transparent: no texel of a neighbouring frame
+    /// is ever read, with either sampling.
+    pub frame: Option<TextureRect>,
     /// Corner positions in logical pixels.
     pub positions: [[f32; 2]; 4],
-    /// Corner texture coordinates.
+    /// Corner texture coordinates, relative to the frame (or the whole
+    /// texture): 0–1 spans it, and samples outside 0–1 are transparent.
     pub uvs: [[f32; 2]; 4],
     pub depth: i16,
     pub painter_order: u32,
@@ -122,6 +239,7 @@ impl From<Sprite> for Quad {
             resource_id: sprite.resource_id,
             resource_revision: sprite.resource_revision,
             resource_digest: sprite.resource_digest,
+            frame: sprite.frame,
             positions: [[left, top], [right, top], [right, bottom], [left, bottom]],
             uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             depth: sprite.depth,
@@ -392,6 +510,11 @@ fn validate_quad(quad: &Quad, maximum_dimension: u32) -> Result<(), Error> {
                 .iter()
                 .all(|radius| radius.is_finite() && (0.0..=1.0).contains(radius))
     });
+    // A frame must fit the largest texture any renderer accepts; renderers
+    // check it against the decoded texture itself.
+    let frame_ok = quad
+        .frame
+        .is_none_or(|frame| frame.fits(maximum_dimension, maximum_dimension));
     if quad.semantic_id.0 == 0
         || quad.resource_id.0 == 0
         || quad.resource_revision == 0
@@ -402,6 +525,7 @@ fn validate_quad(quad: &Quad, maximum_dimension: u32) -> Result<(), Error> {
         || !quad.grayscale.is_finite()
         || !(0.0..=1.0).contains(&quad.grayscale)
         || !glow_ok
+        || !frame_ok
     {
         return Err(Error::InvalidValue);
     }
@@ -475,7 +599,7 @@ fn valid_color(color: [f32; 4]) -> bool {
 mod tests {
     use super::{
         Digest256, Glow, Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId,
-        Sprite, Viewport,
+        Sprite, SpriteSheet, TextureRect, Viewport,
     };
 
     fn sprite(order: u32, depth: i16) -> Sprite {
@@ -484,6 +608,7 @@ mod tests {
             resource_id: ResourceId(1),
             resource_revision: 1,
             resource_digest: Digest256([1; 32]),
+            frame: None,
             x: 0.0,
             y: 0.0,
             width: 1.0,
@@ -515,7 +640,7 @@ mod tests {
             SceneLimits::default(),
         )
         .unwrap();
-        assert_eq!(scene.version(), 2);
+        assert_eq!(scene.version(), 3);
         assert_eq!(scene.quads()[0].painter_order, 1);
         assert!(scene.quads()[0].aligned_rect().is_some());
     }
@@ -771,5 +896,125 @@ mod tests {
         let mut quad = Quad::from(sprite(0, 0));
         quad.positions[1][1] = 0.5;
         assert!(quad.aligned_rect().is_none());
+    }
+
+    #[test]
+    fn frames_are_nonempty_and_fit_the_largest_texture() {
+        let framed = |frame| Quad {
+            frame: Some(frame),
+            ..Quad::from(sprite(0, 0))
+        };
+        let scene = |quad| {
+            SceneBundle::from_quads(1, 0, viewport(), [0.0; 4], [quad], SceneLimits::default())
+        };
+        let rect = |x, y, width, height| TextureRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        assert!(scene(framed(rect(8_191, 0, 1, 1))).is_ok());
+        assert!(scene(framed(rect(0, 0, 8_192, 8_192))).is_ok());
+        for invalid in [
+            rect(0, 0, 0, 1),
+            rect(0, 0, 1, 0),
+            rect(8_192, 0, 1, 1),
+            rect(0, 8_191, 1, 2),
+            rect(u32::MAX, 0, 1, 1),
+            rect(0, 1, 1, u32::MAX),
+        ] {
+            assert_eq!(
+                scene(framed(invalid)),
+                Err(super::Error::InvalidValue),
+                "{invalid:?}"
+            );
+        }
+        // Sprites carry their frame into the quad.
+        let sprite = Sprite {
+            frame: Some(rect(2, 3, 4, 5)),
+            ..sprite(0, 0)
+        };
+        assert_eq!(Quad::from(sprite).frame, Some(rect(2, 3, 4, 5)));
+    }
+
+    #[test]
+    fn texture_rects_fit_inside_their_texture() {
+        let rect = TextureRect {
+            x: 60,
+            y: 0,
+            width: 4,
+            height: 64,
+        };
+        assert!(rect.fits(64, 64));
+        assert!(!rect.fits(63, 64));
+        assert!(!rect.fits(64, 63));
+        assert!(TextureRect::whole(64, 64).fits(64, 64));
+        assert!(!TextureRect::whole(0, 64).fits(64, 64));
+        let huge = TextureRect {
+            x: u32::MAX,
+            y: 0,
+            width: u32::MAX,
+            height: 1,
+        };
+        assert!(!huge.fits(u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn sprite_sheets_number_frames_row_by_row() {
+        let sheet = SpriteSheet::grid(64, 64, 13, 21);
+        assert_eq!(sheet.frame_count(), Some(273));
+        assert_eq!(
+            sheet.frame(0),
+            Some(TextureRect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64
+            })
+        );
+        assert_eq!(
+            sheet.frame(14),
+            Some(TextureRect {
+                x: 64,
+                y: 64,
+                width: 64,
+                height: 64
+            })
+        );
+        assert_eq!(sheet.frame(272), sheet.frame_at(12, 20));
+        assert_eq!(sheet.frame(273), None);
+        assert_eq!(sheet.frame_at(13, 0), None);
+        assert_eq!(sheet.frame_at(0, 21), None);
+        let spaced = SpriteSheet {
+            origin: [2, 3],
+            frame_size: [8, 10],
+            spacing: [1, 2],
+            columns: 4,
+            rows: 2,
+        };
+        assert_eq!(
+            spaced.frame(5),
+            Some(TextureRect {
+                x: 2 + 9,
+                y: 3 + 12,
+                width: 8,
+                height: 10
+            })
+        );
+        // Empty frames, empty grids and coordinates past u32 have no frames.
+        assert_eq!(SpriteSheet::grid(0, 8, 2, 2).frame(0), None);
+        assert_eq!(SpriteSheet::grid(8, 8, 0, 2).frame(0), None);
+        assert_eq!(SpriteSheet::grid(8, 8, u32::MAX, 2).frame_count(), None);
+        assert_eq!(SpriteSheet::grid(u32::MAX, 8, 2, 1).frame(1), None);
+        let edge = SpriteSheet {
+            origin: [u32::MAX - 8, 0],
+            ..SpriteSheet::grid(8, 8, 1, 1)
+        };
+        assert_eq!(edge.frame(0).map(|frame| frame.x), Some(u32::MAX - 8));
+        let past = SpriteSheet {
+            origin: [u32::MAX - 7, 0],
+            ..SpriteSheet::grid(8, 8, 1, 1)
+        };
+        assert_eq!(past.frame(0), None);
     }
 }

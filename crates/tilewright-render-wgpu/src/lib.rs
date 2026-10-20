@@ -17,10 +17,10 @@ use tilewright_render_api::{
 use tilewright_render_resources::{
     DEFAULT_MAXIMUM_RESOURCE_BYTES, DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES,
     MAXIMUM_SCENE_TEXTURES, ResourceBlob, ResourceProvider, ResourceRequest, Rgba8Image,
-    add_working_set_bytes, for_each_quad_pixel, sample_quad_rgba8, shade_quad_rgba8,
-    subpixel_position,
+    add_working_set_bytes, for_each_quad_pixel, frame_in_image, sample_quad_rgba8,
+    shade_quad_rgba8, subpixel_position,
 };
-use tilewright_scene::{Digest256, Layer, Quad, ResourceId, Sampling, SceneBundle};
+use tilewright_scene::{Digest256, Layer, Quad, ResourceId, Sampling, SceneBundle, TextureRect};
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// The cache holds at most one scene's distinct textures.
@@ -78,8 +78,7 @@ struct OffscreenTarget {
 
 struct TextureCacheEntry {
     image: Arc<Rgba8Image>,
-    nearest: wgpu::BindGroup,
-    linear: wgpu::BindGroup,
+    binding: wgpu::BindGroup,
 }
 
 struct SurfaceDepthTarget {
@@ -176,7 +175,7 @@ impl WgpuRenderer {
         // resource is loaded or the cache changes.
         self.check_vertex_stream(request.scene)?;
         let prepared = self.prepare_sprites(request.scene, request.resources.as_ref())?;
-        let vertices = vertices(request.scene);
+        let vertices = vertices(request.scene, &prepared)?;
         let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
         let pipeline = self.ensure_surface_pipeline(configuration.format);
         let mut encoder = self
@@ -386,7 +385,7 @@ impl WgpuRenderer {
         // resource is loaded or the cache changes.
         self.check_vertex_stream(scene)?;
         let prepared = self.prepare_sprites(scene, resources)?;
-        let vertices = vertices(scene);
+        let vertices = vertices(scene, &prepared)?;
         let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
         let allocated = self.ensure_offscreen_target()?;
         let target = self
@@ -595,6 +594,8 @@ impl WgpuRenderer {
             staged_bytes += bytes;
             decoded.push((key, image));
         }
+        // Every frame must lie inside its texture before anything is uploaded.
+        let frames = self.check_frames(scene, &decoded)?;
         // The entry bound works the same way.
         if texture_cache_must_evict(
             self.textures.len(),
@@ -609,26 +610,55 @@ impl WgpuRenderer {
             uploads.insert(key, self.upload_texture(key, image)?);
         }
         let mut prepared = Vec::with_capacity(scene.quads().len());
-        for quad in scene.quads() {
+        for (quad, frame) in scene.quads().iter().zip(frames) {
             let key = key_of(quad);
             let cached = self
                 .textures
                 .get(&key)
                 .ok_or_else(|| Error::Internal("texture cache insertion failed".to_owned()))?;
-            let bind_group = match quad.sampling {
-                Sampling::Nearest => cached.nearest.clone(),
-                Sampling::Linear => cached.linear.clone(),
-            };
             prepared.push(PreparedSprite {
-                bind_group,
+                bind_group: cached.binding.clone(),
                 image: cached.image.clone(),
                 // The first quad naming a newly loaded texture carries its upload.
                 uploaded_bytes: uploads.remove(&key).unwrap_or(0),
                 key,
-                sampling: quad.sampling,
+                frame,
             });
         }
         Ok(prepared)
+    }
+
+    /// Resolves every quad's frame against its cached or newly decoded
+    /// texture, rejecting a frame that does not lie inside it.
+    fn check_frames(
+        &self,
+        scene: &SceneBundle,
+        decoded: &[(TextureKey, Arc<Rgba8Image>)],
+    ) -> Result<Vec<TextureRect>, Error> {
+        let sizes = decoded
+            .iter()
+            .map(|(key, image)| (*key, (image.width(), image.height())))
+            .collect::<HashMap<_, _>>();
+        scene
+            .quads()
+            .iter()
+            .map(|quad| {
+                let key = (
+                    quad.resource_id,
+                    quad.resource_revision,
+                    quad.resource_digest,
+                );
+                let (width, height) = match (sizes.get(&key), self.textures.get(&key)) {
+                    (Some(size), _) => *size,
+                    (None, Some(cached)) => (cached.image.width(), cached.image.height()),
+                    (None, None) => {
+                        return Err(Error::Internal("texture missing after loading".to_owned()));
+                    }
+                };
+                frame_in_image(quad.frame, width, height)
+                    .map_err(|error| Error::Resource(error.to_string()))
+            })
+            .collect()
     }
 
     /// Drops cached textures that `used` does not name.
@@ -673,31 +703,14 @@ impl WgpuRenderer {
             size,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let nearest = create_texture_binding(
-            &self.device,
-            &self.texture_layout,
-            &view,
-            wgpu::FilterMode::Nearest,
-        );
-        let linear = create_texture_binding(
-            &self.device,
-            &self.texture_layout,
-            &view,
-            wgpu::FilterMode::Linear,
-        );
+        let binding = create_texture_binding(&self.device, &self.texture_layout, &view);
         let uploaded_bytes = image.pixels().len() as u64;
         self.texture_bytes = self
             .texture_bytes
             .checked_add(uploaded_bytes)
             .ok_or(Error::LimitExceeded)?;
-        self.textures.insert(
-            key,
-            TextureCacheEntry {
-                image,
-                nearest,
-                linear,
-            },
-        );
+        self.textures
+            .insert(key, TextureCacheEntry { image, binding });
         Ok(uploaded_bytes)
     }
 }
@@ -816,24 +829,17 @@ fn initialize_gpu(
 fn create_texture_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Tilewright sprite texture layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            // The shader reads texels exactly and filters them itself.
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
             },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
+            count: None,
+        }],
     })
 }
 
@@ -841,30 +847,14 @@ fn create_texture_binding(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     view: &wgpu::TextureView,
-    filter: wgpu::FilterMode,
 ) -> wgpu::BindGroup {
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("Tilewright sprite sampler"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        mag_filter: filter,
-        min_filter: filter,
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-        ..Default::default()
-    });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Tilewright sprite texture binding"),
         layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-        ],
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(view),
+        }],
     })
 }
 
@@ -978,15 +968,12 @@ fn encode_scene(
     });
     pass.set_pipeline(pipeline);
     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-    // Consecutive quads that sample the same texture the same way share one
-    // draw call; order is unchanged.
+    // Consecutive quads that sample the same texture share one draw call,
+    // whatever their frames and sampling; order is unchanged.
     let mut start = 0_usize;
     while start < sprites.len() {
         let mut end = start + 1;
-        while end < sprites.len()
-            && sprites[end].key == sprites[start].key
-            && sprites[end].sampling == sprites[start].sampling
-        {
+        while end < sprites.len() && sprites[end].key == sprites[start].key {
             end += 1;
         }
         let first = u32::try_from(start)
@@ -1014,13 +1001,22 @@ struct Vertex {
     grayscale: f32,
     glow_color: [f32; 4],
     glow_radius: [f32; 2],
-    mode: f32,
+    /// [`FLAG_GLOW`] and [`FLAG_LINEAR`].
+    flags: u32,
+    /// The sampled frame's texel x, y, width and height.
+    frame: [u16; 4],
 }
 
+/// The quad draws only its glow halo.
+const FLAG_GLOW: u32 = 1;
+/// The quad filters linearly within its frame.
+const FLAG_LINEAR: u32 = 2;
+
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
         0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32,
-        4 => Float32, 5 => Float32x4, 6 => Float32x2, 7 => Float32
+        4 => Float32, 5 => Float32x4, 6 => Float32x2, 7 => Uint32,
+        8 => Uint16x4
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -1037,7 +1033,8 @@ struct PreparedSprite {
     image: Arc<Rgba8Image>,
     uploaded_bytes: u64,
     key: TextureKey,
-    sampling: Sampling,
+    /// The quad's frame, checked against its texture.
+    frame: TextureRect,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1055,15 +1052,34 @@ fn duration_micros(duration: std::time::Duration) -> u64 {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn vertices(scene: &SceneBundle) -> Vec<Vertex> {
+fn vertices(scene: &SceneBundle, prepared: &[PreparedSprite]) -> Result<Vec<Vertex>, Error> {
     let viewport = scene.viewport();
     let mut output = Vec::with_capacity(scene.quads().len().saturating_mul(6));
-    for quad in scene.quads() {
+    for (quad, prepared) in scene.quads().iter().zip(prepared) {
         let z = depth_value(quad);
         let effect = effect_amount(quad, scene.clock_millis());
-        let (glow_color, glow_radius, mode) = quad.glow.map_or(([0.0; 4], [0.0; 2], 0.0), |glow| {
-            (glow.color, glow.radius_uv, 1.0)
-        });
+        let (glow_color, glow_radius, glow_flag) =
+            quad.glow.map_or(([0.0; 4], [0.0; 2], 0), |glow| {
+                (glow.color, glow.radius_uv, FLAG_GLOW)
+            });
+        let flags = glow_flag
+            | match quad.sampling {
+                Sampling::Nearest => 0,
+                Sampling::Linear => FLAG_LINEAR,
+            };
+        // Frames lie inside textures no larger than the device's 2D limit,
+        // which never exceeds 16 bits.
+        let frame = [
+            prepared.frame.x,
+            prepared.frame.y,
+            prepared.frame.width,
+            prepared.frame.height,
+        ]
+        .map(u16::try_from);
+        let [Ok(left), Ok(top), Ok(width), Ok(height)] = frame else {
+            return Err(Error::LimitExceeded);
+        };
+        let frame = [left, top, width, height];
         let vertex = |corner: usize| {
             let [x, y] = quad.positions[corner].map(subpixel_position);
             Vertex {
@@ -1078,7 +1094,8 @@ fn vertices(scene: &SceneBundle) -> Vec<Vertex> {
                 grayscale: quad.grayscale,
                 glow_color,
                 glow_radius,
-                mode,
+                flags,
+                frame,
             }
         };
         output.extend_from_slice(&[
@@ -1090,7 +1107,7 @@ fn vertices(scene: &SceneBundle) -> Vec<Vertex> {
             vertex(3),
         ]);
     }
-    output
+    Ok(output)
 }
 
 /// Whether decoding `incoming` more bytes beside `cached` and `staged` ones
@@ -1203,11 +1220,13 @@ fn semantic_planes(
             &mut depth,
             &mut coverage,
             &prepared.image,
+            prepared.frame,
         );
     }
     Ok((semantic, depth, coverage))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mark_quad(
     width: u32,
     height: u32,
@@ -1216,9 +1235,14 @@ fn mark_quad(
     depth: &mut [i16],
     coverage: &mut [u8],
     image: &Rgba8Image,
+    frame: TextureRect,
 ) {
     for_each_quad_pixel(quad, width, height, |_x, _y, index, u, v| {
-        let alpha = shade_quad_rgba8(sample_quad_rgba8(image, u, v, quad.sampling), quad, 0)[3];
+        let alpha = shade_quad_rgba8(
+            sample_quad_rgba8(image, frame, u, v, quad.sampling),
+            quad,
+            0,
+        )[3];
         if alpha != 0 {
             semantic[index] = quad.semantic_id.0;
             depth[index] = quad.depth;
@@ -1232,9 +1256,108 @@ mod tests {
     use super::WgpuRenderer;
     use tilewright_render_api::{RenderRequest, Renderer};
     use tilewright_render_testkit::{
-        ReferenceRenderer, iso_world_scene, offscreen_target, synthetic_provider, synthetic_scene,
-        top_down_world_scene, world_provider,
+        ReferenceRenderer, atlas_provider, atlas_scene, iso_world_scene, offscreen_target,
+        synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
     };
+
+    /// Renders a scene on the GPU and the reference, requiring exact
+    /// semantic, depth and coverage planes and RGBA within one step.
+    fn assert_matches_reference(
+        scene: &tilewright_scene::SceneBundle,
+        resources: &std::sync::Arc<tilewright_render_testkit::FakeResourceProvider>,
+    ) -> Option<tilewright_render_api::FrameOutput> {
+        let viewport = scene.viewport();
+        let target = offscreen_target(viewport.width, viewport.height);
+        let Ok(mut renderer) = WgpuRenderer::new(target) else {
+            eprintln!("skipping GPU comparison: no supported adapter");
+            return None;
+        };
+        let request = RenderRequest {
+            scene,
+            resources: resources.clone(),
+        };
+        let frame = renderer.render(request.clone()).unwrap();
+        let reference = ReferenceRenderer::new(target)
+            .unwrap()
+            .render(request)
+            .unwrap();
+        assert_eq!(frame.semantic_ids, reference.semantic_ids);
+        assert_eq!(frame.depth, reference.depth);
+        assert_eq!(frame.coverage, reference.coverage);
+        let (index, difference) = frame
+            .rgba8
+            .iter()
+            .zip(&reference.rgba8)
+            .map(|(actual, expected)| actual.abs_diff(*expected))
+            .enumerate()
+            .max_by_key(|(_, difference)| *difference)
+            .unwrap_or((0, 0));
+        assert!(
+            difference <= 1,
+            "{}x{} scene differs from the reference by {difference} at byte {index}: GPU={}, reference={}",
+            viewport.width,
+            viewport.height,
+            frame.rgba8[index],
+            reference.rgba8[index],
+        );
+        Some(frame)
+    }
+
+    #[test]
+    fn atlas_frames_match_the_reference_when_a_gpu_adapter_is_available() {
+        let scene = atlas_scene(112, 64).unwrap();
+        let Some(frame) = assert_matches_reference(&scene, &atlas_provider().unwrap()) else {
+            return;
+        };
+        // One atlas texture is requested once for every layer and tile.
+        assert_eq!(frame.metrics.resource_requests, 1);
+        assert_eq!(frame.metrics.uploaded_bytes, 64 * 64 * 4);
+    }
+
+    #[test]
+    fn frames_outside_their_texture_fail_before_any_upload() {
+        use tilewright_scene::{SceneBundle, SceneLimits, TextureRect};
+        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(112, 64)) else {
+            eprintln!("skipping GPU frame test: no supported adapter");
+            return;
+        };
+        let scene = atlas_scene(112, 64).unwrap();
+        let mut quads = scene.quads().to_vec();
+        quads[3].frame = Some(TextureRect {
+            x: 63,
+            y: 63,
+            width: 2,
+            height: 1,
+        });
+        let outside = SceneBundle::from_quads(
+            scene.revision(),
+            scene.clock_millis(),
+            scene.viewport(),
+            scene.clear_color(),
+            quads,
+            SceneLimits::default(),
+        )
+        .unwrap();
+        let error = renderer
+            .render(RenderRequest {
+                scene: &outside,
+                resources: atlas_provider().unwrap(),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&error, tilewright_render_api::Error::Resource(message) if message.contains("FrameOutOfBounds")),
+            "{error:?}"
+        );
+        assert!(renderer.textures.is_empty());
+        // The valid scene still renders on the same renderer.
+        let frame = renderer
+            .render(RenderRequest {
+                scene: &scene,
+                resources: atlas_provider().unwrap(),
+            })
+            .unwrap();
+        assert_eq!(frame.metrics.resource_requests, 1);
+    }
 
     #[test]
     fn oversized_vertex_streams_fail_before_loading_resources() {
@@ -1255,14 +1378,15 @@ mod tests {
             eprintln!("skipping GPU vertex limit test: no supported adapter");
             return;
         };
-        // One quad more than a 256 MiB buffer of 432-byte quads holds.
-        let count = (256_u32 << 20) / 432 + 1;
+        // One quad more than a 256 MiB buffer of 480-byte quads holds.
+        let count = (256_u32 << 20) / 480 + 1;
         let quads = (0..count).map(|index| Quad {
             semantic_id: SemanticId(index + 1),
             part: 0,
             resource_id: ResourceId(1),
             resource_revision: 1,
             resource_digest: Digest256([1; 32]),
+            frame: None,
             positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             depth: 0,
@@ -1300,12 +1424,12 @@ mod tests {
     fn vertex_buffers_stay_within_the_device_buffer_limit() {
         use super::vertex_buffer_capacity;
         let limit = 256 << 20;
-        // 700,000 quads of six 72-byte vertices need about 302 MiB.
-        assert!(vertex_buffer_capacity(700_000 * 432, limit).is_err());
+        // 600,000 quads of six 80-byte vertices need about 275 MiB.
+        assert!(vertex_buffer_capacity(600_000 * 480, limit).is_err());
         // Rounding up to a power of two never passes the device limit.
         assert_eq!(vertex_buffer_capacity(150 << 20, limit), Ok(limit));
         assert_eq!(vertex_buffer_capacity(100 << 20, limit), Ok(128 << 20));
-        assert_eq!(vertex_buffer_capacity(432, limit), Ok(512));
+        assert_eq!(vertex_buffer_capacity(480, limit), Ok(512));
         assert_eq!(vertex_buffer_capacity(limit, limit + 3), Ok(limit));
     }
 
@@ -1366,14 +1490,12 @@ mod tests {
         assert_eq!(render(&mut renderer).resource_requests, 0);
         // A full cache of unused textures is evicted, but the scene's own
         // texture stays cached and is not requested again.
-        let unused = renderer.textures.values().next().map(|entry| {
-            (
-                entry.image.clone(),
-                entry.nearest.clone(),
-                entry.linear.clone(),
-            )
-        });
-        let (image, nearest, linear) = unused.unwrap();
+        let unused = renderer
+            .textures
+            .values()
+            .next()
+            .map(|entry| (entry.image.clone(), entry.binding.clone()));
+        let (image, binding) = unused.unwrap();
         for index in 0..super::MAXIMUM_CACHED_TEXTURES as u64 {
             renderer.textures.insert(
                 (
@@ -1383,8 +1505,7 @@ mod tests {
                 ),
                 super::TextureCacheEntry {
                     image: image.clone(),
-                    nearest: nearest.clone(),
-                    linear: linear.clone(),
+                    binding: binding.clone(),
                 },
             );
         }
@@ -1484,37 +1605,9 @@ mod tests {
             iso_world_scene(192, 128).unwrap(),
             top_down_world_scene(96, 64).unwrap(),
         ] {
-            let viewport = scene.viewport();
-            let target = offscreen_target(viewport.width, viewport.height);
-            let Ok(mut renderer) = WgpuRenderer::new(target) else {
-                eprintln!("skipping GPU world test: no supported adapter");
+            if assert_matches_reference(&scene, &world_provider().unwrap()).is_none() {
                 return;
-            };
-            let request = RenderRequest {
-                scene: &scene,
-                resources: world_provider().unwrap(),
-            };
-            let frame = renderer.render(request.clone()).unwrap();
-            let reference = ReferenceRenderer::new(target)
-                .unwrap()
-                .render(request)
-                .unwrap();
-            assert_eq!(frame.semantic_ids, reference.semantic_ids);
-            assert_eq!(frame.depth, reference.depth);
-            assert_eq!(frame.coverage, reference.coverage);
-            let maximum = frame
-                .rgba8
-                .iter()
-                .zip(&reference.rgba8)
-                .map(|(actual, expected)| actual.abs_diff(*expected))
-                .max()
-                .unwrap_or(0);
-            assert!(
-                maximum <= 1,
-                "{}x{} world scene differs from the reference by {maximum}",
-                viewport.width,
-                viewport.height,
-            );
+            }
         }
     }
 
@@ -1534,6 +1627,7 @@ mod tests {
             resource_id: ResourceId(1),
             resource_revision: 1,
             resource_digest: synthetic_digest(),
+            frame: None,
             positions: [[0.5, 0.0], [3.5, 1.0], [3.5, 6.0], [0.5, 5.0]],
             uvs: [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]],
             depth: 0,
