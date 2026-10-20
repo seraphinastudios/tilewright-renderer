@@ -1,6 +1,6 @@
 [package]
 name = "tilewright-render-wgpu"
-description = "Private Vulkan and D3D12 wgpu renderer for Tilewright"
+description = "Private Vulkan, D3D12, WebGPU and WebGL2 wgpu renderer for Tilewright"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,8 +14,24 @@ tilewright-render-api.workspace = true
 tilewright-render-resources.workspace = true
 tilewright-scene.workspace = true
 bytemuck.workspace = true
-pollster.workspace = true
 wgpu.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster.workspace = true
+
+# Browsers: WebGPU, with WebGL2 where WebGPU is unavailable.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = ["HtmlCanvasElement", "OffscreenCanvas"] }
+wgpu = { workspace = true, features = ["webgpu"] }
+
+[features]
+default = ["webgl"]
+# WebGL2 for browsers without WebGPU. It affects only wasm32 builds, where
+# WebGPU is always available; a WebGPU-only bundle is far smaller.
+webgl = ["wgpu/webgl"]
 
 [dev-dependencies]
 tilewright-render-testkit.workspace = true

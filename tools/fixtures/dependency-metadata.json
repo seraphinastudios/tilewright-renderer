@@ -16,7 +16,11 @@
       "dependencies":[
         {"name":"bytemuck","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null},
         {"name":"naga","source":"registry+https://github.com/rust-lang/crates.io-index","kind":"dev"},
+        {"name":"js-sys","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null,"target":"cfg(target_arch = \"wasm32\")"},
         {"name":"pollster","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null},
+        {"name":"wasm-bindgen","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null,"target":"cfg(target_arch = \"wasm32\")"},
+        {"name":"wasm-bindgen-futures","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null,"target":"cfg(target_arch = \"wasm32\")"},
+        {"name":"web-sys","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null,"target":"cfg(target_arch = \"wasm32\")"},
         {"name":"wgpu","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null}
       ]
     },
@@ -43,6 +47,10 @@
     {"id":"registry+https://github.com/rust-lang/crates.io-index#serde_json@1.0.154","name":"serde_json","version":"1.0.154","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#tempfile@3.28.0","name":"tempfile","version":"3.28.0","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#wgpu@30.2.0","name":"wgpu","version":"30.2.0","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#js-sys@0.3.104","name":"js-sys","version":"0.3.104","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#wasm-bindgen@0.2.127","name":"wasm-bindgen","version":"0.2.127","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#wasm-bindgen-futures@0.4.77","name":"wasm-bindgen-futures","version":"0.4.77","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#web-sys@0.3.104","name":"web-sys","version":"0.3.104","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#transitive@2.0.0","name":"transitive","version":"2.0.0","license":"Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]}
   ],
   "workspace_members": [

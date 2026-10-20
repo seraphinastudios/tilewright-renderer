@@ -7,11 +7,19 @@ use std::{fmt, sync::Arc};
 use tilewright_render_resources::ResourceProvider;
 use tilewright_scene::SceneBundle;
 
+/// Which GPU API a renderer may use. Explicit choices never fall back to
+/// another API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendPreference {
+    /// Vulkan or Direct3D 12 natively; WebGPU in browsers that support it,
+    /// and WebGL2 otherwise.
     Automatic,
     Vulkan,
     Direct3D12,
+    /// Browser WebGPU.
+    WebGpu,
+    /// Browser WebGL2.
+    WebGl2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

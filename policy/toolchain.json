@@ -17,5 +17,13 @@
     "syft_linux_amd64_sha256": "bf7b29ff57f06da30918266a0e1c2885a8f99784798d1bdb1628886aa015d788",
     "trivy": "0.73.0",
     "trivy_linux_amd64_sha256": "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+  },
+  "web": {
+    "target": "wasm32-unknown-unknown",
+    "node": "24.18.1",
+    "setup_node_revision": "949feb2413d6458794dcd2491c4babbbce0c15c1",
+    "wasm_bindgen_cli": "0.2.127",
+    "wasm_bindgen_cli_linux_amd64_sha256": "61d4a7dc85acfa0d2354ccc0b8361928c7e52a746d17f28ebaa795ed3dc1614a",
+    "browser": "the runner's Google Chrome through playwright-core; no browser download"
   }
 }
