@@ -192,5 +192,5 @@ Chromium.
 | Any developer machine | Chrome, SwiftShader | Chrome, SwiftShader |
 
 Both backends are required. `TILEWRIGHT_REQUIRE_WEBGPU=0` skips WebGPU,
-rather than failing, on a browser that offers no WebGPU adapter. GPU
-hardware runs are a benchmarking concern (see the frame-time harness).
+rather than failing, on a browser that offers no WebGPU adapter. The
+tests check correctness, not speed, so they do not need a GPU.
