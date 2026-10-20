@@ -171,19 +171,26 @@ Chromium with `playwright-core`. For each of WebGL2 and WebGPU it:
 
 The browser is never downloaded. `TILEWRIGHT_CHROMIUM` names a Chromium
 executable; otherwise `PLAYWRIGHT_BROWSERS_PATH` selects Playwright's
-installed browsers; otherwise the installed Google Chrome is used. The tests
-pass `--enable-unsafe-webgpu --ignore-gpu-blocklist --enable-gpu`. Headless
-Chromium serves WebGPU through SwiftShader, its CPU implementation, whether
-or not a GPU is present; without GPU compositing, presenting to a WebGPU
-canvas destroys the device in headless mode.
+installed browsers; otherwise the installed Google Chrome is used.
 
-What runs where:
+The tests run WebGPU and WebGL2 on SwiftShader, Chromium's CPU
+implementation, on every machine:
+
+```text
+--enable-unsafe-webgpu --enable-features=Vulkan --use-vulkan=swiftshader
+--use-angle=swiftshader --use-webgpu-adapter=swiftshader
+```
+
+So a developer machine renders exactly as the GPU-less CI runner does.
+SwiftShader has to back Vulkan and ANGLE as well as WebGPU: with any other
+compositor, presenting to a WebGPU canvas destroys the device in headless
+Chromium.
 
 | Where | WebGL2 | WebGPU |
 | --- | --- | --- |
-| CI (GitHub `ubuntu-24.04`, no GPU, `Renderer validation`) | Chrome, SwiftShader | Chrome, SwiftShader; required |
-| A developer machine with a GPU | Chrome on the GPU through ANGLE | Chrome, SwiftShader |
+| CI (GitHub `ubuntu-24.04`, no GPU, inside `Renderer validation`) | Chrome, SwiftShader | Chrome, SwiftShader |
+| Any developer machine | Chrome, SwiftShader | Chrome, SwiftShader |
 
-`tools/validate-web.sh` requires the WebGPU test to run
-(`TILEWRIGHT_REQUIRE_WEBGPU=1`); set it to `0` to skip WebGPU on a browser
-without an adapter.
+Both backends are required. `TILEWRIGHT_REQUIRE_WEBGPU=0` skips WebGPU,
+rather than failing, on a browser that offers no WebGPU adapter. GPU
+hardware runs are a benchmarking concern (see the frame-time harness).

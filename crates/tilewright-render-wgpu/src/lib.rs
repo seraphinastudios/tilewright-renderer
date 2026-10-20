@@ -1151,14 +1151,37 @@ impl MapFuture {
     }
 }
 
-/// Resolves in the browser's next task, through the global `setTimeout`,
-/// which windows and workers both provide.
+/// Resolves in the browser's next task. A `MessageChannel` message is a
+/// task that browsers never delay, unlike nested `setTimeout` calls, which
+/// they clamp to 4 ms; both exist in windows and workers.
 #[cfg(target_arch = "wasm32")]
 async fn next_task() {
     use wasm_bindgen::{JsCast, JsValue};
+    let property =
+        |target: &JsValue, name: &str| js_sys::Reflect::get(target, &JsValue::from_str(name));
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         let global = js_sys::global();
-        let scheduled = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+        let posted = property(&global, "MessageChannel")
+            .ok()
+            .and_then(|constructor| constructor.dyn_into::<js_sys::Function>().ok())
+            .and_then(|constructor| {
+                js_sys::Reflect::construct(&constructor, &js_sys::Array::new()).ok()
+            })
+            .and_then(|channel| {
+                let receiver = property(&channel, "port1").ok()?;
+                let sender = property(&channel, "port2").ok()?;
+                js_sys::Reflect::set(&receiver, &JsValue::from_str("onmessage"), &resolve).ok()?;
+                let post = property(&sender, "postMessage")
+                    .ok()?
+                    .dyn_into::<js_sys::Function>()
+                    .ok()?;
+                post.call1(&sender, &JsValue::UNDEFINED).ok()
+            })
+            .is_some();
+        if posted {
+            return;
+        }
+        let scheduled = property(&global, "setTimeout")
             .ok()
             .and_then(|function| function.dyn_into::<js_sys::Function>().ok())
             .is_some_and(|set_timeout| {

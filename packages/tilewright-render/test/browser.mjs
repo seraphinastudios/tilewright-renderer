@@ -1,28 +1,41 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-// Launches headless Chromium for the browser tests. Playwright's own
-// browsers are used when PLAYWRIGHT_BROWSERS_PATH is set; otherwise
-// TILEWRIGHT_CHROMIUM names an executable, and by default the installed
-// Google Chrome is used. Nothing is downloaded.
+// Launches headless Chromium for the browser tests. TILEWRIGHT_CHROMIUM
+// names an executable; otherwise Playwright's own browsers are used when
+// PLAYWRIGHT_BROWSERS_PATH is set, and by default the installed Google
+// Chrome. Nothing is downloaded.
 
 import { chromium } from 'playwright-core';
 
 /**
- * Flags that expose WebGPU in headless Chromium, where SwiftShader serves
- * WebGPU and WebGL2 whether or not a GPU is present. Without GPU
- * compositing (`--enable-gpu`), presenting to a WebGPU canvas destroys the
+ * Flags that run WebGPU and WebGL2 on SwiftShader, Chromium's CPU
+ * implementation, whether or not the machine has a GPU, so every machine
+ * renders the same way as CI. SwiftShader must also back Vulkan and ANGLE:
+ * with any other compositor, presenting to a WebGPU canvas destroys the
  * device in headless mode.
  */
-export const CHROMIUM_FLAGS = ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--enable-gpu'];
+export const SOFTWARE_FLAGS = [
+  '--enable-unsafe-webgpu',
+  '--enable-features=Vulkan',
+  '--use-vulkan=swiftshader',
+  '--use-angle=swiftshader',
+  '--use-webgpu-adapter=swiftshader',
+];
 
-export function launch(extraFlags = []) {
-  const args = [...CHROMIUM_FLAGS, ...extraFlags];
+/**
+ * Flags that let headless Chrome use the machine's GPU for WebGL2. Its
+ * WebGPU stays on SwiftShader; see docs/WEB.md for a hardware WebGPU setup.
+ */
+export const GPU_FLAGS = ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--enable-gpu'];
+
+export function launch(flags = SOFTWARE_FLAGS, options = {}) {
+  const settings = { ...options, args: flags };
   if (process.env.TILEWRIGHT_CHROMIUM) {
-    return chromium.launch({ executablePath: process.env.TILEWRIGHT_CHROMIUM, args });
+    return chromium.launch({ ...settings, executablePath: process.env.TILEWRIGHT_CHROMIUM });
   }
   if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
-    return chromium.launch({ args });
+    return chromium.launch(settings);
   }
-  return chromium.launch({ channel: 'chrome', args });
+  return chromium.launch({ ...settings, channel: 'chrome' });
 }
