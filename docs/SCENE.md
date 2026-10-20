@@ -63,7 +63,10 @@ Validation:
   backend takes quads in scene order and checks each quad's frame before the
   next quad loads anything; a texture's first frame is checked against its
   envelope header before the texture is admitted to the cache. No texture is
-  uploaded and nothing is drawn until every frame has been checked.
+  uploaded and nothing is drawn until every frame has been checked. As with
+  any other resource failure, admitting an earlier texture of a failing
+  scene may already have evicted cached textures the scene does not name;
+  that costs a later re-upload and never changes a frame.
 
 ### Sprite sheets
 
