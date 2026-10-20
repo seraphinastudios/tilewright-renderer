@@ -136,9 +136,11 @@ impl SpriteSheet {
         {
             return None;
         }
+        // Spacing lies only between frames, so frame 0 starts at the origin
+        // whatever the spacing.
         let offset = |origin: u32, size: u32, spacing: u32, index: u32| {
-            size.checked_add(spacing)?
-                .checked_mul(index)?
+            size.checked_mul(index)?
+                .checked_add(spacing.checked_mul(index)?)?
                 .checked_add(origin)
                 .filter(|start| start.checked_add(size).is_some())
         };
@@ -1016,5 +1018,20 @@ mod tests {
             ..SpriteSheet::grid(8, 8, 1, 1)
         };
         assert_eq!(past.frame(0), None);
+        // Frame 0 ignores spacing, however large.
+        let spaced_out = SpriteSheet {
+            spacing: [u32::MAX, u32::MAX],
+            ..SpriteSheet::grid(1, 1, 2, 2)
+        };
+        assert_eq!(
+            spaced_out.frame(0),
+            Some(TextureRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1
+            })
+        );
+        assert_eq!(spaced_out.frame(1), None);
     }
 }

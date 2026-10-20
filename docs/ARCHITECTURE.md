@@ -147,14 +147,27 @@ next power of two, capped at the device's largest buffer (larger streams are
 rejected before they are generated), and is reused by offscreen and surface
 presentation until a larger scene is submitted; per-texture nearest/linear bind
 groups are created only on cache misses, and consecutive quads of one texture
-with the same sampling, such as layered characters drawn from one atlas, share
-a draw call whatever their frames.
+with the same sampling and frame class (the whole texture, or a smaller frame
+drawn by the clamping pipeline), such as layered characters drawn from one
+atlas, share a draw call whatever their frames.
 
 Fill cost is measured with the `fill_rate` example of `tilewright-render-wgpu`
 (32 translucent 1,024 × 1,024 layers, or 7 glow layers, readback included;
-median of three runs):
+median of three interleaved runs of the release build, Rust 1.97.1). All three
+devices ran on one Ryzen 9 9950X3D host under Linux 7.0, each selected with
+`VK_DRIVER_FILES`, through wgpu 30.0.1's Vulkan backend with the renderer's
+downlevel limits (2D textures up to 8,192 px):
 
-| Mode | lavapipe | RADV (Ryzen 9950X3D iGPU) | RTX 3090 |
+| Column | Adapter | Driver | Vulkan | Adapter limits |
+| --- | --- | --- | --- | --- |
+| lavapipe | llvmpipe (LLVM 21.1.8, 256 bits), CPU | Mesa 26.0.8 | 1.4.335 | 16,384 px textures, 2 GiB buffers |
+| RADV | AMD Ryzen 9 9950X3D iGPU (RAPHAEL_MENDOCINO), integrated | Mesa 26.0.8 | 1.4.335 | 16,384 px textures, 2 GiB buffers |
+| RTX 3090 | NVIDIA GeForce RTX 3090, discrete | NVIDIA 595.91.07 | 1.4.329 | 32,768 px textures, 4 GiB buffers |
+
+`tilewright-render probe` prints the adapter, driver, backend and limits for
+another machine.
+
+| Mode | lavapipe | RADV | RTX 3090 |
 | --- | --- | --- | --- |
 | whole texture, nearest | 11.0 → 10.9 ms | 7.1 → 7.0 ms | 1.8 → 1.4 ms |
 | whole texture, linear | 12.6 → 11.9 ms | 6.0 → 5.9 ms | 1.4 → 1.3 ms |

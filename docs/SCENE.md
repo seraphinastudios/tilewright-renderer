@@ -86,8 +86,10 @@ Sheets with irregular frames list their `TextureRect`s directly.
 A layered character draws one quad per layer from the same frame position
 of each layer's sheet: body, then clothing, then hair, each a `part` of one
 semantic ID with increasing painter order. When all layers share one atlas
-texture, consecutive quads of the same texture and sampling are drawn in one
-GPU batch, whatever their frames. The corpus scenario
+texture, consecutive quads of the same texture and sampling that all draw
+frames smaller than the texture are drawn in one GPU batch, whatever their
+frames; a quad drawing the whole texture uses another pipeline and starts a
+new batch. The corpus scenario
 `atlas-layered-characters` draws such characters from a procedural atlas.
 
 ## Cost

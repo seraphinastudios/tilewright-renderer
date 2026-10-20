@@ -664,21 +664,39 @@ impl WgpuRenderer {
     /// framed texture is therefore loaded once here and again to decode it;
     /// keeping its bytes instead would hold every new texture beside the
     /// cache before eviction could make room.
+    ///
+    /// The textures checked are charged to the scene's working set, cached
+    /// ones included, so a scene that cannot fit stops with
+    /// [`Error::LimitExceeded`] before loading more than the budget and one
+    /// texture.
     fn check_frames_before_loading(
         &self,
         scene: &SceneBundle,
         resources: &dyn ResourceProvider,
     ) -> Result<(), Error> {
-        for (key, extent) in frame_extents(scene) {
+        let extents = frame_extents(scene);
+        let mut working_set_bytes = 0_u64;
+        for (key, _) in &extents {
+            if let Some(cached) = self.textures.get(key) {
+                working_set_bytes =
+                    add_working_set_bytes(working_set_bytes, cached.image.pixels().len() as u64)
+                        .map_err(|_| Error::LimitExceeded)?;
+            }
+        }
+        for (key, extent) in extents {
             let (width, height) = if let Some(cached) = self.textures.get(&key) {
                 (cached.image.width(), cached.image.height())
             } else {
-                Rgba8Image::envelope_dimensions(
+                let (width, height) = Rgba8Image::envelope_dimensions(
                     &load_blob(key, resources)?,
                     self.limits.maximum_dimension,
                     self.limits.maximum_pixels,
                 )
-                .map_err(|error| Error::Resource(error.to_string()))?
+                .map_err(|error| Error::Resource(error.to_string()))?;
+                let bytes = u64::from(width) * u64::from(height) * 4;
+                working_set_bytes = add_working_set_bytes(working_set_bytes, bytes)
+                    .map_err(|_| Error::LimitExceeded)?;
+                (width, height)
             };
             check_frame_extent(extent, width, height)?;
         }
@@ -2023,6 +2041,85 @@ mod tests {
             assert_eq!(&frame.rgba8[row * 16..row * 16 + 4], [0, 0, 0, 255]);
             assert_eq!(&frame.rgba8[row * 16 + 4..row * 16 + 8], [255, 0, 0, 255]);
         }
+    }
+
+    #[test]
+    fn frame_checks_stop_loading_at_the_working_set_bound() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tilewright_render_resources::{
+            DEFAULT_MAXIMUM_RESOURCE_BYTES, Error as ResourceError, ResourceBlob, ResourceProvider,
+            ResourceRequest,
+        };
+        use tilewright_render_testkit::texture_envelope;
+        use tilewright_scene::{
+            Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, TextureRect,
+            Viewport,
+        };
+        /// Serves one 2,047 × 2,048 texture (just under 16 MiB) under every
+        /// identity, counting loads.
+        struct Large {
+            bytes: Vec<u8>,
+            loads: AtomicUsize,
+        }
+        impl ResourceProvider for Large {
+            fn load(&self, request: ResourceRequest) -> Result<ResourceBlob, ResourceError> {
+                self.loads.fetch_add(1, Ordering::Relaxed);
+                ResourceBlob::for_request(request, self.bytes.clone())
+            }
+        }
+        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(4, 4)) else {
+            eprintln!("skipping GPU working-set test: no supported adapter");
+            return;
+        };
+        let (bytes, digest) = texture_envelope(2_047, 2_048, &vec![[0, 0, 0, 255]; 2_047 * 2_048]);
+        assert!(bytes.len() <= DEFAULT_MAXIMUM_RESOURCE_BYTES);
+        let provider = std::sync::Arc::new(Large {
+            bytes,
+            loads: AtomicUsize::new(0),
+        });
+        // Forty framed textures need about 640 MiB; the budget holds 16.
+        let quads = (0..40_u32).map(|index| Quad {
+            semantic_id: SemanticId(index + 1),
+            part: 0,
+            resource_id: ResourceId(u64::from(index) + 1),
+            resource_revision: 1,
+            resource_digest: digest,
+            frame: Some(TextureRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            }),
+            positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            depth: 0,
+            painter_order: index,
+            color: [1.0; 4],
+            grayscale: 0.0,
+            glow: None,
+            pickable: true,
+            sampling: Sampling::Nearest,
+            layer: Layer::World,
+        });
+        let viewport = Viewport {
+            width: 4,
+            height: 4,
+            scale_milli: 1_000,
+        };
+        let scene =
+            SceneBundle::from_quads(1, 0, viewport, [0.0; 4], quads, SceneLimits::default())
+                .unwrap();
+        let result = renderer.render(RenderRequest {
+            scene: &scene,
+            resources: provider.clone(),
+        });
+        assert_eq!(
+            result.err(),
+            Some(tilewright_render_api::Error::LimitExceeded)
+        );
+        // Sixteen textures fit the 256 MiB budget; the seventeenth stops it.
+        assert_eq!(provider.loads.load(Ordering::Relaxed), 17);
+        assert!(renderer.textures.is_empty());
     }
 
     #[test]
