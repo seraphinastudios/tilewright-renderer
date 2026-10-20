@@ -7,7 +7,8 @@
     "tilewright-render-ui": ["tilewright-scene"],
     "tilewright-render-world": ["tilewright-scene"],
     "tilewright-render-testkit": ["sha2", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-world", "tilewright-scene"],
-    "tilewright-render-wgpu": ["bytemuck", "naga", "pollster", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-testkit", "tilewright-scene", "wgpu"],
+    "tilewright-render-wgpu": ["bytemuck", "js-sys", "naga", "pollster", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-testkit", "tilewright-scene", "wasm-bindgen", "wasm-bindgen-futures", "web-sys", "wgpu"],
+    "tilewright-render-web": ["js-sys", "sha2", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-testkit", "tilewright-render-wgpu", "tilewright-scene", "wasm-bindgen", "wasm-bindgen-futures", "web-sys"],
     "tilewright-render-sdl3": ["sdl3", "tilewright-render-api", "tilewright-render-wgpu", "wgpu"],
     "tilewright-render": ["png", "rustix", "serde_core", "serde_json", "sha2", "tempfile", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-sdl3", "tilewright-render-testkit", "tilewright-render-wgpu", "tilewright-render-world", "tilewright-scene"]
   },

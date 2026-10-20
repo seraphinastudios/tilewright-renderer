@@ -50,6 +50,8 @@ grep -F "without overwriting" "${proof_error}" >/dev/null
 cargo check --locked --workspace --target x86_64-pc-windows-gnu \
   --exclude tilewright-render-sdl3
 
+tools/validate-web.sh
+
 release_output=$(mktemp -d /tmp/tilewright-renderer-release.XXXXXX)
 rmdir "${release_output}"
 tools/package-release.sh "${release_output}"

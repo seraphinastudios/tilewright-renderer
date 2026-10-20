@@ -1,0 +1,36 @@
+[package]
+name = "tilewright-render-web"
+description = "WebGPU and WebGL2 browser bindings for the Tilewright renderer"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["webgl"]
+# WebGL2 for browsers without WebGPU; without it the bundle is WebGPU-only
+# and far smaller.
+webgl = ["tilewright-render-wgpu/webgl"]
+
+[dependencies]
+tilewright-render-api.workspace = true
+tilewright-render-resources.workspace = true
+tilewright-render-testkit.workspace = true
+tilewright-render-wgpu.workspace = true
+tilewright-scene.workspace = true
+sha2.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = ["HtmlCanvasElement", "OffscreenCanvas"] }
+
+[lints]
+workspace = true

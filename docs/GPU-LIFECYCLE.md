@@ -28,7 +28,7 @@ cross-checks the non-SDL renderer crates and default portable CLI for the
 Windows GNU target; native D3D12 presentation remains a documented manual test
 because the GNU cross toolchain is not a Windows runtime.
 
-`Automatic` enables only Vulkan and D3D12, requests the high-performance class,
+`Automatic` natively enables only Vulkan and D3D12, requests the high-performance class,
 and does not force a fallback adapter. wgpu may still return a CPU adapter when
 it is the only conforming implementation, as in headless CI; diagnostics record
 that device type, driver, backend, startup time, maximum 2D texture dimension,
@@ -40,3 +40,23 @@ The sole unsafe assertion is private to `raw_handle_bridge`: an ephemeral
 wrapper is declared `Send + Sync` only to synchronously copy immutable raw SDL
 handles into wgpu. It is never stored, sent, or used for an SDL operation, and
 the returned surface retains the original window lifetime.
+
+## Browsers
+
+On `wasm32` the renderer is created asynchronously: `WgpuRenderer::with_canvas`
+(or `with_offscreen_canvas`) owns a surface on the canvas, and `present`
+draws the scene into it, configuring the surface on first use and after each
+resize. `new_async` creates an offscreen-only renderer where the backend
+allows one (WebGL2 needs a canvas). `Automatic` uses WebGPU when the browser
+offers an adapter and WebGL2 otherwise; WebGPU support is settled before the
+canvas gets a context, because a canvas keeps its first context type.
+`WebGpu` and `WebGl2` never fall back, and are unavailable natively.
+
+Browsers cannot block on the GPU, so `Renderer::render` returns
+`BackendUnavailable` there; `render_async` produces the same frame with every
+plane. Native `render` is `render_async` driven to completion. WebGPU
+resolves the readback mapping from the browser's event loop; on WebGL2 the
+renderer polls the device once per browser task until the mapping settles.
+Device creation uses wgpu's WebGL2 downlevel limits on a GL adapter. Device
+and surface loss surface as the same typed errors as natively; the page
+recreates the renderer.

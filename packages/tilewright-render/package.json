@@ -1,0 +1,31 @@
+{
+  "name": "@seraphinastudios/tilewright-render",
+  "version": "0.4.0",
+  "description": "WebGPU and WebGL2 browser renderer for Tilewright scenes",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "wasm"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "playwright-core": "1.64.1",
+    "typescript": "6.0.3"
+  }
+}
