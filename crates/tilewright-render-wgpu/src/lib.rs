@@ -551,26 +551,21 @@ impl WgpuRenderer {
                 .sum::<u64>(),
             ..Staging::default()
         };
-        for key in &distinct {
-            if let Some(cached) = self.textures.get(key) {
-                staging.working_set_bytes = add_working_set_bytes(
-                    staging.working_set_bytes,
-                    cached.image.pixels().len() as u64,
-                )
-                .map_err(|_| Error::LimitExceeded)?;
-            }
-        }
-        // Quads are taken in scene order, as the reference renders them: a
-        // texture loads at its first quad, and each quad's frame is checked
-        // before the next quad loads anything. Every missing texture is
-        // decoded before any is uploaded, so the scene's whole working set is
-        // known and bounded first.
+        // Quads are taken in scene order, exactly as the reference renders
+        // them: a texture is charged to the scene's working set and, if
+        // missing, loaded at its first quad, and each quad's frame is checked
+        // before the next quad touches anything, so every failure arises in
+        // the reference's order whatever the cache holds. Every missing
+        // texture is decoded before any is uploaded, so the scene's whole
+        // working set is known and bounded first.
         let mut frames = Vec::with_capacity(scene.quads().len());
         for quad in scene.quads() {
             let key = key_of(quad);
-            let (width, height) = if let Some(cached) = self.textures.get(&key) {
-                (cached.image.width(), cached.image.height())
-            } else if let Some(image) = staging.image(key) {
+            let (width, height) = if let Some(size) = staging.size(key) {
+                size
+            } else if let Some(cached) = self.textures.get(&key) {
+                let image = cached.image.clone();
+                staging.charge_cached(key, &image)?;
                 (image.width(), image.height())
             } else {
                 self.stage_texture(quad, resources, &distinct, &mut staging)?
@@ -579,6 +574,10 @@ impl WgpuRenderer {
                 frame_in_image(quad.frame, width, height)
                     .map_err(|error| Error::Resource(error.to_string()))?,
             );
+        }
+        if staging.over_budget {
+            // Unreachable: the working set always overflows first.
+            return Err(Error::LimitExceeded);
         }
         // The entry bound works the same way.
         if texture_cache_must_evict(
@@ -597,11 +596,14 @@ impl WgpuRenderer {
     }
 
     /// Loads, checks and decodes the missing texture `quad` names, returning
-    /// its size. The quad's frame is checked against the envelope header
-    /// before the texture is admitted. Cached and staged textures share one
-    /// CPU budget: a texture that would not fit beside them is decoded only
-    /// after evicting cached textures the scene does not use, and not at all
-    /// if even that leaves no room.
+    /// its size. As in the reference, the texture is charged to the scene's
+    /// working set before its envelope is inspected, and the quad's frame is
+    /// then checked against the envelope header. Cached and staged textures
+    /// share one CPU budget: a texture that would not fit beside them is
+    /// decoded only after evicting cached textures the scene does not use.
+    /// Eviction waits until the texture has passed every check. When even
+    /// eviction leaves no room, nothing more is decoded; textures are only
+    /// checked until the working set reports the overflow.
     fn stage_texture(
         &mut self,
         quad: &Quad,
@@ -613,6 +615,10 @@ impl WgpuRenderer {
         let resource =
             |error: tilewright_render_resources::Error| Error::Resource(error.to_string());
         let blob = load_blob(key, resources)?;
+        // An envelope holds a 12-byte header before its pixels.
+        let incoming = (blob.bytes().len() as u64).saturating_sub(12);
+        staging.working_set_bytes = add_working_set_bytes(staging.working_set_bytes, incoming)
+            .map_err(|_| Error::LimitExceeded)?;
         let (width, height) = Rgba8Image::envelope_dimensions(
             &blob,
             self.limits.maximum_dimension,
@@ -620,20 +626,28 @@ impl WgpuRenderer {
         )
         .map_err(resource)?;
         frame_in_image(quad.frame, width, height).map_err(resource)?;
-        // An envelope holds a 12-byte header before its pixels.
-        let incoming = (blob.bytes().len() as u64).saturating_sub(12);
-        match decode_admission(
-            self.texture_bytes,
-            staging.unused_bytes,
-            staging.staged_bytes,
-            incoming,
-        ) {
-            Admission::Fits => {}
-            Admission::EvictUnused => {
-                self.evict_unused(distinct);
-                staging.unused_bytes = 0;
+        if !staging.over_budget {
+            match decode_admission(
+                self.texture_bytes,
+                staging.unused_bytes,
+                staging.staged_bytes,
+                incoming,
+            ) {
+                Admission::Fits => {}
+                Admission::EvictUnused => {
+                    self.evict_unused(distinct);
+                    staging.unused_bytes = 0;
+                }
+                // The textures this scene names cannot all fit, so its
+                // working set must pass the budget by its last texture.
+                // Checking continues without decoding until it does, so the
+                // first failure is still the one the reference reaches.
+                Admission::Exceeds => staging.over_budget = true,
             }
-            Admission::Exceeds => return Err(Error::LimitExceeded),
+        }
+        if staging.over_budget {
+            staging.sizes.insert(key, (width, height));
+            return Ok((width, height));
         }
         let image = Arc::new(
             Rgba8Image::decode(
@@ -643,10 +657,7 @@ impl WgpuRenderer {
             )
             .map_err(resource)?,
         );
-        let bytes = image.pixels().len() as u64;
-        staging.working_set_bytes = add_working_set_bytes(staging.working_set_bytes, bytes)
-            .map_err(|_| Error::LimitExceeded)?;
-        staging.staged_bytes += bytes;
+        staging.staged_bytes += image.pixels().len() as u64;
         staging.positions.insert(key, staging.decoded.len());
         staging.decoded.push((key, image));
         Ok((width, height))
@@ -1250,16 +1261,38 @@ const fn key_of(quad: &Quad) -> TextureKey {
 struct Staging {
     decoded: Vec<(TextureKey, Arc<Rgba8Image>)>,
     positions: HashMap<TextureKey, usize>,
+    /// Cached textures already charged to the working set.
+    charged: HashSet<TextureKey>,
+    /// Set once the scene's textures cannot all fit; later textures are
+    /// checked but not decoded.
+    over_budget: bool,
+    /// Sizes of the textures checked after that.
+    sizes: HashMap<TextureKey, (u32, u32)>,
     working_set_bytes: u64,
     staged_bytes: u64,
     unused_bytes: u64,
 }
 
 impl Staging {
-    fn image(&self, key: TextureKey) -> Option<&Arc<Rgba8Image>> {
+    /// The size of a texture this scene has already staged or checked.
+    fn size(&self, key: TextureKey) -> Option<(u32, u32)> {
         self.positions
             .get(&key)
-            .map(|index| &self.decoded[*index].1)
+            .map(|index| {
+                let image = &self.decoded[*index].1;
+                (image.width(), image.height())
+            })
+            .or_else(|| self.sizes.get(&key).copied())
+    }
+
+    /// Charges a cached texture to the working set at its first quad.
+    fn charge_cached(&mut self, key: TextureKey, image: &Rgba8Image) -> Result<(), Error> {
+        if self.charged.insert(key) {
+            self.working_set_bytes =
+                add_working_set_bytes(self.working_set_bytes, image.pixels().len() as u64)
+                    .map_err(|_| Error::LimitExceeded)?;
+        }
+        Ok(())
     }
 }
 
@@ -1963,72 +1996,114 @@ mod tests {
         }
     }
 
-    #[test]
-    fn frame_checks_stop_loading_at_the_working_set_bound() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tilewright_render_resources::{
-            DEFAULT_MAXIMUM_RESOURCE_BYTES, Error as ResourceError, ResourceBlob, ResourceProvider,
-            ResourceRequest,
-        };
-        use tilewright_render_testkit::texture_envelope;
-        use tilewright_scene::{
-            Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, TextureRect,
-            Viewport,
-        };
-        /// Serves one 2,047 × 2,048 texture (just under 16 MiB) under every
-        /// identity, counting loads.
-        struct Large {
-            bytes: Vec<u8>,
-            loads: AtomicUsize,
+    /// Serves one 2,047 × 2,048 texture, just under one 16 MiB request, under
+    /// every identity, counting loads. Sixteen fit the 256 MiB working set.
+    struct Large {
+        bytes: Vec<u8>,
+        digest: tilewright_scene::Digest256,
+        loads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Large {
+        fn new() -> std::sync::Arc<Self> {
+            let pixels = vec![[0, 0, 0, 255]; 2_047 * 2_048];
+            let (bytes, digest) =
+                tilewright_render_testkit::texture_envelope(2_047, 2_048, &pixels);
+            assert!(bytes.len() <= tilewright_render_resources::DEFAULT_MAXIMUM_RESOURCE_BYTES);
+            std::sync::Arc::new(Self {
+                bytes,
+                digest,
+                loads: std::sync::atomic::AtomicUsize::new(0),
+            })
         }
-        impl ResourceProvider for Large {
-            fn load(&self, request: ResourceRequest) -> Result<ResourceBlob, ResourceError> {
-                self.loads.fetch_add(1, Ordering::Relaxed);
-                ResourceBlob::for_request(request, self.bytes.clone())
+
+        fn loads(&self) -> usize {
+            self.loads.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// A quad on texture `id` with a one-texel frame at `x`.
+        fn quad(&self, id: u64, x: u32) -> tilewright_scene::Quad {
+            tilewright_scene::Quad {
+                semantic_id: tilewright_scene::SemanticId(u32::try_from(id).unwrap()),
+                part: 0,
+                resource_id: tilewright_scene::ResourceId(id),
+                resource_revision: 1,
+                resource_digest: self.digest,
+                frame: Some(tilewright_scene::TextureRect {
+                    x,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                }),
+                positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                depth: 0,
+                painter_order: u32::try_from(id).unwrap(),
+                color: [1.0; 4],
+                grayscale: 0.0,
+                glow: None,
+                pickable: true,
+                sampling: tilewright_scene::Sampling::Nearest,
+                layer: tilewright_scene::Layer::World,
             }
         }
-        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(4, 4)) else {
-            eprintln!("skipping GPU working-set test: no supported adapter");
-            return;
-        };
-        let (bytes, digest) = texture_envelope(2_047, 2_048, &vec![[0, 0, 0, 255]; 2_047 * 2_048]);
-        assert!(bytes.len() <= DEFAULT_MAXIMUM_RESOURCE_BYTES);
-        let provider = std::sync::Arc::new(Large {
-            bytes,
-            loads: AtomicUsize::new(0),
-        });
-        // Forty framed textures need about 640 MiB; the budget holds 16.
-        let quads = (0..40_u32).map(|index| Quad {
-            semantic_id: SemanticId(index + 1),
-            part: 0,
-            resource_id: ResourceId(u64::from(index) + 1),
-            resource_revision: 1,
-            resource_digest: digest,
-            frame: Some(TextureRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            }),
-            positions: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-            depth: 0,
-            painter_order: index,
-            color: [1.0; 4],
-            grayscale: 0.0,
-            glow: None,
-            pickable: true,
-            sampling: Sampling::Nearest,
-            layer: Layer::World,
-        });
-        let viewport = Viewport {
+    }
+
+    impl tilewright_render_resources::ResourceProvider for Large {
+        fn load(
+            &self,
+            request: tilewright_render_resources::ResourceRequest,
+        ) -> Result<tilewright_render_resources::ResourceBlob, tilewright_render_resources::Error>
+        {
+            self.loads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tilewright_render_resources::ResourceBlob::for_request(request, self.bytes.clone())
+        }
+    }
+
+    fn tiny_scene(quads: Vec<tilewright_scene::Quad>) -> tilewright_scene::SceneBundle {
+        let viewport = tilewright_scene::Viewport {
             width: 4,
             height: 4,
             scale_milli: 1_000,
         };
-        let scene =
-            SceneBundle::from_quads(1, 0, viewport, [0.0; 4], quads, SceneLimits::default())
-                .unwrap();
+        tilewright_scene::SceneBundle::from_quads(
+            1,
+            0,
+            viewport,
+            [0.0; 4],
+            quads,
+            tilewright_scene::SceneLimits::default(),
+        )
+        .unwrap()
+    }
+
+    /// The error a fresh reference renderer reaches for the same scene.
+    fn reference_error(
+        scene: &tilewright_scene::SceneBundle,
+        resources: std::sync::Arc<Large>,
+    ) -> Option<tilewright_render_api::Error> {
+        ReferenceRenderer::new(offscreen_target(4, 4))
+            .unwrap()
+            .render(RenderRequest { scene, resources })
+            .err()
+    }
+
+    #[test]
+    fn loading_stops_at_the_working_set_bound_before_frames_are_checked() {
+        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(4, 4)) else {
+            eprintln!("skipping GPU working-set test: no supported adapter");
+            return;
+        };
+        let provider = Large::new();
+        // Forty textures need about 640 MiB. The seventeenth crosses the
+        // budget and also has a frame outside its texture; as in the
+        // reference, the budget is checked first.
+        let scene = tiny_scene(
+            (1..=40)
+                .map(|id| provider.quad(id, if id == 17 { 4_000 } else { 0 }))
+                .collect(),
+        );
         let result = renderer.render(RenderRequest {
             scene: &scene,
             resources: provider.clone(),
@@ -2037,9 +2112,67 @@ mod tests {
             result.err(),
             Some(tilewright_render_api::Error::LimitExceeded)
         );
-        // Sixteen textures fit the 256 MiB budget; the seventeenth stops it.
-        assert_eq!(provider.loads.load(Ordering::Relaxed), 17);
+        assert_eq!(provider.loads(), 17);
         assert!(renderer.textures.is_empty());
+        assert_eq!(
+            reference_error(&scene, Large::new()),
+            Some(tilewright_render_api::Error::LimitExceeded)
+        );
+    }
+
+    #[test]
+    fn cached_textures_are_charged_at_their_first_quad() {
+        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(4, 4)) else {
+            eprintln!("skipping GPU working-set test: no supported adapter");
+            return;
+        };
+        let provider = Large::new();
+        renderer
+            .render(RenderRequest {
+                scene: &tiny_scene(vec![provider.quad(1, 0)]),
+                resources: provider.clone(),
+            })
+            .unwrap();
+        // Cache fifteen more identities of the same pixels: the whole budget.
+        let cached = renderer.textures.values().next().map(|entry| {
+            (
+                entry.image.clone(),
+                entry.nearest.clone(),
+                entry.linear.clone(),
+            )
+        });
+        let (image, nearest, linear) = cached.unwrap();
+        for id in 2..=16 {
+            renderer.textures.insert(
+                (tilewright_scene::ResourceId(id), 1, provider.digest),
+                super::TextureCacheEntry {
+                    image: image.clone(),
+                    nearest: nearest.clone(),
+                    linear: linear.clone(),
+                },
+            );
+        }
+        renderer.texture_bytes = image.pixels().len() as u64 * 16;
+        // The first quad names a new texture with a bad frame; the cached
+        // textures come later. The reference reaches the bad frame first, and
+        // so must the renderer, however full its cache.
+        let mut quads = vec![tilewright_scene::Quad {
+            painter_order: 0,
+            ..provider.quad(100, 4_000)
+        }];
+        quads.extend((1..=16).map(|id| provider.quad(id, 0)));
+        let scene = tiny_scene(quads);
+        let result = renderer.render(RenderRequest {
+            scene: &scene,
+            resources: provider.clone(),
+        });
+        let expected = reference_error(&scene, Large::new());
+        assert!(
+            matches!(&expected, Some(tilewright_render_api::Error::Resource(message)) if message.contains("FrameOutOfBounds")),
+            "{expected:?}"
+        );
+        assert_eq!(result.err(), expected);
+        assert_eq!(renderer.textures.len(), 16);
     }
 
     #[test]

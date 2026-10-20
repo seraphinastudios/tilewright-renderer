@@ -60,9 +60,12 @@ Validation:
   `SceneLimits::maximum_dimension` on both axes.
 - Every renderer rejects a frame that does not lie inside its decoded texture
   with the resource error `FrameOutOfBounds`. Like the reference, the GPU
-  backend takes quads in scene order and checks each quad's frame before the
-  next quad loads anything; a texture's first frame is checked against its
-  envelope header before the texture is admitted to the cache. No texture is
+  backend takes quads in scene order: a texture is charged to the scene's
+  working set at its first quad, before its envelope is inspected, and each
+  quad's frame is checked before the next quad touches anything, so the
+  first failure is the one the reference reaches, whatever the cache holds.
+  A texture's first frame is checked against its envelope header before the
+  texture is admitted to the cache. No texture is
   uploaded and nothing is drawn until every frame has been checked. As with
   any other resource failure, admitting an earlier texture of a failing
   scene may already have evicted cached textures the scene does not name;
