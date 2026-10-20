@@ -86,14 +86,16 @@ Sheets with irregular frames list their `TextureRect`s directly.
 A layered character draws one quad per layer from the same frame position
 of each layer's sheet: body, then clothing, then hair, each a `part` of one
 semantic ID with increasing painter order. When all layers share one atlas
-texture, consecutive quads of the same texture are drawn in one GPU batch,
-whatever their frames and sampling. The corpus scenario
+texture, consecutive quads of the same texture and sampling are drawn in one
+GPU batch, whatever their frames. The corpus scenario
 `atlas-layered-characters` draws such characters from a procedural atlas.
 
 ## Cost
 
-Frames cost nothing on the CPU reference. The GPU vertex carries the frame as
-four 16-bit integers, so a vertex is 80 bytes and a quad 480 bytes. The
-shader reads texels exactly with `textureLoad` and filters them itself, so
-textures are bound without samplers and both samplings share one binding per
-texture.
+Frames cost nothing on the CPU reference. The GPU vertex carries the frame
+and its texture's size as six 16-bit integers, so a vertex is 84 bytes and a
+quad 504 bytes. The vertex shader maps texture coordinates onto the frame,
+and the hardware sampler filters them. A frame smaller than its texture is
+drawn with a pipeline that clamps each sample point half a texel inside the
+frame; whole textures skip the clamp. See
+[architecture](ARCHITECTURE.md#cost-and-memory) for measured fill costs.

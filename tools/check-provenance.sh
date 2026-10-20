@@ -11,6 +11,21 @@ jq -e '
   and (.provenance | contains("synthetic MIT"))
   and (.failure_cases | length == 5)
   and all(.failure_cases[]; .name != "" and .expected != "" and .owner == "renderer")
+  and (.resources | length == 8)
+  and (.resources | map(.name) | length == (unique | length))
+  and (.resources | map(.resource_id) | length == (unique | length))
+  and all(.resources[];
+    (.name | type == "string" and length > 0)
+    and (.resource_id | type == "number" and . > 0 and . == floor)
+    and (.revision | type == "number" and . > 0 and . == floor)
+    and (.width | type == "number" and . > 0 and . == floor)
+    and (.height | type == "number" and . > 0 and . == floor)
+    and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+    and (.source | type == "string" and startswith("tilewright-render-testkit "))
+    and .author == "Seraphina Studios"
+    and .license == "MIT"
+    and (.transformation | type == "string" and length > 0)
+    and (.notice | type == "string" and length > 0))
   and (.cases | length == 7)
   and (.cases | map(.name) | length == (unique | length))
   and all(.cases[];

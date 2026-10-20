@@ -58,8 +58,13 @@ fixed-point corners.
 Texture lookups outside 0–1 are transparent, and no lookup reads a texel
 outside the quad's frame: nearest and linear sampling clamp to the frame's
 edge, and renderers reject a frame that does not lie inside its texture. The
-GPU shader reads texels exactly and filters them as the CPU reference does,
-rounding each linear blend to 8 bits. A glow quad extends its art by
+GPU maps each corner's coordinate onto the frame and uses the hardware
+sampler; for a frame smaller than its texture, a second pipeline clamps each
+sample point half a texel inside the frame, which keeps nearest and linear
+filtering on the frame's own texels exactly as the reference's edge clamp
+does. Hardware filtering quantises its weights, so linear sampling is within
+the shared tolerance only where filter fractions are multiples of 1/256, as
+in every fixture. A glow quad extends its art by
 the glow radius and draws a halo from 16 fixed sample directions around the
 art's alpha (a zero radius samples only the centre); it is never pickable,
 and scene validation rejects a pickable glow quad. Greyscale uses Rec. 601 luma
@@ -124,7 +129,7 @@ CPU work is O(pixels + quads), GPU vertex generation is O(quads), and GPU
 readback is O(pixels). A completed frame owns 11 bytes per pixel across RGBA,
 semantic, depth, and coverage planes. The GPU path additionally owns a color
 target, private depth/stencil target, at most 255 bytes of readback row padding
-per row, and 480 bytes of transient vertices per quad (six 80-byte vertices).
+per row, and 504 bytes of transient vertices per quad (six 84-byte vertices).
 Checked arithmetic precedes every size-derived allocation. Offscreen
 targets/readback buffers are reused until resize; immutable textures are reused
 by ID/revision/digest with a hard 4,096-entry cache. A scene's missing textures
@@ -139,10 +144,28 @@ also capped at 256 MiB, and prepared quads share decoded immutable pixels
 instead of cloning them. The shared vertex buffer grows geometrically to the
 next power of two, capped at the device's largest buffer (larger streams are
 rejected before they are generated), and is reused by offscreen and surface
-presentation until a larger scene is submitted; one sampler-free binding per
-texture is created only on a cache miss and serves both samplings, so
-consecutive quads of one texture, such as layered characters drawn from one
-atlas, share a draw call.
+presentation until a larger scene is submitted; per-texture nearest/linear bind
+groups are created only on cache misses, and consecutive quads of one texture
+with the same sampling, such as layered characters drawn from one atlas, share
+a draw call whatever their frames.
+
+Fill cost is measured with the `fill_rate` example of `tilewright-render-wgpu`
+(32 translucent 1,024 × 1,024 layers, or 7 glow layers, readback included;
+median of three runs):
+
+| Mode | lavapipe | RADV (Ryzen 9950X3D iGPU) | RTX 3090 |
+| --- | --- | --- | --- |
+| whole texture, nearest | 10.6 → 10.5 ms | 6.0 → 6.7 ms | 1.3 → 1.6 ms |
+| whole texture, linear | 12.5 → 13.6 ms | 7.4 → 7.2 ms | 1.4 → 1.4 ms |
+| whole texture, glow | 14.0 → 14.6 ms | 13.0 → 12.6 ms | 1.5 → 1.4 ms |
+| frame, nearest | 11.9 ms | 8.4 ms | 1.5 ms |
+| frame, linear | 17.3 ms | 8.1 ms | 1.5 ms |
+| frame, glow | 32.2 ms | 12.6 ms | 1.5 ms |
+
+Arrows run from version 0.2 to 0.3. The budget is: whole-texture quads stay
+within 10% of 0.2 apart from run-to-run noise, and the frame clamp costs at
+most 1.4× a whole-texture quad, except glow halos on lavapipe, a software
+rasteriser, at up to 2.3×.
 
 No public dependency or type points to a client, editor, protocol, server, or
 game implementation. `tools/check-architecture.sh` validates exact direct

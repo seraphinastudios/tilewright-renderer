@@ -14,9 +14,11 @@ characters (body, tunic and hair parts of one object) at each walk step and
 at a fractional 1.5× scale, linearly filtered magnified frames whose edges must
 not blend with neighbouring frames, a rotated frame, a frame whose
 coordinates run past its edges, and a glowing frame above an opaque row. No
-quad edge or texel boundary in it falls on a pixel centre, and no pixel blends
-more than one translucent layer, so every backend stays within the shared
-tolerance. The fixed
+quad edge or texel boundary in it falls on a pixel centre, linear filter
+fractions are eighths (exact in GPUs' 8-bit filter weights), and no pixel
+blends more than one translucent layer, so every backend stays within the
+shared tolerance. The manifest's `resources` list records each fixture
+texture's identity, digest and provenance. The fixed
 clock removes animation nondeterminism. Missing, digest-mismatched, corrupt, and
 oversized resource cases, and a frame outside its texture, have exact expected
 error classes.

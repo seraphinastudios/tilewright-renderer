@@ -8,6 +8,112 @@
     {"name": "oversized-resource", "expected": "LimitExceeded", "owner": "renderer"},
     {"name": "frame-out-of-bounds", "expected": "FrameOutOfBounds", "owner": "renderer"}
   ],
+  "resources": [
+    {
+      "name": "synthetic-2x2",
+      "resource_id": 1,
+      "revision": 1,
+      "width": 2,
+      "height": 2,
+      "sha256": "1e909727bb350c75cd331e4435da31c2e43bc714cdeec295ca3520652fd95b9e",
+      "source": "tilewright-render-testkit src/lib.rs synthetic_resource",
+      "author": "Seraphina Studios",
+      "license": "MIT",
+      "transformation": "Four literal RGBA8 texels in the ATX1 envelope.",
+      "notice": "Original procedural fixture generated from constants; no game or third-party art."
+    },
+    {
+      "name": "world-grass",
+      "resource_id": 101,
+      "revision": 1,
+      "width": 48,
+      "height": 23,
+      "sha256": "ed3a76819712be6ede4168522900878be05d4576fb01c488b4ca96bf84e789ff",
+      "source": "tilewright-render-testkit src/world.rs diamond",
+      "author": "Seraphina Studios",
+      "license": "MIT",
+      "transformation": "A two-tone checker inside a 48 x 23 isometric diamond, computed per texel.",
+      "notice": "Original procedural fixture generated from constants; no game or third-party art."
+    },
+    {
+      "name": "world-sand",
+      "resource_id": 102,
+      "revision": 1,
+      "width": 48,
+      "height": 23,
+      "sha256": "d2dd5a59c4af4e83a499b171877d87aee2bc6702f56a6bfc09a3ceb0e2027186",
+      "source": "tilewright-render-testkit src/world.rs diamond",
+      "author": "Seraphina Studios",
+      "license": "MIT",
+      "transformation": "A two-tone checker inside a 48 x 23 isometric diamond, computed per texel.",
+      "notice": "Original procedural fixture generated from constants; no game or third-party art."
+    },
+    {
+      "name": "world-pillar",
+      "resource_id": 103,
+      "revision": 1,
+      "width": 16,
+      "height": 40,
+      "sha256": "87fe9f18a94582a8738714d6caf441b407671a846dd67c61ec051ddb430068dc",
+      "source": "tilewright-render-testkit src/world.rs pillar",
+      "author": "Seraphina Studios",
+      "license": "MIT",
+      "transformation": "A 10 x 38 shaded column on a transparent 16 x 40 texture, computed per texel.",
+      "notice": "Original procedural fixture generated from constants; no game or third-party art."
+    },
+    {
+      "name": "world-orb",
+      "resource_id": 104,
+      "revision": 1,
+      "width": 10,
+      "height": 10,
+      "sha256": "b20330b68c54dadc6b2ba3379a5d7b834760684a7cd7a89f895490c2b7d50287",
+      "source": "tilewright-render-testkit src/world.rs orb",
+      "author": "Seraphina Studios",
+      "license": "MIT",
+      "transformation": "A filled circle on a transparent 10 x 10 texture, computed per texel.",
+      "notice": "Original procedural fixture generated from constants; no game or third-party art."
+    },
+    {
+      "name": "world-meadow",
+      "resource_id": 105,
+      "revision": 1,
+      "width": 16,
+      "height": 16,
+      "sha256": "655d1fdbcf2c3357c2a03a8116dec446e36c35eb79c6266d2496c31a81bbcda8",
+      "source": "tilewright-render-testkit src/world.rs square",
+      "author": "Seraphina Studios",
+      "license": "MIT",
+      "transformation": "A 16 x 16 square with a one-texel top and left border, computed per texel.",
+      "notice": "Original procedural fixture generated from constants; no game or third-party art."
+    },
+    {
+      "name": "world-stone",
+      "resource_id": 106,
+      "revision": 1,
+      "width": 16,
+      "height": 16,
+      "sha256": "a7a01ea483ec221fbf04b3f81413e0fd82990be8e214f4987796daa1c00acd4d",
+      "source": "tilewright-render-testkit src/world.rs square",
+      "author": "Seraphina Studios",
+      "license": "MIT",
+      "transformation": "A 16 x 16 square with a one-texel top and left border, computed per texel.",
+      "notice": "Original procedural fixture generated from constants; no game or third-party art."
+    },
+    {
+      "name": "atlas-character-sheet",
+      "resource_id": 201,
+      "revision": 1,
+      "width": 64,
+      "height": 64,
+      "sha256": "9aa1facfa1853ac1e986fe2263806fa0bc2543a19a4bed1393f7b5e9dacf5314",
+      "source": "tilewright-render-testkit src/atlas.rs atlas_resource",
+      "author": "Seraphina Studios",
+      "license": "MIT",
+      "transformation": "A 4 x 4 sheet of 16 x 16 frames: body, tunic and hair layers of a four-step walk built from circles and rectangles, and four checkered ground tiles, computed per texel.",
+      "notice": "Original procedural fixture generated from constants; no game or third-party art."
+    }
+  ],
   "cases": [
     {
       "name": "overlap-square",
@@ -21,7 +127,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 1440,
+        "vertex_allocation_bytes": 1512,
         "target_allocation_bytes": 2816
       },
       "digests": {
@@ -43,7 +149,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 1440,
+        "vertex_allocation_bytes": 1512,
         "target_allocation_bytes": 5797
       },
       "digests": {
@@ -65,7 +171,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 66,
-        "vertex_allocation_bytes": 5280,
+        "vertex_allocation_bytes": 5544,
         "target_allocation_bytes": 25344
       },
       "digests": {
@@ -87,7 +193,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 6144,
-        "vertex_allocation_bytes": 491520,
+        "vertex_allocation_bytes": 516096,
         "target_allocation_bytes": 180224
       },
       "digests": {
@@ -109,7 +215,7 @@
         "resource_requests": 4,
         "uploaded_bytes": 11792,
         "vertex_count": 3030,
-        "vertex_allocation_bytes": 242400,
+        "vertex_allocation_bytes": 254520,
         "target_allocation_bytes": 270336
       },
       "digests": {
@@ -131,7 +237,7 @@
         "resource_requests": 4,
         "uploaded_bytes": 5008,
         "vertex_count": 168,
-        "vertex_allocation_bytes": 13440,
+        "vertex_allocation_bytes": 14112,
         "target_allocation_bytes": 67584
       },
       "digests": {
@@ -153,14 +259,14 @@
         "resource_requests": 1,
         "uploaded_bytes": 16384,
         "vertex_count": 204,
-        "vertex_allocation_bytes": 16320,
+        "vertex_allocation_bytes": 17136,
         "target_allocation_bytes": 78848
       },
       "digests": {
-        "rgba8": "f0182d18da3c960ac0e7207298bd1b211fe3075f5fff22258fad16fa96f6de84",
-        "semantic_u32le": "94a3d178de4e962eba1992339eddbced6c2adfe3d8f0f4b6a9319af3ec31d860",
-        "depth_i16le": "2a5e94df47c81b0c9817e874b0025e9836f3f5521a57003dd27d3fb1f795bde6",
-        "coverage_u8": "8349cf7cfe334a623be5c9a650cf684ffe8b1ed5d1a9867db7d567710851995e"
+        "rgba8": "91255d02e3105e644b356f4541d7dad1026000efa2c1c8fd847ad74de4198d5a",
+        "semantic_u32le": "35de09d9ceaf67e04908320277eb9f86cd1bffe236d6c41b56d4a304183100c3",
+        "depth_i16le": "9a7a519e0e25ca63e280709ace8f4da0932c10b5ca2c9abfd98562caa3b2be91",
+        "coverage_u8": "d0428c6c2aa3cd276064506d4059c2a8cc8837b6cbbb0c5ad6568fffa9f5c959"
       }
     }
   ]

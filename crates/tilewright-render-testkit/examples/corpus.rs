@@ -5,9 +5,11 @@ use sha2::{Digest, Sha256};
 use std::{fmt::Write as _, time::Instant};
 use tilewright_render_api::{RenderRequest, Renderer};
 use tilewright_render_testkit::{
-    ReferenceRenderer, atlas_provider, atlas_scene, dense_scene, iso_world_scene, offscreen_target,
-    structural_scene, synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
+    ATLAS_ID, ReferenceRenderer, atlas_digest, atlas_provider, atlas_scene, dense_scene,
+    iso_world_scene, offscreen_target, structural_scene, synthetic_digest, synthetic_provider,
+    synthetic_scene, top_down_world_scene, world_provider, world_texture,
 };
+use tilewright_scene::Digest256;
 
 /// The resources a corpus scenario draws from.
 #[derive(Clone, Copy)]
@@ -17,8 +19,39 @@ enum Resources {
     Atlas,
 }
 
+/// Every fixture texture the scenarios draw: its name, identity, size and
+/// digest. The manifest records each one's provenance beside these.
+fn resources() -> Vec<(&'static str, u64, u32, u32, Digest256)> {
+    let mut resources = vec![("synthetic-2x2", 1, 2, 2, synthetic_digest())];
+    for (name, id) in [
+        ("world-grass", 101),
+        ("world-sand", 102),
+        ("world-pillar", 103),
+        ("world-orb", 104),
+        ("world-meadow", 105),
+        ("world-stone", 106),
+    ] {
+        let texture = world_texture(id);
+        resources.push((name, id, texture.width, texture.height, texture.digest));
+    }
+    resources.push(("atlas-character-sheet", ATLAS_ID.0, 64, 64, atlas_digest()));
+    resources
+}
+
+fn print_resources() {
+    for (index, (name, id, width, height, sha256)) in resources().into_iter().enumerate() {
+        println!(
+            "{}{{\"name\":\"{name}\",\"resource_id\":{id},\"revision\":1,\"width\":{width},\"height\":{height},\"sha256\":\"{}\"}}",
+            if index == 0 { "" } else { "," },
+            hex(&sha256.0),
+        );
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("{{\"schema_version\":1,\"cases\":[");
+    println!("{{\"schema_version\":1,\"resources\":[");
+    print_resources();
+    println!("],\"cases\":[");
     let cases = [
         (
             "overlap-square",
@@ -117,8 +150,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
     }
     output

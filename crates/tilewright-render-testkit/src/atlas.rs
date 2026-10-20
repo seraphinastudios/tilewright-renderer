@@ -156,8 +156,12 @@ fn atlas_quad(semantic: u32, part: u16, frame: TextureRect, bounds: [f32; 4]) ->
 }
 
 /// The body, tunic and hair quads of one character at a walk step, drawn
-/// in that order at `[left, top]` and `scale` art pixels per texel.
-#[must_use]
+/// in that order at `[left, top]` and `scale` art pixels per texel, with
+/// painter orders `painter_order` to `painter_order + 2`.
+///
+/// # Errors
+/// Returns [`tilewright_scene::Error::InvalidValue`] when the three painter
+/// orders do not fit in `u32`.
 #[allow(clippy::cast_precision_loss)]
 pub fn character_sheet(
     semantic: u32,
@@ -166,29 +170,34 @@ pub fn character_sheet(
     scale: f32,
     painter_order: u32,
     sampling: Sampling,
-) -> [Quad; 3] {
+) -> Result<[Quad; 3], tilewright_scene::Error> {
+    if painter_order > u32::MAX - 2 {
+        return Err(tilewright_scene::Error::InvalidValue);
+    }
     let size = ATLAS_FRAME_SIZE as f32 * scale;
     let bounds = [origin[0], origin[1], origin[0] + size, origin[1] + size];
-    [0_u16, 1, 2].map(|layer| Quad {
+    Ok([0_u16, 1, 2].map(|layer| Quad {
         painter_order: painter_order + u32::from(layer),
         sampling,
         ..atlas_quad(semantic, layer, frame(step % 4, u32::from(layer)), bounds)
-    })
+    }))
 }
 
 /// A scene drawn entirely from atlas frames: a ground of abutting tiles,
 /// layered characters at each walk step (one magnified 1.5× at a fractional
-/// position), a body frame magnified with linear filtering, a glowing hair
+/// position), a body frame magnified 2× with linear filtering, a glowing hair
 /// frame whose halo would catch the opaque ground row below it if sampling
 /// leaked, a ground tile magnified with linear filtering, a rotated tile,
 /// and a tile whose texture coordinates run past its frame. At least
 /// 112 × 64 pixels.
 ///
-/// Two rules keep every backend within one 8-bit step of the reference.
+/// Three rules keep every backend within one 8-bit step of the reference.
 /// No quad edge and no texel boundary falls exactly on a pixel centre, where
-/// interpolated texture coordinates may round to either side. And each pixel
-/// blends at most one translucent layer, because some drivers (lavapipe
-/// among them) round 8-bit blends to within one step, and stacked
+/// interpolated texture coordinates may round to either side. Linearly
+/// filtered quads are magnified 2× at quarter-pixel offsets, so their filter
+/// fractions are eighths, which GPUs' 8-bit filter weights hold exactly. And
+/// each pixel blends at most one translucent layer, because some drivers
+/// (lavapipe among them) round 8-bit blends to within one step, and stacked
 /// translucent layers would add those steps up.
 ///
 /// # Errors
@@ -233,13 +242,13 @@ pub fn atlas_scene(width: u32, height: u32) -> Result<SceneBundle, tilewright_sc
             scale,
             10 + step * 3,
             Sampling::Nearest,
-        ));
+        )?);
     }
-    // A body frame magnified 1.75× with linear filtering.
+    // A body frame magnified 2× with linear filtering.
     quads.push(Quad {
         sampling: Sampling::Linear,
         painter_order: 30,
-        ..atlas_quad(105, 0, frame(1, 0), [2.125, 34.125, 30.125, 62.125])
+        ..atlas_quad(105, 0, frame(1, 0), [2.25, 30.25, 34.25, 62.25])
     });
     // A ground tile magnified 2× with linear filtering: its bright edge must
     // not blend with the neighbouring tile's texels.
@@ -317,7 +326,7 @@ mod tests {
     fn the_atlas_is_a_valid_four_by_four_sheet() {
         assert_eq!(atlas_resource().len(), 12 + 64 * 64 * 4);
         assert_eq!(ATLAS_SHEET.frame_count(), Some(16));
-        let layers = character_sheet(7, 5, [1.0, 2.0], 2.0, 3, Sampling::Nearest);
+        let layers = character_sheet(7, 5, [1.0, 2.0], 2.0, 3, Sampling::Nearest).unwrap();
         assert_eq!(layers.map(|quad| quad.part), [0, 1, 2]);
         assert_eq!(layers.map(|quad| quad.painter_order), [3, 4, 5]);
         // Step 5 wraps to the second column of each layer row.
@@ -329,6 +338,19 @@ mod tests {
                 ATLAS_SHEET.frame(9),
             ]
         );
+        // The last painter orders that fit are accepted; one more is not.
+        let last = u32::MAX - 2;
+        let top = character_sheet(7, 0, [0.0; 2], 1.0, last, Sampling::Nearest).unwrap();
+        assert_eq!(
+            top.map(|quad| quad.painter_order),
+            [last, last + 1, u32::MAX]
+        );
+        for overflowing in [u32::MAX - 1, u32::MAX] {
+            assert_eq!(
+                character_sheet(7, 0, [0.0; 2], 1.0, overflowing, Sampling::Nearest),
+                Err(tilewright_scene::Error::InvalidValue)
+            );
+        }
         assert_eq!(
             layers[0].positions[2].map(f32::to_bits),
             [33.0_f32.to_bits(), 34.0_f32.to_bits()]

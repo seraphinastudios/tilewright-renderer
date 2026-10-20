@@ -23,4 +23,7 @@ allowed cross-backend visual tolerance. The world and atlas scenarios draw
 procedural textures generated from constants in
 `tilewright-render-testkit` (`src/world.rs` and `src/atlas.rs`); the atlas's
 characters and ground tiles are original geometric shapes, not derived from
-any game or third-party art.
+any game or third-party art. `corpus/manifest.json` records every fixture
+texture's identity, size, SHA-256, source, author, license, transformation
+and notice; validation regenerates the identities and digests and checks the
+provenance fields.

@@ -27,8 +27,11 @@ rm -f -- "${proof_output}"
 trap 'rm -f -- "${corpus_actual}" "${proof_output}" "${proof_error}"' EXIT
 cargo run --locked --quiet --package tilewright-render-testkit --example corpus \
   >"${corpus_actual}"
+# The runner emits each fixture texture's identity and digest; the manifest
+# records them beside their provenance.
 diff -u \
-  <(jq -S '{schema_version,cases}' corpus/manifest.json) \
+  <(jq -S '{schema_version, cases, resources: [.resources[]
+    | {name, resource_id, revision, width, height, sha256}]}' corpus/manifest.json) \
   <(jq -S . "${corpus_actual}")
 
 cargo run --locked --quiet --package tilewright-render -- probe

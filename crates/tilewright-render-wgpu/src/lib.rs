@@ -52,9 +52,11 @@ pub struct WgpuRenderer {
     adapter_handle: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::RenderPipeline,
-    surface_pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    pipelines: Pipelines,
+    surface_pipelines: HashMap<wgpu::TextureFormat, Pipelines>,
     texture_layout: wgpu::BindGroupLayout,
+    /// Nearest and linear samplers shared by every texture's bindings.
+    samplers: [wgpu::Sampler; 2],
     adapter: AdapterDescription,
     metrics: RecoveryMetrics,
     offscreen: Option<OffscreenTarget>,
@@ -78,7 +80,8 @@ struct OffscreenTarget {
 
 struct TextureCacheEntry {
     image: Arc<Rgba8Image>,
-    binding: wgpu::BindGroup,
+    nearest: wgpu::BindGroup,
+    linear: wgpu::BindGroup,
 }
 
 struct SurfaceDepthTarget {
@@ -107,16 +110,21 @@ impl WgpuRenderer {
         };
         let target = target.validate(limits)?;
         let texture_layout = create_texture_layout(&device);
-        let pipeline = create_pipeline(&device, &texture_layout, OUTPUT_FORMAT);
+        let samplers = [
+            create_sampler(&device, wgpu::FilterMode::Nearest),
+            create_sampler(&device, wgpu::FilterMode::Linear),
+        ];
+        let pipelines = create_pipelines(&device, &texture_layout, OUTPUT_FORMAT);
         Ok(Self {
             target,
             instance,
             adapter_handle,
             device,
             queue,
-            pipeline,
+            pipelines,
             surface_pipelines: HashMap::new(),
             texture_layout,
+            samplers,
             adapter,
             metrics: RecoveryMetrics::default(),
             offscreen: None,
@@ -177,7 +185,7 @@ impl WgpuRenderer {
         let prepared = self.prepare_sprites(request.scene, request.resources.as_ref())?;
         let vertices = vertices(request.scene, &prepared)?;
         let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
-        let pipeline = self.ensure_surface_pipeline(configuration.format);
+        let pipelines = self.ensure_surface_pipelines(configuration.format);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -185,7 +193,7 @@ impl WgpuRenderer {
             });
         encode_scene(
             &mut encoder,
-            &pipeline,
+            &pipelines,
             &view,
             &depth_view,
             &vertex_buffer,
@@ -293,10 +301,10 @@ impl WgpuRenderer {
         }
     }
 
-    fn ensure_surface_pipeline(&mut self, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
+    fn ensure_surface_pipelines(&mut self, format: wgpu::TextureFormat) -> Pipelines {
         self.surface_pipelines
             .entry(format)
-            .or_insert_with(|| create_pipeline(&self.device, &self.texture_layout, format))
+            .or_insert_with(|| create_pipelines(&self.device, &self.texture_layout, format))
             .clone()
     }
 
@@ -399,7 +407,7 @@ impl WgpuRenderer {
             });
         encode_scene(
             &mut encoder,
-            &self.pipeline,
+            &self.pipelines,
             &target.color_view,
             &target.depth_view,
             &vertex_buffer,
@@ -539,6 +547,10 @@ impl WgpuRenderer {
         if distinct.len() > MAXIMUM_CACHED_TEXTURES {
             return Err(Error::LimitExceeded);
         }
+        // Frames must fit their textures: cached textures are checked before
+        // anything loads, and missing ones from their envelope headers before
+        // the cache changes.
+        let extents = self.check_cached_frames(scene)?;
         // Decode every missing texture before uploading any, so the scene's
         // whole working set is known and bounded first.
         let mut working_set_bytes = 0_u64;
@@ -566,6 +578,15 @@ impl WgpuRenderer {
                 continue;
             }
             let blob = load_blob(key, resources)?;
+            let (width, height) = Rgba8Image::envelope_dimensions(
+                &blob,
+                self.limits.maximum_dimension,
+                self.limits.maximum_pixels,
+            )
+            .map_err(|error| Error::Resource(error.to_string()))?;
+            if let Some(extent) = extents.get(&key) {
+                check_frame_extent(*extent, width, height)?;
+            }
             // Cached and staged textures share one CPU budget. A texture that
             // would not fit beside them is decoded only after evicting cached
             // textures this scene does not use, and not at all if even that
@@ -594,8 +615,7 @@ impl WgpuRenderer {
             staged_bytes += bytes;
             decoded.push((key, image));
         }
-        // Every frame must lie inside its texture before anything is uploaded.
-        let frames = self.check_frames(scene, &decoded)?;
+        let frames = self.resolve_frames(scene, &decoded)?;
         // The entry bound works the same way.
         if texture_cache_must_evict(
             self.textures.len(),
@@ -609,28 +629,64 @@ impl WgpuRenderer {
         for (key, image) in decoded {
             uploads.insert(key, self.upload_texture(key, image)?);
         }
+        self.prepared_sprites(scene, frames, uploads)
+    }
+
+    /// Pairs each quad with its cached texture binding, frame, and the upload
+    /// its texture caused, which the first quad naming it carries.
+    fn prepared_sprites(
+        &self,
+        scene: &SceneBundle,
+        frames: Vec<TextureRect>,
+        mut uploads: HashMap<TextureKey, u64>,
+    ) -> Result<Vec<PreparedSprite>, Error> {
         let mut prepared = Vec::with_capacity(scene.quads().len());
         for (quad, frame) in scene.quads().iter().zip(frames) {
-            let key = key_of(quad);
+            let key = (
+                quad.resource_id,
+                quad.resource_revision,
+                quad.resource_digest,
+            );
             let cached = self
                 .textures
                 .get(&key)
                 .ok_or_else(|| Error::Internal("texture cache insertion failed".to_owned()))?;
+            let bind_group = match quad.sampling {
+                Sampling::Nearest => cached.nearest.clone(),
+                Sampling::Linear => cached.linear.clone(),
+            };
             prepared.push(PreparedSprite {
-                bind_group: cached.binding.clone(),
+                bind_group,
                 image: cached.image.clone(),
                 // The first quad naming a newly loaded texture carries its upload.
                 uploaded_bytes: uploads.remove(&key).unwrap_or(0),
                 key,
+                sampling: quad.sampling,
                 frame,
+                clamped: frame != TextureRect::whole(cached.image.width(), cached.image.height()),
             });
         }
         Ok(prepared)
     }
 
+    /// The furthest right and bottom texel edge any frame reaches in each
+    /// texture the scene names, after checking those of cached textures.
+    fn check_cached_frames(
+        &self,
+        scene: &SceneBundle,
+    ) -> Result<HashMap<TextureKey, (u64, u64)>, Error> {
+        let extents = frame_extents(scene);
+        for (key, extent) in &extents {
+            if let Some(cached) = self.textures.get(key) {
+                check_frame_extent(*extent, cached.image.width(), cached.image.height())?;
+            }
+        }
+        Ok(extents)
+    }
+
     /// Resolves every quad's frame against its cached or newly decoded
-    /// texture, rejecting a frame that does not lie inside it.
-    fn check_frames(
+    /// texture. Frames were checked against their textures while loading.
+    fn resolve_frames(
         &self,
         scene: &SceneBundle,
         decoded: &[(TextureKey, Arc<Rgba8Image>)],
@@ -703,14 +759,22 @@ impl WgpuRenderer {
             size,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let binding = create_texture_binding(&self.device, &self.texture_layout, &view);
+        let [nearest, linear] = &self.samplers;
+        let nearest = create_texture_binding(&self.device, &self.texture_layout, &view, nearest);
+        let linear = create_texture_binding(&self.device, &self.texture_layout, &view, linear);
         let uploaded_bytes = image.pixels().len() as u64;
         self.texture_bytes = self
             .texture_bytes
             .checked_add(uploaded_bytes)
             .ok_or(Error::LimitExceeded)?;
-        self.textures
-            .insert(key, TextureCacheEntry { image, binding });
+        self.textures.insert(
+            key,
+            TextureCacheEntry {
+                image,
+                nearest,
+                linear,
+            },
+        );
         Ok(uploaded_bytes)
     }
 }
@@ -829,32 +893,59 @@ fn initialize_gpu(
 fn create_texture_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Tilewright sprite texture layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            // The shader reads texels exactly and filters them itself.
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
     })
 }
 
+fn create_sampler(device: &wgpu::Device, filter: wgpu::FilterMode) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Tilewright sprite sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: filter,
+        min_filter: filter,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    })
+}
+
+/// One texture with one of the shared samplers.
 fn create_texture_binding(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Tilewright sprite texture binding"),
         layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::TextureView(view),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
     })
 }
 
@@ -879,11 +970,25 @@ fn create_depth_target(device: &wgpu::Device, size: wgpu::Extent3d, label: &str)
     })
 }
 
-fn create_pipeline(
+/// The scene pipelines for one target format: one for quads sampling a
+/// whole texture and one that clamps samples inside a smaller frame.
+#[derive(Clone)]
+struct Pipelines {
+    whole: wgpu::RenderPipeline,
+    framed: wgpu::RenderPipeline,
+}
+
+impl Pipelines {
+    const fn get(&self, clamped: bool) -> &wgpu::RenderPipeline {
+        if clamped { &self.framed } else { &self.whole }
+    }
+}
+
+fn create_pipelines(
     device: &wgpu::Device,
     texture_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
+) -> Pipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Tilewright sprite shader"),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
@@ -893,19 +998,37 @@ fn create_pipeline(
         bind_group_layouts: &[Some(texture_layout)],
         immediate_size: 0,
     });
+    Pipelines {
+        whole: create_pipeline(device, &shader, &layout, format, false),
+        framed: create_pipeline(device, &shader, &layout, format, true),
+    }
+}
+
+fn create_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+    clamp_to_frame: bool,
+) -> wgpu::RenderPipeline {
+    let constants = [("CLAMP_TO_FRAME", if clamp_to_frame { 1.0 } else { 0.0 })];
+    let compilation_options = wgpu::PipelineCompilationOptions {
+        constants: &constants,
+        ..wgpu::PipelineCompilationOptions::default()
+    };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Tilewright sprite pipeline"),
-        layout: Some(&layout),
+        layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: &shader,
+            module: shader,
             entry_point: Some("vertex_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: compilation_options.clone(),
             buffers: &[Some(Vertex::layout())],
         },
         fragment: Some(wgpu::FragmentState {
-            module: &shader,
+            module: shader,
             entry_point: Some("fragment_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options,
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -928,7 +1051,7 @@ fn create_pipeline(
 
 fn encode_scene(
     encoder: &mut wgpu::CommandEncoder,
-    pipeline: &wgpu::RenderPipeline,
+    pipelines: &Pipelines,
     color_view: &wgpu::TextureView,
     depth_view: &wgpu::TextureView,
     vertex_buffer: &wgpu::Buffer,
@@ -966,15 +1089,23 @@ fn encode_scene(
         occlusion_query_set: None,
         multiview_mask: None,
     });
-    pass.set_pipeline(pipeline);
     pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-    // Consecutive quads that sample the same texture share one draw call,
-    // whatever their frames and sampling; order is unchanged.
+    // Consecutive quads that sample the same texture the same way share one
+    // draw call; order is unchanged.
+    let mut current = None;
     let mut start = 0_usize;
     while start < sprites.len() {
         let mut end = start + 1;
-        while end < sprites.len() && sprites[end].key == sprites[start].key {
+        while end < sprites.len()
+            && sprites[end].key == sprites[start].key
+            && sprites[end].sampling == sprites[start].sampling
+            && sprites[end].clamped == sprites[start].clamped
+        {
             end += 1;
+        }
+        if current != Some(sprites[start].clamped) {
+            pass.set_pipeline(pipelines.get(sprites[start].clamped));
+            current = Some(sprites[start].clamped);
         }
         let first = u32::try_from(start)
             .ok()
@@ -1001,22 +1132,22 @@ struct Vertex {
     grayscale: f32,
     glow_color: [f32; 4],
     glow_radius: [f32; 2],
-    /// [`FLAG_GLOW`] and [`FLAG_LINEAR`].
+    /// [`FLAG_GLOW`].
     flags: u32,
     /// The sampled frame's texel x, y, width and height.
     frame: [u16; 4],
+    /// The texture's width and height in texels.
+    texture_size: [u16; 2],
 }
 
 /// The quad draws only its glow halo.
 const FLAG_GLOW: u32 = 1;
-/// The quad filters linearly within its frame.
-const FLAG_LINEAR: u32 = 2;
 
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 9] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
         0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32,
         4 => Float32, 5 => Float32x4, 6 => Float32x2, 7 => Uint32,
-        8 => Uint16x4
+        8 => Uint16x4, 9 => Uint16x2
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -1033,8 +1164,11 @@ struct PreparedSprite {
     image: Arc<Rgba8Image>,
     uploaded_bytes: u64,
     key: TextureKey,
+    sampling: Sampling,
     /// The quad's frame, checked against its texture.
     frame: TextureRect,
+    /// The frame is smaller than its texture, so samples are clamped inside it.
+    clamped: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1058,15 +1192,9 @@ fn vertices(scene: &SceneBundle, prepared: &[PreparedSprite]) -> Result<Vec<Vert
     for (quad, prepared) in scene.quads().iter().zip(prepared) {
         let z = depth_value(quad);
         let effect = effect_amount(quad, scene.clock_millis());
-        let (glow_color, glow_radius, glow_flag) =
-            quad.glow.map_or(([0.0; 4], [0.0; 2], 0), |glow| {
-                (glow.color, glow.radius_uv, FLAG_GLOW)
-            });
-        let flags = glow_flag
-            | match quad.sampling {
-                Sampling::Nearest => 0,
-                Sampling::Linear => FLAG_LINEAR,
-            };
+        let (glow_color, glow_radius, flags) = quad.glow.map_or(([0.0; 4], [0.0; 2], 0), |glow| {
+            (glow.color, glow.radius_uv, FLAG_GLOW)
+        });
         // Frames lie inside textures no larger than the device's 2D limit,
         // which never exceeds 16 bits.
         let frame = [
@@ -1074,12 +1202,23 @@ fn vertices(scene: &SceneBundle, prepared: &[PreparedSprite]) -> Result<Vec<Vert
             prepared.frame.y,
             prepared.frame.width,
             prepared.frame.height,
+            prepared.image.width(),
+            prepared.image.height(),
         ]
         .map(u16::try_from);
-        let [Ok(left), Ok(top), Ok(width), Ok(height)] = frame else {
+        let [
+            Ok(left),
+            Ok(top),
+            Ok(width),
+            Ok(height),
+            Ok(texture_width),
+            Ok(texture_height),
+        ] = frame
+        else {
             return Err(Error::LimitExceeded);
         };
         let frame = [left, top, width, height];
+        let texture_size = [texture_width, texture_height];
         let vertex = |corner: usize| {
             let [x, y] = quad.positions[corner].map(subpixel_position);
             Vertex {
@@ -1096,6 +1235,7 @@ fn vertices(scene: &SceneBundle, prepared: &[PreparedSprite]) -> Result<Vec<Vert
                 glow_radius,
                 flags,
                 frame,
+                texture_size,
             }
         };
         output.extend_from_slice(&[
@@ -1108,6 +1248,35 @@ fn vertices(scene: &SceneBundle, prepared: &[PreparedSprite]) -> Result<Vec<Vert
         ]);
     }
     Ok(output)
+}
+
+/// The furthest right and bottom texel edge any frame reaches in each
+/// texture a scene names.
+fn frame_extents(scene: &SceneBundle) -> HashMap<TextureKey, (u64, u64)> {
+    let mut extents = HashMap::<TextureKey, (u64, u64)>::new();
+    for quad in scene.quads() {
+        if let Some(frame) = quad.frame {
+            let extent = extents
+                .entry((
+                    quad.resource_id,
+                    quad.resource_revision,
+                    quad.resource_digest,
+                ))
+                .or_default();
+            extent.0 = extent.0.max(u64::from(frame.x) + u64::from(frame.width));
+            extent.1 = extent.1.max(u64::from(frame.y) + u64::from(frame.height));
+        }
+    }
+    extents
+}
+
+fn check_frame_extent((right, bottom): (u64, u64), width: u32, height: u32) -> Result<(), Error> {
+    if right > u64::from(width) || bottom > u64::from(height) {
+        return Err(Error::Resource(
+            tilewright_render_resources::Error::FrameOutOfBounds.to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether decoding `incoming` more bytes beside `cached` and `staged` ones
@@ -1378,8 +1547,8 @@ mod tests {
             eprintln!("skipping GPU vertex limit test: no supported adapter");
             return;
         };
-        // One quad more than a 256 MiB buffer of 480-byte quads holds.
-        let count = (256_u32 << 20) / 480 + 1;
+        // One quad more than a 256 MiB buffer of 504-byte quads holds.
+        let count = (256_u32 << 20) / 504 + 1;
         let quads = (0..count).map(|index| Quad {
             semantic_id: SemanticId(index + 1),
             part: 0,
@@ -1424,12 +1593,12 @@ mod tests {
     fn vertex_buffers_stay_within_the_device_buffer_limit() {
         use super::vertex_buffer_capacity;
         let limit = 256 << 20;
-        // 600,000 quads of six 80-byte vertices need about 275 MiB.
-        assert!(vertex_buffer_capacity(600_000 * 480, limit).is_err());
+        // 600,000 quads of six 84-byte vertices need about 288 MiB.
+        assert!(vertex_buffer_capacity(600_000 * 504, limit).is_err());
         // Rounding up to a power of two never passes the device limit.
         assert_eq!(vertex_buffer_capacity(150 << 20, limit), Ok(limit));
         assert_eq!(vertex_buffer_capacity(100 << 20, limit), Ok(128 << 20));
-        assert_eq!(vertex_buffer_capacity(480, limit), Ok(512));
+        assert_eq!(vertex_buffer_capacity(504, limit), Ok(512));
         assert_eq!(vertex_buffer_capacity(limit, limit + 3), Ok(limit));
     }
 
@@ -1490,12 +1659,14 @@ mod tests {
         assert_eq!(render(&mut renderer).resource_requests, 0);
         // A full cache of unused textures is evicted, but the scene's own
         // texture stays cached and is not requested again.
-        let unused = renderer
-            .textures
-            .values()
-            .next()
-            .map(|entry| (entry.image.clone(), entry.binding.clone()));
-        let (image, binding) = unused.unwrap();
+        let unused = renderer.textures.values().next().map(|entry| {
+            (
+                entry.image.clone(),
+                entry.nearest.clone(),
+                entry.linear.clone(),
+            )
+        });
+        let (image, nearest, linear) = unused.unwrap();
         for index in 0..super::MAXIMUM_CACHED_TEXTURES as u64 {
             renderer.textures.insert(
                 (
@@ -1505,7 +1676,8 @@ mod tests {
                 ),
                 super::TextureCacheEntry {
                     image: image.clone(),
-                    binding: binding.clone(),
+                    nearest: nearest.clone(),
+                    linear: linear.clone(),
                 },
             );
         }
@@ -1597,6 +1769,141 @@ mod tests {
                 })
                 .unwrap();
         }
+    }
+
+    /// A renderer holding only the atlas in its cache, a scene of the given
+    /// quads, and a quad on the uncached synthetic texture with a frame
+    /// outside it.
+    fn cached_atlas_case() -> Option<(
+        WgpuRenderer,
+        impl Fn(Vec<tilewright_scene::Quad>) -> tilewright_scene::SceneBundle,
+        tilewright_scene::Quad,
+    )> {
+        use tilewright_render_testkit::synthetic_digest;
+        use tilewright_scene::{
+            Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, TextureRect,
+            Viewport,
+        };
+        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(112, 64)) else {
+            eprintln!("skipping GPU frame-order test: no supported adapter");
+            return None;
+        };
+        renderer
+            .render(RenderRequest {
+                scene: &atlas_scene(112, 64).unwrap(),
+                resources: atlas_provider().unwrap(),
+            })
+            .unwrap();
+        let rebuild = |quads: Vec<Quad>| {
+            let viewport = Viewport {
+                width: 112,
+                height: 64,
+                scale_milli: 1_000,
+            };
+            SceneBundle::from_quads(9, 0, viewport, [0.0; 4], quads, SceneLimits::default())
+                .unwrap()
+        };
+        let outside = Quad {
+            semantic_id: SemanticId(900),
+            part: 0,
+            resource_id: ResourceId(1),
+            resource_revision: 1,
+            resource_digest: synthetic_digest(),
+            frame: Some(TextureRect {
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 2,
+            }),
+            positions: [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]],
+            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            depth: 0,
+            painter_order: 0,
+            color: [1.0; 4],
+            grayscale: 0.0,
+            glow: None,
+            pickable: true,
+            sampling: Sampling::Nearest,
+            layer: Layer::World,
+        };
+        Some((renderer, rebuild, outside))
+    }
+
+    fn is_out_of_bounds(
+        result: Result<tilewright_render_api::FrameOutput, tilewright_render_api::Error>,
+    ) -> bool {
+        matches!(result, Err(tilewright_render_api::Error::Resource(message)) if message.contains("FrameOutOfBounds"))
+    }
+
+    #[test]
+    fn cached_frames_are_checked_before_any_texture_loads() {
+        use tilewright_render_resources::{
+            Error as ResourceError, ResourceBlob, ResourceProvider, ResourceRequest,
+        };
+        use tilewright_scene::{Quad, TextureRect};
+        struct Refusing;
+        impl ResourceProvider for Refusing {
+            fn load(&self, _request: ResourceRequest) -> Result<ResourceBlob, ResourceError> {
+                Err(ResourceError::NotFound)
+            }
+        }
+        let Some((mut renderer, rebuild, outside)) = cached_atlas_case() else {
+            return;
+        };
+        // A bad frame on the cached atlas fails before the scene's missing
+        // texture is requested, which the provider would refuse.
+        let mut quads = atlas_scene(112, 64).unwrap().quads().to_vec();
+        quads[0].frame = Some(TextureRect {
+            x: 60,
+            y: 60,
+            width: 8,
+            height: 1,
+        });
+        quads.push(Quad {
+            frame: None,
+            ..outside
+        });
+        assert!(is_out_of_bounds(renderer.render(RenderRequest {
+            scene: &rebuild(quads),
+            resources: std::sync::Arc::new(Refusing),
+        })));
+    }
+
+    #[test]
+    fn missing_frames_are_checked_before_the_cache_evicts() {
+        use tilewright_render_resources::DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES;
+        use tilewright_scene::{Quad, TextureRect};
+        let Some((mut renderer, rebuild, outside)) = cached_atlas_case() else {
+            return;
+        };
+        // A bad frame on a missing texture fails from its envelope header,
+        // before a nearly full cache evicts the unused atlas to admit it.
+        let bytes = renderer.texture_bytes;
+        renderer.texture_bytes = DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES - 8;
+        assert!(is_out_of_bounds(renderer.render(RenderRequest {
+            scene: &rebuild(vec![outside]),
+            resources: synthetic_provider().unwrap(),
+        })));
+        assert_eq!(renderer.textures.len(), 1);
+        renderer.texture_bytes = bytes;
+        // The same texture with a fitting frame loads beside the atlas.
+        let fitting = Quad {
+            frame: Some(TextureRect {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 2,
+            }),
+            ..outside
+        };
+        let frame = renderer
+            .render(RenderRequest {
+                scene: &rebuild(vec![fitting]),
+                resources: synthetic_provider().unwrap(),
+            })
+            .unwrap();
+        assert_eq!(frame.metrics.resource_requests, 1);
+        assert_eq!(renderer.textures.len(), 2);
     }
 
     #[test]

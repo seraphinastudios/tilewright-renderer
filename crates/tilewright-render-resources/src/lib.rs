@@ -97,6 +97,24 @@ impl Rgba8Image {
         maximum_dimension: u32,
         maximum_pixels: u64,
     ) -> Result<Self, Error> {
+        let (width, height) = Self::envelope_dimensions(blob, maximum_dimension, maximum_pixels)?;
+        Ok(Self {
+            width,
+            height,
+            pixels: blob.bytes()[12..].to_vec(),
+        })
+    }
+
+    /// The width and height of an `ATX1` envelope, checked exactly as
+    /// [`Rgba8Image::decode`] checks them but without copying any pixels.
+    ///
+    /// # Errors
+    /// Returns a format or limit error for malformed dimensions or byte counts.
+    pub fn envelope_dimensions(
+        blob: &ResourceBlob,
+        maximum_dimension: u32,
+        maximum_pixels: u64,
+    ) -> Result<(u32, u32), Error> {
         let bytes = blob.bytes();
         if bytes.len() < 12 || &bytes[..4] != b"ATX1" {
             return Err(Error::InvalidFormat);
@@ -119,11 +137,7 @@ impl Rgba8Image {
         {
             return Err(Error::InvalidFormat);
         }
-        Ok(Self {
-            width,
-            height,
-            pixels: bytes[12..].to_vec(),
-        })
+        Ok((width, height))
     }
 
     #[must_use]
@@ -883,8 +897,14 @@ mod tests {
             maximum_bytes: bytes.len(),
         };
         let blob = ResourceBlob::for_request(request, bytes).unwrap();
+        assert_eq!(Rgba8Image::envelope_dimensions(&blob, 16, 256), Ok((1, 1)));
         let image = Rgba8Image::decode(&blob, 16, 256).unwrap();
         assert_eq!(image.pixels(), [1, 2, 3, 4]);
+        // The header alone enforces the same bounds as decoding.
+        assert_eq!(
+            Rgba8Image::envelope_dimensions(&blob, 0, 256),
+            Err(Error::InvalidFormat)
+        );
     }
 
     #[test]
