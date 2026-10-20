@@ -283,12 +283,13 @@ impl WgpuRenderer {
             };
             let presented =
                 self.present_configured(&owned.surface, &configuration, request, started);
-            // A suboptimal surface is reconfigured before the next frame.
-            if presented
-                .as_ref()
-                .is_ok_and(|description| !description.suboptimal)
-            {
-                owned.configuration = Some(configuration);
+            // A suboptimal or lost surface is reconfigured before the next
+            // frame; any other outcome, skipped frames and scene errors
+            // included, leaves the configuration valid.
+            match &presented {
+                Ok(description) if description.suboptimal => {}
+                Err(Error::SurfaceLost) => {}
+                _ => owned.configuration = Some(configuration),
             }
             presented
         })();
@@ -1199,37 +1200,87 @@ impl MapFuture {
     }
 }
 
-/// Resolves in the browser's next task. A `MessageChannel` message is a
-/// task that browsers never delay, unlike nested `setTimeout` calls, which
-/// they clamp to 4 ms; both exist in windows and workers.
+/// Schedules browser tasks through one `MessageChannel`, whose messages
+/// browsers never delay, unlike nested `setTimeout` calls, which they clamp
+/// to 4 ms. One channel serves every wait: each posted message resolves
+/// the oldest waiting promise, so no port is created or left open per wait.
+#[cfg(target_arch = "wasm32")]
+struct TaskScheduler {
+    sender: wasm_bindgen::JsValue,
+    post: js_sys::Function,
+    waiting: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<js_sys::Function>>>,
+    _receiver: wasm_bindgen::JsValue,
+    _handler: wasm_bindgen::closure::Closure<dyn FnMut()>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl TaskScheduler {
+    fn new() -> Option<Self> {
+        use wasm_bindgen::{JsCast, JsValue, closure::Closure};
+        let property = |target: &JsValue, name: &str| {
+            js_sys::Reflect::get(target, &JsValue::from_str(name)).ok()
+        };
+        let constructor = property(&js_sys::global(), "MessageChannel")?
+            .dyn_into::<js_sys::Function>()
+            .ok()?;
+        let channel = js_sys::Reflect::construct(&constructor, &js_sys::Array::new()).ok()?;
+        let receiver = property(&channel, "port1")?;
+        let sender = property(&channel, "port2")?;
+        let post = property(&sender, "postMessage")?
+            .dyn_into::<js_sys::Function>()
+            .ok()?;
+        let waiting = std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::<
+            js_sys::Function,
+        >::new()));
+        let queue = std::rc::Rc::clone(&waiting);
+        let handler = Closure::<dyn FnMut()>::new(move || {
+            let next = queue.borrow_mut().pop_front();
+            if let Some(resolve) = next {
+                let _ = resolve.call0(&JsValue::UNDEFINED);
+            }
+        });
+        js_sys::Reflect::set(&receiver, &JsValue::from_str("onmessage"), handler.as_ref()).ok()?;
+        Some(Self {
+            sender,
+            post,
+            waiting,
+            _receiver: receiver,
+            _handler: handler,
+        })
+    }
+
+    /// Resolves `resolve` in a later task; false if the message could not
+    /// be posted.
+    fn schedule(&self, resolve: &js_sys::Function) -> bool {
+        self.waiting.borrow_mut().push_back(resolve.clone());
+        if self
+            .post
+            .call1(&self.sender, &wasm_bindgen::JsValue::UNDEFINED)
+            .is_ok()
+        {
+            return true;
+        }
+        self.waiting.borrow_mut().pop_back();
+        false
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static TASKS: Option<TaskScheduler> = TaskScheduler::new();
+}
+
+/// Resolves in the browser's next task, through the shared message channel,
+/// or `setTimeout` where there is none.
 #[cfg(target_arch = "wasm32")]
 async fn next_task() {
     use wasm_bindgen::{JsCast, JsValue};
-    let property =
-        |target: &JsValue, name: &str| js_sys::Reflect::get(target, &JsValue::from_str(name));
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let global = js_sys::global();
-        let posted = property(&global, "MessageChannel")
-            .ok()
-            .and_then(|constructor| constructor.dyn_into::<js_sys::Function>().ok())
-            .and_then(|constructor| {
-                js_sys::Reflect::construct(&constructor, &js_sys::Array::new()).ok()
-            })
-            .and_then(|channel| {
-                let receiver = property(&channel, "port1").ok()?;
-                let sender = property(&channel, "port2").ok()?;
-                js_sys::Reflect::set(&receiver, &JsValue::from_str("onmessage"), &resolve).ok()?;
-                let post = property(&sender, "postMessage")
-                    .ok()?
-                    .dyn_into::<js_sys::Function>()
-                    .ok()?;
-                post.call1(&sender, &JsValue::UNDEFINED).ok()
-            })
-            .is_some();
-        if posted {
+        if TASKS.with(|tasks| tasks.as_ref().is_some_and(|tasks| tasks.schedule(&resolve))) {
             return;
         }
-        let scheduled = property(&global, "setTimeout")
+        let global = js_sys::global();
+        let scheduled = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
             .ok()
             .and_then(|function| function.dyn_into::<js_sys::Function>().ok())
             .is_some_and(|set_timeout| {

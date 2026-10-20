@@ -390,6 +390,10 @@ impl WebRenderer {
             vertex_allocation_bytes: number(metrics.vertex_allocation_bytes),
             skipped_frames: number(metrics.skipped_frames),
             surface_reconfigurations: number(metrics.surface_reconfigurations),
+            device_recoveries: number(metrics.device_recoveries),
+            target_allocation_bytes: number(metrics.target_allocation_bytes),
+            readback_bytes: number(metrics.readback_bytes),
+            frame_cpu_micros: number(metrics.frame_cpu_micros),
         })
     }
 }
@@ -486,4 +490,13 @@ pub struct WebMetrics {
     pub skipped_frames: f64,
     #[wasm_bindgen(js_name = surfaceReconfigurations)]
     pub surface_reconfigurations: f64,
+    #[wasm_bindgen(js_name = deviceRecoveries)]
+    pub device_recoveries: f64,
+    #[wasm_bindgen(js_name = targetAllocationBytes)]
+    pub target_allocation_bytes: f64,
+    #[wasm_bindgen(js_name = readbackBytes)]
+    pub readback_bytes: f64,
+    /// Zero in browsers, where Rust has no clock.
+    #[wasm_bindgen(js_name = frameCpuMicros)]
+    pub frame_cpu_micros: f64,
 }

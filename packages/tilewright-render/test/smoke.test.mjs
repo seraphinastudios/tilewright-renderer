@@ -70,6 +70,9 @@ for (const backend of ['webgl2', 'webgpu']) {
     assert.equal(result.presented, true);
     assert.ok(result.presentedDifference <= 1, `canvas differs by ${result.presentedDifference}`);
     assert.equal(result.metrics.resourceRequests, 0);
+    // The metrics describe the present after the readback.
+    assert.equal(result.metrics.readbackBytes, 0);
+    assert.equal(typeof result.metrics.targetAllocationBytes, 'number');
     assert.equal(result.metrics.vertexCount, corpus.performance.vertex_count);
     assert.equal(result.unknownTexture, 'unknown-texture');
     assert.equal(result.frameOutside, 'resource');

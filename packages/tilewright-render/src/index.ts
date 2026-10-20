@@ -92,6 +92,13 @@ export interface Metrics {
   readonly vertexAllocationBytes: number;
   readonly skippedFrames: number;
   readonly surfaceReconfigurations: number;
+  readonly deviceRecoveries: number;
+  /** Bytes of offscreen targets allocated by the frame. */
+  readonly targetAllocationBytes: number;
+  /** Bytes read back by the frame. */
+  readonly readbackBytes: number;
+  /** Zero in browsers, where Rust has no clock: time frames with `performance.now()`. */
+  readonly frameCpuMicros: number;
 }
 
 /** Largest texture side the renderer accepts, in pixels. */
@@ -416,6 +423,10 @@ export class TilewrightRenderer {
         vertexAllocationBytes: metrics.vertexAllocationBytes,
         skippedFrames: metrics.skippedFrames,
         surfaceReconfigurations: metrics.surfaceReconfigurations,
+        deviceRecoveries: metrics.deviceRecoveries,
+        targetAllocationBytes: metrics.targetAllocationBytes,
+        readbackBytes: metrics.readbackBytes,
+        frameCpuMicros: metrics.frameCpuMicros,
       };
     } finally {
       metrics.free();

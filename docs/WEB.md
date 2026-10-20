@@ -21,8 +21,8 @@ The package ships two WebAssembly bundles with the same API:
 
 | Bundle | Backends | `.wasm` | gzip −9 |
 | --- | --- | --- | --- |
-| `webgpu` | WebGPU | 606 KB | 145 KB |
-| `full` | WebGPU and WebGL2 | 4,090 KB | 1,077 KB |
+| `webgpu` | WebGPU | 616 KB | 148 KB |
+| `full` | WebGPU and WebGL2 | 4,102 KB | 1,079 KB |
 
 WebGL2 needs wgpu's portable core, its shader translator and a GL backend in
 the bundle; WebGPU uses the browser's own implementation. `create` loads only
