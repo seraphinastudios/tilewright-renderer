@@ -4,16 +4,14 @@
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
-    // The texture coordinate in the whole texture: the frame-relative
-    // coordinate mapped onto the frame.
+    // The frame-relative texture coordinate: 0-1 spans the frame.
     @location(1) uv: vec2<f32>,
     @location(2) effect: f32,
     @location(3) grayscale: f32,
     @location(4) glow_color: vec4<f32>,
-    // The glow radius scaled onto the frame.
     @location(5) @interpolate(flat) glow_radius: vec2<f32>,
     @location(6) @interpolate(flat) flags: u32,
-    // The frame's first and last texture coordinates.
+    // The frame's origin and size in whole-texture coordinates.
     @location(7) @interpolate(flat) frame: vec4<f32>,
     // Where a sample point may lie: half a texel inside the frame's edges.
     @location(8) @interpolate(flat) bounds: vec4<f32>,
@@ -27,10 +25,11 @@ struct VertexOutput {
 // Vertex flags.
 const FLAG_GLOW: u32 = 1u;
 
-// Whether sample points are clamped inside the quad's frame. The renderer
-// builds one pipeline with it for frames smaller than their texture and one
-// without for whole textures, where the sampler's clamp-to-edge already
-// keeps samples on the texture and plain coordinates sample fastest.
+// Whether coordinates are mapped onto a frame and clamped inside it. The
+// renderer builds one pipeline with it for frames smaller than their texture
+// and one without for whole textures, where frame-relative coordinates are
+// texture coordinates, the sampler's clamp-to-edge keeps samples on the
+// texture, and plain interpolated coordinates sample fastest.
 override CLAMP_TO_FRAME: bool = true;
 
 // Must match tilewright_render_resources::GLOW_DIRECTIONS.
@@ -69,8 +68,6 @@ fn vertex_main(
     @location(8) frame: vec4<u32>,
     @location(9) texture_size: vec2<u32>,
 ) -> VertexOutput {
-    // The frame is an affine map of the quad's coordinates, so mapping each
-    // corner and interpolating equals mapping each interpolated coordinate.
     let size = vec2<f32>(texture_size);
     let origin = vec2<f32>(frame.xy) / size;
     let extent = vec2<f32>(frame.zw) / size;
@@ -78,35 +75,33 @@ fn vertex_main(
     var output: VertexOutput;
     output.position = vec4<f32>(position, 1.0);
     output.color = color;
-    output.uv = origin + uv * extent;
+    output.uv = uv;
     output.effect = effect;
     output.grayscale = grayscale;
     output.glow_color = glow_color;
-    output.glow_radius = glow_radius * extent;
+    output.glow_radius = glow_radius;
     output.flags = flags;
-    output.frame = vec4<f32>(origin, origin + extent);
+    output.frame = vec4<f32>(origin, extent);
     output.bounds = vec4<f32>(origin + half_texel, origin + extent - half_texel);
     return output;
 }
 
-// Samples the texture at a point. Points outside the frame are transparent.
-// Clamping the point half a texel inside the frame's edges keeps both
+// Samples the frame at a frame-relative coordinate. Coordinates outside 0-1
+// are transparent; the test runs on the frame-relative coordinate, as the
+// reference's does, before any rounding from mapping it onto the texture.
+// Clamping the mapped point half a texel inside the frame's edges keeps both
 // filters on the frame's own texels exactly as the reference clamps to the
 // frame's edge: nearest sampling still picks the edge texel there, and
 // linear filtering takes the edge texel alone.
-fn sample_inside(point: vec2<f32>, frame: vec4<f32>, bounds: vec4<f32>) -> vec4<f32> {
-    if (any(point < frame.xy) || any(point > frame.zw)) {
+fn sample_inside(uv: vec2<f32>, frame: vec4<f32>, bounds: vec4<f32>) -> vec4<f32> {
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
         return vec4<f32>(0.0);
     }
     if (CLAMP_TO_FRAME) {
-        return textureSampleLevel(
-            sprite_texture,
-            sprite_sampler,
-            clamp(point, bounds.xy, bounds.zw),
-            0.0,
-        );
+        let point = clamp(fma(uv, frame.zw, frame.xy), bounds.xy, bounds.zw);
+        return textureSampleLevel(sprite_texture, sprite_sampler, point, 0.0);
     }
-    return textureSampleLevel(sprite_texture, sprite_sampler, point, 0.0);
+    return textureSampleLevel(sprite_texture, sprite_sampler, uv, 0.0);
 }
 
 @fragment

@@ -315,6 +315,21 @@ fn blend(destination: &mut [u8], source: [u8; 4]) {
         .expect("8-bit alpha remains in range");
 }
 
+/// Wraps row-major RGBA8 pixels in the `ATX1` texture envelope and returns
+/// the envelope with its SHA-256 digest.
+#[must_use]
+pub fn texture_envelope(width: u32, height: u32, pixels: &[[u8; 4]]) -> (Vec<u8>, Digest256) {
+    let mut bytes = Vec::with_capacity(12 + pixels.len() * 4);
+    bytes.extend_from_slice(b"ATX1");
+    bytes.extend_from_slice(&width.to_le_bytes());
+    bytes.extend_from_slice(&height.to_le_bytes());
+    for pixel in pixels {
+        bytes.extend_from_slice(pixel);
+    }
+    let digest = Digest256(Sha256::digest(&bytes).into());
+    (bytes, digest)
+}
+
 #[must_use]
 pub fn synthetic_digest() -> Digest256 {
     Digest256(Sha256::digest(synthetic_resource()).into())

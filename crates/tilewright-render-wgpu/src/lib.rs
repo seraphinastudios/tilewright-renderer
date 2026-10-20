@@ -547,10 +547,8 @@ impl WgpuRenderer {
         if distinct.len() > MAXIMUM_CACHED_TEXTURES {
             return Err(Error::LimitExceeded);
         }
-        // Frames must fit their textures: cached textures are checked before
-        // anything loads, and missing ones from their envelope headers before
-        // the cache changes.
-        let extents = self.check_cached_frames(scene)?;
+        // Frames must fit their textures before the cache changes.
+        self.check_frames_before_loading(scene, resources)?;
         // Decode every missing texture before uploading any, so the scene's
         // whole working set is known and bounded first.
         let mut working_set_bytes = 0_u64;
@@ -578,15 +576,6 @@ impl WgpuRenderer {
                 continue;
             }
             let blob = load_blob(key, resources)?;
-            let (width, height) = Rgba8Image::envelope_dimensions(
-                &blob,
-                self.limits.maximum_dimension,
-                self.limits.maximum_pixels,
-            )
-            .map_err(|error| Error::Resource(error.to_string()))?;
-            if let Some(extent) = extents.get(&key) {
-                check_frame_extent(*extent, width, height)?;
-            }
             // Cached and staged textures share one CPU budget. A texture that
             // would not fit beside them is decoded only after evicting cached
             // textures this scene does not use, and not at all if even that
@@ -669,19 +658,31 @@ impl WgpuRenderer {
         Ok(prepared)
     }
 
-    /// The furthest right and bottom texel edge any frame reaches in each
-    /// texture the scene names, after checking those of cached textures.
-    fn check_cached_frames(
+    /// Checks that every frame lies inside its texture before any texture
+    /// is admitted or evicted: cached textures by their decoded size, and
+    /// missing textures with frames by their envelope headers. A missing
+    /// framed texture is therefore loaded once here and again to decode it;
+    /// keeping its bytes instead would hold every new texture beside the
+    /// cache before eviction could make room.
+    fn check_frames_before_loading(
         &self,
         scene: &SceneBundle,
-    ) -> Result<HashMap<TextureKey, (u64, u64)>, Error> {
-        let extents = frame_extents(scene);
-        for (key, extent) in &extents {
-            if let Some(cached) = self.textures.get(key) {
-                check_frame_extent(*extent, cached.image.width(), cached.image.height())?;
-            }
+        resources: &dyn ResourceProvider,
+    ) -> Result<(), Error> {
+        for (key, extent) in frame_extents(scene) {
+            let (width, height) = if let Some(cached) = self.textures.get(&key) {
+                (cached.image.width(), cached.image.height())
+            } else {
+                Rgba8Image::envelope_dimensions(
+                    &load_blob(key, resources)?,
+                    self.limits.maximum_dimension,
+                    self.limits.maximum_pixels,
+                )
+                .map_err(|error| Error::Resource(error.to_string()))?
+            };
+            check_frame_extent(extent, width, height)?;
         }
-        Ok(extents)
+        Ok(())
     }
 
     /// Resolves every quad's frame against its cached or newly decoded
@@ -1251,21 +1252,26 @@ fn vertices(scene: &SceneBundle, prepared: &[PreparedSprite]) -> Result<Vec<Vert
 }
 
 /// The furthest right and bottom texel edge any frame reaches in each
-/// texture a scene names.
-fn frame_extents(scene: &SceneBundle) -> HashMap<TextureKey, (u64, u64)> {
-    let mut extents = HashMap::<TextureKey, (u64, u64)>::new();
+/// texture a scene names, in the order the scene first names them.
+fn frame_extents(scene: &SceneBundle) -> Vec<(TextureKey, (u64, u64))> {
+    let mut extents = Vec::<(TextureKey, (u64, u64))>::new();
+    let mut positions = HashMap::<TextureKey, usize>::new();
     for quad in scene.quads() {
-        if let Some(frame) = quad.frame {
-            let extent = extents
-                .entry((
-                    quad.resource_id,
-                    quad.resource_revision,
-                    quad.resource_digest,
-                ))
-                .or_default();
-            extent.0 = extent.0.max(u64::from(frame.x) + u64::from(frame.width));
-            extent.1 = extent.1.max(u64::from(frame.y) + u64::from(frame.height));
-        }
+        let Some(frame) = quad.frame else {
+            continue;
+        };
+        let key = (
+            quad.resource_id,
+            quad.resource_revision,
+            quad.resource_digest,
+        );
+        let position = *positions.entry(key).or_insert_with(|| {
+            extents.push((key, (0, 0)));
+            extents.len() - 1
+        });
+        let extent = &mut extents[position].1;
+        extent.0 = extent.0.max(u64::from(frame.x) + u64::from(frame.width));
+        extent.1 = extent.1.max(u64::from(frame.y) + u64::from(frame.height));
     }
     extents
 }
@@ -1871,7 +1877,9 @@ mod tests {
 
     #[test]
     fn missing_frames_are_checked_before_the_cache_evicts() {
-        use tilewright_render_resources::DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES;
+        use tilewright_render_resources::{
+            DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES, ResourceProvider as _,
+        };
         use tilewright_scene::{Quad, TextureRect};
         let Some((mut renderer, rebuild, outside)) = cached_atlas_case() else {
             return;
@@ -1883,6 +1891,44 @@ mod tests {
         assert!(is_out_of_bounds(renderer.render(RenderRequest {
             scene: &rebuild(vec![outside]),
             resources: synthetic_provider().unwrap(),
+        })));
+        assert_eq!(renderer.textures.len(), 1);
+        renderer.texture_bytes = bytes;
+        // The same holds when an earlier, valid missing texture would make
+        // the cache evict before the bad frame is reached.
+        let provider = synthetic_provider().unwrap();
+        let meadow = tilewright_render_testkit::world_texture(105);
+        let meadow_bytes = world_provider()
+            .unwrap()
+            .load(tilewright_render_resources::ResourceRequest {
+                id: meadow.id,
+                revision: meadow.revision,
+                digest: meadow.digest,
+                maximum_bytes: tilewright_render_resources::DEFAULT_MAXIMUM_RESOURCE_BYTES,
+            })
+            .unwrap()
+            .bytes()
+            .to_vec();
+        provider
+            .insert(meadow.id, meadow.revision, meadow_bytes)
+            .unwrap();
+        let valid_first = Quad {
+            semantic_id: tilewright_scene::SemanticId(901),
+            resource_id: meadow.id,
+            resource_revision: meadow.revision,
+            resource_digest: meadow.digest,
+            frame: None,
+            painter_order: 0,
+            ..outside
+        };
+        let bad_second = Quad {
+            painter_order: 1,
+            ..outside
+        };
+        renderer.texture_bytes = DEFAULT_MAXIMUM_TEXTURE_WORKING_SET_BYTES - 8;
+        assert!(is_out_of_bounds(renderer.render(RenderRequest {
+            scene: &rebuild(vec![valid_first, bad_second]),
+            resources: provider,
         })));
         assert_eq!(renderer.textures.len(), 1);
         renderer.texture_bytes = bytes;
@@ -1904,6 +1950,79 @@ mod tests {
             .unwrap();
         assert_eq!(frame.metrics.resource_requests, 1);
         assert_eq!(renderer.textures.len(), 2);
+    }
+
+    #[test]
+    fn coordinates_just_outside_a_distant_frame_stay_transparent() {
+        use tilewright_render_testkit::{FakeResourceProvider, texture_envelope};
+        use tilewright_scene::{
+            Layer, Quad, ResourceId, Sampling, SceneBundle, SceneLimits, SemanticId, TextureRect,
+            Viewport,
+        };
+        // A one-texel red frame halfway along an 8,192-texel green row:
+        // mapped onto the texture, a coordinate 0.0001 before the frame
+        // rounds onto its edge, yet it must stay transparent as in the
+        // reference.
+        let row: Vec<[u8; 4]> = (0..8_192)
+            .map(|texel| {
+                if texel == 4_096 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 255, 0, 255]
+                }
+            })
+            .collect();
+        let (bytes, digest) = texture_envelope(8_192, 1, &row);
+        let provider = std::sync::Arc::new(FakeResourceProvider::default());
+        provider.insert(ResourceId(5), 1, bytes).unwrap();
+        // Pixel centres sample u = -0.0001, 0.2499, 0.4999 and 0.7499.
+        let quad = |id: u32, top: f32, sampling| Quad {
+            semantic_id: SemanticId(id),
+            part: 0,
+            resource_id: ResourceId(5),
+            resource_revision: 1,
+            resource_digest: digest,
+            frame: Some(TextureRect {
+                x: 4_096,
+                y: 0,
+                width: 1,
+                height: 1,
+            }),
+            positions: [[0.0, top], [4.0, top], [4.0, top + 2.0], [0.0, top + 2.0]],
+            uvs: [[-0.1251, 0.0], [0.8749, 0.0], [0.8749, 1.0], [-0.1251, 1.0]],
+            depth: 0,
+            painter_order: id,
+            color: [1.0; 4],
+            grayscale: 0.0,
+            glow: None,
+            pickable: true,
+            sampling,
+            layer: Layer::World,
+        };
+        let scene = SceneBundle::from_quads(
+            1,
+            0,
+            Viewport {
+                width: 4,
+                height: 4,
+                scale_milli: 1_000,
+            },
+            [0.0, 0.0, 0.0, 1.0],
+            [
+                quad(1, 0.0, Sampling::Nearest),
+                quad(2, 2.0, Sampling::Linear),
+            ],
+            SceneLimits::default(),
+        )
+        .unwrap();
+        let Some(frame) = assert_matches_reference(&scene, &provider) else {
+            return;
+        };
+        for row in 0..4 {
+            assert_eq!(frame.semantic_ids[row * 4], 0, "row {row}");
+            assert_eq!(&frame.rgba8[row * 16..row * 16 + 4], [0, 0, 0, 255]);
+            assert_eq!(&frame.rgba8[row * 16 + 4..row * 16 + 8], [255, 0, 0, 255]);
+        }
     }
 
     #[test]

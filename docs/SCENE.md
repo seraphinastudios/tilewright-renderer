@@ -94,8 +94,10 @@ GPU batch, whatever their frames. The corpus scenario
 
 Frames cost nothing on the CPU reference. The GPU vertex carries the frame
 and its texture's size as six 16-bit integers, so a vertex is 84 bytes and a
-quad 504 bytes. The vertex shader maps texture coordinates onto the frame,
-and the hardware sampler filters them. A frame smaller than its texture is
-drawn with a pipeline that clamps each sample point half a texel inside the
-frame; whole textures skip the clamp. See
+quad 504 bytes. The fragment shader tests the frame-relative coordinate,
+then a frame smaller than its texture is drawn with a pipeline that maps the
+coordinate onto the frame and clamps it half a texel inside the frame before
+the hardware sampler filters it; whole textures skip both steps. A missing
+framed texture is loaded twice on first use, once to check its frames
+against its envelope header before the texture cache changes. See
 [architecture](ARCHITECTURE.md#cost-and-memory) for measured fill costs.

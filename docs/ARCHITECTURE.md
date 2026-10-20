@@ -58,11 +58,12 @@ fixed-point corners.
 Texture lookups outside 0–1 are transparent, and no lookup reads a texel
 outside the quad's frame: nearest and linear sampling clamp to the frame's
 edge, and renderers reject a frame that does not lie inside its texture. The
-GPU maps each corner's coordinate onto the frame and uses the hardware
-sampler; for a frame smaller than its texture, a second pipeline clamps each
-sample point half a texel inside the frame, which keeps nearest and linear
-filtering on the frame's own texels exactly as the reference's edge clamp
-does. Hardware filtering quantises its weights, so linear sampling is within
+GPU tests the frame-relative coordinate against 0–1 exactly as the
+reference does and lets the hardware sampler filter. For a frame smaller
+than its texture, a second pipeline maps the coordinate onto the frame and
+clamps the sample point half a texel inside it, which keeps nearest and
+linear filtering on the frame's own texels exactly as the reference's edge
+clamp does. Hardware filtering quantises its weights, so linear sampling is within
 the shared tolerance only where filter fractions are multiples of 1/256, as
 in every fixture. A glow quad extends its art by
 the glow radius and draws a halo from 16 fixed sample directions around the
@@ -155,17 +156,19 @@ median of three runs):
 
 | Mode | lavapipe | RADV (Ryzen 9950X3D iGPU) | RTX 3090 |
 | --- | --- | --- | --- |
-| whole texture, nearest | 10.6 → 10.5 ms | 6.0 → 6.7 ms | 1.3 → 1.6 ms |
-| whole texture, linear | 12.5 → 13.6 ms | 7.4 → 7.2 ms | 1.4 → 1.4 ms |
-| whole texture, glow | 14.0 → 14.6 ms | 13.0 → 12.6 ms | 1.5 → 1.4 ms |
-| frame, nearest | 11.9 ms | 8.4 ms | 1.5 ms |
-| frame, linear | 17.3 ms | 8.1 ms | 1.5 ms |
-| frame, glow | 32.2 ms | 12.6 ms | 1.5 ms |
+| whole texture, nearest | 11.0 → 10.9 ms | 7.1 → 7.0 ms | 1.8 → 1.4 ms |
+| whole texture, linear | 12.6 → 11.9 ms | 6.0 → 5.9 ms | 1.4 → 1.3 ms |
+| whole texture, glow | 13.9 → 13.3 ms | 12.6 → 13.7 ms | 1.4 → 1.4 ms |
+| frame, nearest | 13.8 ms | 7.6 ms | 1.5 ms |
+| frame, linear | 16.2 ms | 7.5 ms | 1.7 ms |
+| frame, glow | 31.4 ms | 12.9 ms | 2.0 ms |
 
 Arrows run from version 0.2 to 0.3. The budget is: whole-texture quads stay
 within 10% of 0.2 apart from run-to-run noise, and the frame clamp costs at
 most 1.4× a whole-texture quad, except glow halos on lavapipe, a software
-rasteriser, at up to 2.3×.
+rasteriser, at up to 2.4×. Checking frames before the cache changes loads a
+missing framed texture twice on its first use: once for its envelope header
+and once to decode it.
 
 No public dependency or type points to a client, editor, protocol, server, or
 game implementation. `tools/check-architecture.sh` validates exact direct
