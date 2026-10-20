@@ -131,6 +131,9 @@ requestAnimationFrame(frame);
   semantic, depth and coverage planes. From the call until it settles the
   renderer is busy: every other call fails with `busy`. `renderReference()`
   returns the CPU reference frame for the same scene.
+- `finish()` resolves once the GPU has finished every submitted frame;
+  awaiting it after `render()` measures a frame's GPU time. It keeps the
+  renderer busy until it settles, as `readFrame()` does.
 - `metrics()` reports work counts. `destroy()` destroys the device at once,
   rather than at garbage collection, and drops the textures. A readback in
   flight then stops waiting and rejects with `destroyed`, and so does every
@@ -267,5 +270,6 @@ Chromium.
 
 Both backends are required, by `npm test` as by `tools/validate-web.sh`.
 `TILEWRIGHT_REQUIRE_WEBGPU=0` skips WebGPU, rather than failing, on a browser
-that offers no WebGPU adapter. The
-tests check correctness, not speed, so they do not need a GPU.
+that offers no WebGPU adapter. The tests check correctness, not speed, so
+they do not need a GPU; the [frame-time harness](FRAME-TIME.md) measures
+speed.

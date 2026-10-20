@@ -479,6 +479,38 @@ impl WebRenderer {
         }
     }
 
+    /// Resolves once the GPU has finished every frame submitted so far,
+    /// presented or read back: frame-time measurement awaits it after
+    /// `render`. Like a readback, it keeps the renderer busy until it
+    /// settles.
+    pub fn finish(&self) -> js_sys::Promise {
+        if let Err(error) = self.ready() {
+            return js_sys::Promise::reject(&error.into());
+        }
+        self.state.busy.set(true);
+        let guard = Busy(Rc::clone(&self.state));
+        let inner = Rc::clone(&self.inner);
+        // The borrow is held while waiting; the busy state turns every other
+        // call away.
+        #[allow(clippy::await_holding_refcell_ref)]
+        wasm_bindgen_futures::future_to_promise(async move {
+            let mut inner = inner.try_borrow_mut().map_err(|_| busy())?;
+            // Destroyed before the wait started: nothing else matters.
+            if guard.0.destroyed.get() {
+                inner.release();
+                return Err(destroyed().into());
+            }
+            let finished = inner.renderer()?.finish().await;
+            if guard.0.destroyed.get() {
+                inner.release();
+                return Err(destroyed().into());
+            }
+            drop(guard);
+            finished.map_err(|error| render_error(&error))?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// Renders the current scene with the CPU reference renderer: the
     /// deterministic frame every GPU backend matches within one 8-bit step,
     /// with exact picking planes. For conformance checks and tests.

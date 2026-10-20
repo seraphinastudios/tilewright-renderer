@@ -4,10 +4,15 @@
 #![forbid(unsafe_code)]
 
 mod atlas;
+mod crowd;
 mod world;
 pub use atlas::{
     ATLAS_FRAME_SIZE, ATLAS_ID, ATLAS_SHEET, atlas_digest, atlas_provider, atlas_resource,
     atlas_scene, character_sheet,
+};
+pub use crowd::{
+    CROWD_ATLAS_ID, CROWD_FRAME, CROWD_LAYER_IDS, CROWD_SHEET, CROWD_TILE, CROWD_TILES_ID, Crowd,
+    CrowdSheets, crowd_provider, crowd_scene, crowd_textures,
 };
 pub use world::{iso_world_scene, top_down_world_scene, world_provider, world_texture};
 

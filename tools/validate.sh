@@ -38,6 +38,9 @@ cargo run --locked --quiet --package tilewright-render -- probe
 cargo run --locked --quiet --package tilewright-render -- corpus
 SDL_VIDEO_DRIVER=x11 xvfb-run -a -s '-screen 0 1024x768x24' \
   cargo run --locked --quiet --package tilewright-render --features sdl3 -- window
+# Keep the native frame-time harness working; its numbers are not checked.
+cargo run --locked --quiet --release --package tilewright-render-wgpu --example frame_time -- \
+  --width 320 --height 180 --characters 50 --frames 5 --warmup 1
 cargo run --locked --quiet --package tilewright-render -- offscreen "${proof_output}"
 test "$(wc -c <"${proof_output}")" -eq 16407
 if cargo run --locked --quiet --package tilewright-render -- offscreen "${proof_output}" \

@@ -52,7 +52,9 @@ offers an adapter and WebGL2 otherwise; WebGPU support is settled before the
 canvas gets a context, because a canvas keeps its first context type.
 `WebGpu` and `WebGl2` never fall back, and are unavailable natively.
 
-Browsers cannot block on the GPU, so `Renderer::render` returns
+`draw` renders a scene offscreen without reading it back, and `finish`
+waits until the GPU has finished every submitted frame; the frame-time
+harness times a frame with them. Browsers cannot block on the GPU, so `Renderer::render` returns
 `BackendUnavailable` there; `render_async` produces the same frame with every
 plane. Native `render` is `render_async` driven to completion. A readback never
 blocks a browser: the renderer polls the device once per browser task until the

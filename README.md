@@ -83,7 +83,8 @@ cargo run --locked --package tilewright-render -- world view.json /tmp/ref.png -
 The same renderer runs in browsers, compiled to WebAssembly and drawing with
 WebGPU or WebGL2, behind the TypeScript package in `packages/tilewright-render`.
 See the [browser package](docs/WEB.md) for its API, bundle sizes, build and
-tests:
+tests, and the [frame-time harness](docs/FRAME-TIME.md) for measured frame
+times natively and in Chromium:
 
 ```sh
 tools/build-web.sh
