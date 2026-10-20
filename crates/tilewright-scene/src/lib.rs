@@ -153,11 +153,14 @@ impl SpriteSheet {
     }
 
     /// Frame `index`, counting row by row; `None` past the last frame.
+    /// Grids with more frames than `u32` counts still resolve every index
+    /// that `u32` holds.
     #[must_use]
     pub fn frame(&self, index: u32) -> Option<TextureRect> {
-        if self.columns == 0 || index >= self.frame_count()? {
+        if self.columns == 0 {
             return None;
         }
+        // `frame_at` rejects a row past the grid.
         self.frame_at(index % self.columns, index / self.columns)
     }
 }
@@ -1007,6 +1010,21 @@ mod tests {
         assert_eq!(SpriteSheet::grid(0, 8, 2, 2).frame(0), None);
         assert_eq!(SpriteSheet::grid(8, 8, 0, 2).frame(0), None);
         assert_eq!(SpriteSheet::grid(8, 8, u32::MAX, 2).frame_count(), None);
+        // Frames stay addressable when the count overflows.
+        let wide = SpriteSheet::grid(1, 1, u32::MAX, 2);
+        assert_eq!(
+            wide.frame(0),
+            Some(TextureRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1
+            })
+        );
+        assert_eq!(
+            wide.frame(u32::MAX).map(|frame| (frame.x, frame.y)),
+            Some((0, 1))
+        );
         assert_eq!(SpriteSheet::grid(u32::MAX, 8, 2, 1).frame(1), None);
         let edge = SpriteSheet {
             origin: [u32::MAX - 8, 0],

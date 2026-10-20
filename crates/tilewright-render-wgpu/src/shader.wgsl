@@ -11,8 +11,10 @@ struct VertexOutput {
     @location(4) glow_color: vec4<f32>,
     @location(5) @interpolate(flat) glow_radius: vec2<f32>,
     @location(6) @interpolate(flat) flags: u32,
-    // The frame's origin and size in whole-texture coordinates.
+    // The frame's origin and size in texels.
     @location(7) @interpolate(flat) frame: vec4<f32>,
+    // One over the texture's size in texels.
+    @location(9) @interpolate(flat) inverse_size: vec2<f32>,
     // Where a sample point may lie: half a texel inside the frame's edges.
     @location(8) @interpolate(flat) bounds: vec4<f32>,
 };
@@ -25,12 +27,19 @@ struct VertexOutput {
 // Vertex flags.
 const FLAG_GLOW: u32 = 1u;
 
-// Whether coordinates are mapped onto a frame and clamped inside it. The
-// renderer builds one pipeline with it for frames smaller than their texture
-// and one without for whole textures, where frame-relative coordinates are
-// texture coordinates, the sampler's clamp-to-edge keeps samples on the
-// texture, and plain interpolated coordinates sample fastest.
-override CLAMP_TO_FRAME: bool = true;
+// Whether coordinates are mapped onto a frame smaller than the texture. The
+// renderer builds pipelines with it for such frames and one without for
+// whole textures, where frame-relative coordinates are texture coordinates,
+// the sampler's clamp-to-edge keeps samples on the texture, and plain
+// interpolated coordinates sample fastest.
+override FRAMED: bool = true;
+// Whether a framed pipeline samples the nearest texel. Its texel is chosen
+// in frame-relative texels, exactly as the reference chooses it, and sampled
+// at its centre; mapping the coordinate onto the texture first could round
+// it across a texel boundary.
+override NEAREST: bool = true;
+// The largest f32 below 1: 1 - f32::EPSILON.
+const BELOW_ONE: f32 = 0.99999988;
 
 // Must match tilewright_render_resources::GLOW_DIRECTIONS.
 const GLOW_DIRECTIONS = array<vec2<f32>, 16>(
@@ -81,24 +90,38 @@ fn vertex_main(
     output.glow_color = glow_color;
     output.glow_radius = glow_radius;
     output.flags = flags;
-    output.frame = vec4<f32>(origin, extent);
+    output.frame = vec4<f32>(frame);
+    output.inverse_size = 1.0 / size;
     output.bounds = vec4<f32>(origin + half_texel, origin + extent - half_texel);
     return output;
 }
 
 // Samples the frame at a frame-relative coordinate. Coordinates outside 0-1
 // are transparent; the test runs on the frame-relative coordinate, as the
-// reference's does, before any rounding from mapping it onto the texture.
-// Clamping the mapped point half a texel inside the frame's edges keeps both
-// filters on the frame's own texels exactly as the reference clamps to the
-// frame's edge: nearest sampling still picks the edge texel there, and
-// linear filtering takes the edge texel alone.
-fn sample_inside(uv: vec2<f32>, frame: vec4<f32>, bounds: vec4<f32>) -> vec4<f32> {
+// reference's does. Nearest sampling picks the frame texel
+// floor(clamp(uv, 0, 1 - e) x size), as the reference does, and samples its
+// centre. Linear sampling maps the coordinate onto the texture and clamps it
+// half a texel inside the frame's edges, which keeps the filter on the
+// frame's own texels exactly as the reference clamps to the frame's edge.
+fn sample_inside(
+    uv: vec2<f32>,
+    frame: vec4<f32>,
+    inverse_size: vec2<f32>,
+    bounds: vec4<f32>,
+) -> vec4<f32> {
     if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
         return vec4<f32>(0.0);
     }
-    if (CLAMP_TO_FRAME) {
-        let point = clamp(fma(uv, frame.zw, frame.xy), bounds.xy, bounds.zw);
+    if (FRAMED && NEAREST) {
+        let texel = min(
+            floor(clamp(uv, vec2<f32>(0.0), vec2<f32>(BELOW_ONE)) * frame.zw),
+            frame.zw - vec2<f32>(1.0),
+        );
+        let point = (frame.xy + texel + vec2<f32>(0.5)) * inverse_size;
+        return textureSampleLevel(sprite_texture, sprite_sampler, point, 0.0);
+    }
+    if (FRAMED) {
+        let point = clamp(fma(uv, frame.zw, frame.xy) * inverse_size, bounds.xy, bounds.zw);
         return textureSampleLevel(sprite_texture, sprite_sampler, point, 0.0);
     }
     return textureSampleLevel(sprite_texture, sprite_sampler, uv, 0.0);
@@ -107,21 +130,26 @@ fn sample_inside(uv: vec2<f32>, frame: vec4<f32>, bounds: vec4<f32>) -> vec4<f32
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if ((input.flags & FLAG_GLOW) != 0u) {
-        var alpha = sample_inside(input.uv, input.frame, input.bounds).a;
+        var alpha = sample_inside(input.uv, input.frame, input.inverse_size, input.bounds).a;
         // A zero radius samples only the centre, as in the reference.
         if (any(input.glow_radius > vec2<f32>(0.0))) {
             for (var index = 0u; index < 16u; index = index + 1u) {
                 let direction = GLOW_DIRECTIONS[index] * input.glow_radius;
-                alpha = max(alpha, sample_inside(input.uv + direction, input.frame, input.bounds).a);
+                alpha = max(alpha, sample_inside(input.uv + direction, input.frame, input.inverse_size, input.bounds).a);
                 alpha = max(
                     alpha,
-                    sample_inside(input.uv + direction * 0.5, input.frame, input.bounds).a,
+                    sample_inside(
+                        input.uv + direction * 0.5,
+                        input.frame,
+                        input.inverse_size,
+                        input.bounds,
+                    ).a,
                 );
             }
         }
         return vec4<f32>(input.glow_color.rgb, input.glow_color.a * alpha);
     }
-    var output = sample_inside(input.uv, input.frame, input.bounds) * input.color;
+    var output = sample_inside(input.uv, input.frame, input.inverse_size, input.bounds) * input.color;
     let gray = dot(output.rgb, GRAYSCALE_WEIGHTS);
     output = vec4<f32>(mix(output.rgb, vec3<f32>(gray), input.grayscale), output.a);
     output = vec4<f32>(mix(output.rgb, output.bgr, input.effect), output.a);

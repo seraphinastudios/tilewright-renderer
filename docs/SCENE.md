@@ -59,9 +59,11 @@ Validation:
 - The scene rejects an empty frame and one that does not fit inside
   `SceneLimits::maximum_dimension` on both axes.
 - Every renderer rejects a frame that does not lie inside its decoded texture
-  with the resource error `FrameOutOfBounds`. The GPU backend checks every
-  frame of a scene against its decoded texture before uploading any texture or
-  drawing anything.
+  with the resource error `FrameOutOfBounds`. Like the reference, the GPU
+  backend takes quads in scene order and checks each quad's frame before the
+  next quad loads anything; a texture's first frame is checked against its
+  envelope header before the texture is admitted to the cache. No texture is
+  uploaded and nothing is drawn until every frame has been checked.
 
 ### Sprite sheets
 
@@ -96,10 +98,10 @@ new batch. The corpus scenario
 
 Frames cost nothing on the CPU reference. The GPU vertex carries the frame
 and its texture's size as six 16-bit integers, so a vertex is 84 bytes and a
-quad 504 bytes. The fragment shader tests the frame-relative coordinate,
-then a frame smaller than its texture is drawn with a pipeline that maps the
-coordinate onto the frame and clamps it half a texel inside the frame before
-the hardware sampler filters it; whole textures skip both steps. A missing
-framed texture is loaded twice on first use, once to check its frames
-against its envelope header before the texture cache changes. See
+quad 504 bytes. The fragment shader tests the frame-relative coordinate.
+A frame smaller than its texture is drawn by one of two pipelines: nearest
+sampling picks the frame texel in frame space and samples its centre, and
+linear sampling maps the coordinate onto the frame and clamps it half a texel
+inside the frame before the hardware sampler filters it. Whole textures skip
+both steps. See
 [architecture](ARCHITECTURE.md#cost-and-memory) for measured fill costs.

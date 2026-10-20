@@ -59,13 +59,15 @@ Texture lookups outside 0–1 are transparent, and no lookup reads a texel
 outside the quad's frame: nearest and linear sampling clamp to the frame's
 edge, and renderers reject a frame that does not lie inside its texture. The
 GPU tests the frame-relative coordinate against 0–1 exactly as the
-reference does and lets the hardware sampler filter. For a frame smaller
-than its texture, a second pipeline maps the coordinate onto the frame and
-clamps the sample point half a texel inside it, which keeps nearest and
-linear filtering on the frame's own texels exactly as the reference's edge
-clamp does. Hardware filtering quantises its weights, so linear sampling is within
-the shared tolerance only where filter fractions are multiples of 1/256, as
-in every fixture. A glow quad extends its art by
+reference does and lets the hardware sampler filter. A frame smaller than
+its texture is drawn by its own pipelines: nearest sampling picks the frame
+texel `floor(clamp(u, 0, 1 − ε) × width)` in frame space, as the reference
+does, and samples its centre; linear sampling maps the coordinate onto the
+frame and clamps the sample point half a texel inside it, which keeps the
+filter on the frame's own texels exactly as the reference's edge clamp does.
+Hardware filtering quantises its weights, so linear sampling is within the
+shared tolerance only where filter fractions are multiples of 1/256, as in
+every fixture. A glow quad extends its art by
 the glow radius and draws a halo from 16 fixed sample directions around the
 art's alpha (a zero radius samples only the centre); it is never pickable,
 and scene validation rejects a pickable glow quad. Greyscale uses Rec. 601 luma
@@ -148,7 +150,7 @@ rejected before they are generated), and is reused by offscreen and surface
 presentation until a larger scene is submitted; per-texture nearest/linear bind
 groups are created only on cache misses, and consecutive quads of one texture
 with the same sampling and frame class (the whole texture, or a smaller frame
-drawn by the clamping pipeline), such as layered characters drawn from one
+drawn by the framed pipelines), such as layered characters drawn from one
 atlas, share a draw call whatever their frames.
 
 Fill cost is measured with the `fill_rate` example of `tilewright-render-wgpu`
@@ -172,16 +174,15 @@ another machine.
 | whole texture, nearest | 11.0 → 10.9 ms | 7.1 → 7.0 ms | 1.8 → 1.4 ms |
 | whole texture, linear | 12.6 → 11.9 ms | 6.0 → 5.9 ms | 1.4 → 1.3 ms |
 | whole texture, glow | 13.9 → 13.3 ms | 12.6 → 13.7 ms | 1.4 → 1.4 ms |
-| frame, nearest | 13.8 ms | 7.6 ms | 1.5 ms |
-| frame, linear | 16.2 ms | 7.5 ms | 1.7 ms |
-| frame, glow | 31.4 ms | 12.9 ms | 2.0 ms |
+| frame, nearest | 13.0 ms | 8.5 ms | 1.4 ms |
+| frame, linear | 16.0 ms | 8.8 ms | 1.5 ms |
+| frame, glow | 29.1 ms | 21.1 ms | 1.6 ms |
 
 Arrows run from version 0.2 to 0.3. The budget is: whole-texture quads stay
-within 10% of 0.2 apart from run-to-run noise, and the frame clamp costs at
-most 1.4× a whole-texture quad, except glow halos on lavapipe, a software
-rasteriser, at up to 2.4×. Checking frames before the cache changes loads a
-missing framed texture twice on its first use: once for its envelope header
-and once to decode it.
+within 10% of 0.2 apart from run-to-run noise, and a frame smaller than its
+texture costs at most 1.7× a whole-texture quad, except glow halos on
+lavapipe, a software rasteriser, at up to 2.2×. The integrated GPU's frame
+rows are medians of six runs.
 
 No public dependency or type points to a client, editor, protocol, server, or
 game implementation. `tools/check-architecture.sh` validates exact direct
