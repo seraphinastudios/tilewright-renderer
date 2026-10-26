@@ -173,6 +173,43 @@ export function colorChannels(value: unknown, name: string): Color {
   return Object.freeze(channels) as unknown as Color;
 }
 
+/**
+ * Writes `count` numbers from an array or typed array of exactly that
+ * length into `floats` at `offset`, reading nothing past them. Records live
+ * in a reused buffer, so a short array must never leave a previous quad's
+ * values behind.
+ */
+function writeNumbers(
+  floats: Float32Array,
+  offset: number,
+  value: unknown,
+  count: number,
+  name: string,
+): void {
+  const numbers = value as ArrayLike<unknown> | null | undefined;
+  if (numbers == null || typeof numbers !== 'object' || numbers.length !== count) {
+    throw new TilewrightError('invalid-argument', `${name} must be ${count} numbers`);
+  }
+  for (let index = 0; index < count; index += 1) {
+    const number = numbers[index];
+    if (typeof number !== 'number') {
+      throw new TilewrightError('invalid-argument', `${name} must be ${count} numbers`);
+    }
+    floats[offset + index] = number;
+  }
+}
+
+/** Writes four corners of two numbers each, as `writeNumbers` does. */
+function writeCorners(floats: Float32Array, offset: number, value: unknown, name: string): void {
+  const corners = value as ArrayLike<unknown> | null | undefined;
+  if (corners == null || typeof corners !== 'object' || corners.length !== 4) {
+    throw new TilewrightError('invalid-argument', `${name} must be four corners`);
+  }
+  for (let corner = 0; corner < 4; corner += 1) {
+    writeNumbers(floats, offset + corner * 2, corners[corner], 2, name);
+  }
+}
+
 /** Builds one scene as packed quad records. */
 export class SceneBuilder {
   #words: Uint32Array;
@@ -233,10 +270,11 @@ export class SceneBuilder {
     if (!(sprite.width > 0) || !(sprite.height > 0)) {
       throw new TilewrightError('invalid-argument', 'sprite width and height must be positive');
     }
-    const left = sprite.x;
-    const top = sprite.y;
-    const right = sprite.x + sprite.width;
-    const bottom = sprite.y + sprite.height;
+    // In f32, as the Rust `Sprite` adds them.
+    const left = Math.fround(sprite.x);
+    const top = Math.fround(sprite.y);
+    const right = Math.fround(left + Math.fround(sprite.width));
+    const bottom = Math.fround(top + Math.fround(sprite.height));
     return this.quad({
       ...sprite,
       positions: [
@@ -293,20 +331,17 @@ export class SceneBuilder {
     words[base + 9] = frame ? integer(frame.y, 'frame y', 0, U32_MAX) : 0;
     words[base + 10] = frame ? integer(frame.width, 'frame width', 1, U32_MAX) : 0;
     words[base + 11] = frame ? integer(frame.height, 'frame height', 1, U32_MAX) : 0;
-    const uvs = quad.uvs ?? WHOLE_UVS;
-    for (let corner = 0; corner < 4; corner += 1) {
-      floats[base + 12 + corner * 2] = quad.positions[corner][0];
-      floats[base + 13 + corner * 2] = quad.positions[corner][1];
-      floats[base + 20 + corner * 2] = uvs[corner][0];
-      floats[base + 21 + corner * 2] = uvs[corner][1];
+    writeCorners(floats, base + 12, quad.positions, 'positions');
+    writeCorners(floats, base + 20, quad.uvs ?? WHOLE_UVS, 'uvs');
+    writeNumbers(floats, base + 28, quad.color ?? WHITE, 4, 'color');
+    const grayscale = quad.grayscale ?? 0;
+    if (typeof grayscale !== 'number') {
+      throw new TilewrightError('invalid-argument', 'grayscale must be a number');
     }
-    const color = quad.color ?? WHITE;
-    floats.set(color, base + 28);
-    floats[base + 32] = quad.grayscale ?? 0;
+    floats[base + 32] = grayscale;
     if (quad.glow) {
-      floats.set(quad.glow.color, base + 33);
-      floats[base + 37] = quad.glow.radius[0];
-      floats[base + 38] = quad.glow.radius[1];
+      writeNumbers(floats, base + 33, quad.glow.color, 4, 'glow color');
+      writeNumbers(floats, base + 37, quad.glow.radius, 2, 'glow radius');
     } else {
       words.fill(0, base + 33, base + 39);
     }

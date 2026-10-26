@@ -101,6 +101,38 @@ test('integer fields are checked rather than truncated', () => {
   assert.equal(scene.length, 0);
 });
 
+test('a short colour or point never keeps an earlier quad\'s values', () => {
+  const scene = new SceneBuilder({ width: 4, height: 4 }, 1);
+  scene.sprite({ ...sprite(1), color: [1, 1, 1, 0.25] });
+  scene.reset();
+  for (const quad of [
+    { ...sprite(1), color: [1, 0, 0] },
+    { ...sprite(1), color: [1, 0, 0, 1, 1] },
+    { ...sprite(1), color: [1, 0, 0, '1'] },
+    { ...sprite(1), color: { length: 100_000_000 } },
+    { ...sprite(1), grayscale: '0.5' },
+    { id: 1, texture, positions: [[0, 0], [1, 0], [1, 1]] },
+    { id: 1, texture, positions: [[0, 0], [1, 0], [1, 1], [0]] },
+    { id: 1, texture, positions: [[0, 0], [1, 0], [1, 1], [0, 1]], uvs: [[0, 0]] },
+    {
+      id: 1,
+      texture,
+      positions: [[0, 0], [1, 0], [1, 1], [0, 1]],
+      glow: { color: new Array(1_000).fill(1), radius: [0.1, 0.1] },
+    },
+    { id: 1, texture, positions: [[0, 0], [1, 0], [1, 1], [0, 1]], glow: { color: [1, 1, 1, 1], radius: [0.1] } },
+  ]) {
+    const add = () => (quad.positions ? scene.quad(quad) : scene.sprite(quad));
+    assert.equal(code(add), 'invalid-argument', JSON.stringify(quad).slice(0, 80));
+  }
+  assert.equal(scene.length, 0);
+  // Typed arrays are accepted, and sprites add their edges in f32.
+  scene.sprite({ ...sprite(1), color: new Float32Array([1, 0, 0, 1]), x: 0.1, width: 0.2 });
+  const floats = new Float32Array(scene.records().slice().buffer);
+  assert.deepEqual([...floats.slice(28, 32)], [1, 0, 0, 1]);
+  assert.equal(floats[14], Math.fround(Math.fround(0.1) + Math.fround(0.2)));
+});
+
 test('sprite sheets number frames row by row', () => {
   const sheet = SpriteSheet.covering({ width: 832, height: 1344 }, 64, 64);
   assert.equal(sheet.frameCount, 273);

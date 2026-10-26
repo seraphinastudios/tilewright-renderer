@@ -10,6 +10,8 @@
 //! record decoder build on every target so they are tested natively; the
 //! bindings themselves exist only on `wasm32`.
 
+#![forbid(unsafe_code)]
+
 pub mod errors;
 pub mod packed;
 pub mod textures;

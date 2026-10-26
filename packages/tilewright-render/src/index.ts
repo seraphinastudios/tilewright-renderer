@@ -171,6 +171,34 @@ function checkTextureSize(width: number, height: number): void {
   }
 }
 
+const TYPED_ARRAY = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const accessor = (name: string): ((view: unknown) => unknown) => {
+  const getter = Object.getOwnPropertyDescriptor(TYPED_ARRAY, name)?.get;
+  if (getter === undefined) {
+    throw new TilewrightError('unsupported', `typed arrays have no ${name}`);
+  }
+  return (view) => getter.call(view);
+};
+const bufferOf = accessor('buffer') as (view: unknown) => ArrayBufferLike;
+const byteOffsetOf = accessor('byteOffset') as (view: unknown) => number;
+const byteLengthOf = accessor('byteLength') as (view: unknown) => number;
+
+/**
+ * A plain `Uint8Array` over exactly the bytes of a `Uint8Array` or
+ * `Uint8ClampedArray`, read through the built-in accessors: wasm-bindgen
+ * sizes its copy from `length`, which a subclass could misreport.
+ */
+function plainBytes(view: unknown, name: string, code: 'invalid-texture' | 'invalid-scene'): Uint8Array {
+  if (!(view instanceof Uint8Array || view instanceof Uint8ClampedArray)) {
+    throw new TilewrightError(code, `${name} must be a Uint8Array or Uint8ClampedArray`);
+  }
+  try {
+    return new Uint8Array(bufferOf(view), byteOffsetOf(view), byteLengthOf(view));
+  } catch (error) {
+    throw new TilewrightError(code, `${name} is not a typed array`, { cause: error });
+  }
+}
+
 type WebRenderer = Awaited<ReturnType<BindingsModule['WebRenderer']['create']>>;
 type WebFrame = ReturnType<WebRenderer['renderReference']>;
 
@@ -209,6 +237,8 @@ export class TilewrightRenderer {
   /** The adapter's name as the browser reports it; often empty. */
   readonly adapter: string;
   #inner: WebRenderer | undefined;
+  /** Set once the WebAssembly module trapped in a call; the renderer is then unusable. */
+  #trap: TilewrightError | undefined;
   #width: number;
   #height: number;
 
@@ -267,10 +297,30 @@ export class TilewrightRenderer {
   }
 
   #renderer(): WebRenderer {
+    if (this.#trap !== undefined) {
+      throw this.#trap;
+    }
     if (this.#inner === undefined) {
       throw new TilewrightError('destroyed', 'the renderer was destroyed');
     }
     return this.#inner;
+  }
+
+  /**
+   * Converts a binding error. A WebAssembly trap leaves the renderer's Rust
+   * state borrowed mid-call, so the renderer is abandoned: every later call
+   * fails with the same `internal` error, and `destroy` only forgets it.
+   */
+  #failed(error: unknown): TilewrightError {
+    if (error instanceof WebAssembly.RuntimeError) {
+      this.#trap = new TilewrightError(
+        'internal',
+        `the renderer trapped and is unusable; create another: ${error.message}`,
+        { cause: error },
+      );
+      return this.#trap;
+    }
+    return TilewrightError.from(error);
   }
 
   #call<T>(action: (inner: WebRenderer) => T): T {
@@ -278,7 +328,7 @@ export class TilewrightRenderer {
     try {
       return action(inner);
     } catch (error) {
-      throw TilewrightError.from(error);
+      throw this.#failed(error);
     }
   }
 
@@ -298,20 +348,24 @@ export class TilewrightRenderer {
       }
     }
     checkTextureSize(texture.width, texture.height);
-    if (texture.rgba.byteLength !== texture.width * texture.height * 4) {
+    const rgba = plainBytes(texture.rgba, 'rgba', 'invalid-texture');
+    if (rgba.byteLength !== texture.width * texture.height * 4) {
       throw new TilewrightError(
         'invalid-texture',
         `rgba must hold ${texture.width * texture.height * 4} bytes`,
       );
     }
-    const rgba =
-      texture.rgba instanceof Uint8Array
-        ? texture.rgba
-        : new Uint8Array(texture.rgba.buffer, texture.rgba.byteOffset, texture.rgba.byteLength);
     const digest = this.#call((inner) =>
       inner.uploadTexture(texture.id, revision, texture.width, texture.height, rgba),
     );
-    return { id: texture.id, revision, width: texture.width, height: texture.height, digest };
+    // Frozen: builders cache each handle's parsed digest.
+    return Object.freeze({
+      id: texture.id,
+      revision,
+      width: texture.width,
+      height: texture.height,
+      digest,
+    });
   }
 
   /**
@@ -383,8 +437,8 @@ export class TilewrightRenderer {
     if (options.scaleMilli > 0xffff_ffff) {
       throw new TilewrightError('invalid-argument', 'scaleMilli must fit in 32 bits');
     }
-    const records = scene.records();
-    if (!(records instanceof Uint8Array) || records.byteLength % QUAD_RECORD_BYTES !== 0) {
+    const records = plainBytes(scene.records(), 'records', 'invalid-scene');
+    if (records.byteLength % QUAD_RECORD_BYTES !== 0) {
       throw new TilewrightError('invalid-scene', 'records must be whole packed quad records');
     }
     if (records.byteLength > MAXIMUM_QUADS * QUAD_RECORD_BYTES) {
@@ -435,7 +489,7 @@ export class TilewrightRenderer {
     try {
       return frameFrom((await inner.readFrame()) as WebFrame);
     } catch (error) {
-      throw TilewrightError.from(error);
+      throw this.#failed(error);
     }
   }
 
@@ -471,10 +525,18 @@ export class TilewrightRenderer {
 
   /** Releases the GPU device and every texture. The renderer is unusable afterwards. */
   destroy(): void {
-    // A readback still in flight rejects with `destroyed` and releases the
-    // device when it settles; otherwise the device is released now.
-    this.#inner?.destroy();
-    this.#inner?.free();
+    // A readback still in flight stops waiting, rejects with `destroyed`
+    // and releases the device; otherwise the device is released now.
+    const inner = this.#inner;
     this.#inner = undefined;
+    if (inner === undefined || this.#trap !== undefined) {
+      // A trapped call keeps the Rust object borrowed: freeing it would throw.
+      return;
+    }
+    try {
+      inner.destroy();
+    } finally {
+      inner.free();
+    }
   }
 }

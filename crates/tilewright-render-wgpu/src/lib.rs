@@ -76,9 +76,72 @@ pub struct WgpuRenderer {
     limits: TargetLimits,
     /// A surface the renderer owns, such as a browser canvas.
     owned_surface: Option<OwnedSurface>,
-    /// Set by wgpu when the device is lost; every later frame then fails
-    /// with [`Error::DeviceLost`].
-    lost: Arc<AtomicBool>,
+    /// Device loss and uncaptured GPU errors; every later frame fails once
+    /// either is reported.
+    health: Arc<DeviceHealth>,
+}
+
+/// What is known about the device's health. wgpu's device-lost callback, a
+/// lost WebGL2 canvas context and [`LossSignal`] mark it lost; wgpu reports
+/// validation and out-of-memory errors no call returned as uncaptured
+/// errors, which would otherwise panic and, in a browser, trap the whole
+/// WebAssembly module.
+#[derive(Default)]
+struct DeviceHealth {
+    lost: AtomicBool,
+    /// The first uncaptured error.
+    error: Mutex<Option<String>>,
+}
+
+impl DeviceHealth {
+    fn mark_lost(&self) {
+        self.lost.store(true, Ordering::Release);
+    }
+
+    fn record(&self, error: &wgpu::Error) {
+        if let Ok(mut recorded) = self.error.lock()
+            && recorded.is_none()
+        {
+            *recorded = Some(error.to_string());
+        }
+    }
+
+    /// [`Error::DeviceLost`] once lost, else [`Error::Internal`] once an
+    /// uncaptured error left GPU objects invalid.
+    fn check(&self) -> Result<(), Error> {
+        if self.lost.load(Ordering::Acquire) {
+            return Err(Error::DeviceLost);
+        }
+        let recorded = self
+            .error
+            .lock()
+            .map_err(|_| Error::Internal("device health lock poisoned".to_owned()))?;
+        match recorded.as_ref() {
+            Some(error) => Err(Error::Internal(format!(
+                "uncaptured GPU error; recreate the renderer: {error}"
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Marks a renderer lost from outside it. A wait in progress, such as a
+/// browser readback, then ends with [`Error::DeviceLost`] at its next poll,
+/// and so does every later frame. A browser owner signals it when it is
+/// destroyed while a readback holds the renderer.
+#[derive(Clone)]
+pub struct LossSignal(Arc<DeviceHealth>);
+
+impl LossSignal {
+    pub fn mark_lost(&self) {
+        self.0.mark_lost();
+    }
+}
+
+impl std::fmt::Debug for LossSignal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("LossSignal").finish_non_exhaustive()
+    }
 }
 
 /// A presentation surface created with the renderer, and its configuration
@@ -86,6 +149,59 @@ pub struct WgpuRenderer {
 struct OwnedSurface {
     surface: wgpu::Surface<'static>,
     state: SurfaceState,
+    /// The browser canvas behind the surface, once watched.
+    #[cfg(target_arch = "wasm32")]
+    canvas: Option<OwnedCanvas>,
+}
+
+/// A browser canvas the renderer draws into.
+#[cfg(target_arch = "wasm32")]
+enum CanvasElement {
+    Html(web_sys::HtmlCanvasElement),
+    Offscreen(web_sys::OffscreenCanvas),
+}
+
+/// An owned canvas, and its WebGL2 context when wgpu draws with WebGL2.
+/// wgpu reports no loss for WebGL2: its fences never signal on a lost
+/// context, so a readback would wait forever. The context reports it
+/// synchronously instead.
+#[cfg(target_arch = "wasm32")]
+struct OwnedCanvas {
+    element: CanvasElement,
+    webgl2: Option<js_sys::Object>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OwnedCanvas {
+    fn new(element: CanvasElement) -> Self {
+        // The context wgpu created; a canvas holding a WebGPU context
+        // returns none.
+        let webgl2 = match &element {
+            CanvasElement::Html(canvas) => canvas.get_context("webgl2"),
+            CanvasElement::Offscreen(canvas) => canvas.get_context("webgl2"),
+        }
+        .ok()
+        .flatten();
+        Self { element, webgl2 }
+    }
+
+    fn size(&self) -> (u32, u32) {
+        match &self.element {
+            CanvasElement::Html(canvas) => (canvas.width(), canvas.height()),
+            CanvasElement::Offscreen(canvas) => (canvas.width(), canvas.height()),
+        }
+    }
+
+    fn context_lost(&self) -> bool {
+        use wasm_bindgen::{JsCast, JsValue};
+        self.webgl2.as_ref().is_some_and(|context| {
+            js_sys::Reflect::get(context, &JsValue::from_str("isContextLost"))
+                .ok()
+                .and_then(|function| function.dyn_into::<js_sys::Function>().ok())
+                .and_then(|function| function.call0(context).ok())
+                .is_some_and(|lost| lost.is_truthy())
+        })
+    }
 }
 
 /// Whether an owned surface's configuration can be reused.
@@ -177,7 +293,10 @@ impl WgpuRenderer {
         target: TargetDescriptor,
         canvas: web_sys::HtmlCanvasElement,
     ) -> Result<Self, Error> {
-        Self::create(target, Some(wgpu::SurfaceTarget::Canvas(canvas))).await
+        let mut renderer =
+            Self::create(target, Some(wgpu::SurfaceTarget::Canvas(canvas.clone()))).await?;
+        renderer.watch_canvas(CanvasElement::Html(canvas))?;
+        Ok(renderer)
     }
 
     /// Creates a renderer that owns a surface on an `OffscreenCanvas`, as in
@@ -190,7 +309,20 @@ impl WgpuRenderer {
         target: TargetDescriptor,
         canvas: web_sys::OffscreenCanvas,
     ) -> Result<Self, Error> {
-        Self::create(target, Some(wgpu::SurfaceTarget::OffscreenCanvas(canvas))).await
+        let mut renderer = Self::create(
+            target,
+            Some(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone())),
+        )
+        .await?;
+        renderer.watch_canvas(CanvasElement::Offscreen(canvas))?;
+        Ok(renderer)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn watch_canvas(&mut self, element: CanvasElement) -> Result<(), Error> {
+        let owned = self.owned_surface.as_mut().ok_or(Error::InvalidTarget)?;
+        owned.canvas = Some(OwnedCanvas::new(element));
+        Ok(())
     }
 
     async fn create(
@@ -204,11 +336,11 @@ impl WgpuRenderer {
         }
         let (instance, surface, adapter_handle, device, queue, adapter) =
             initialize_gpu(target.backend, surface, startup).await?;
-        let lost = Arc::new(AtomicBool::new(false));
-        let lost_flag = Arc::clone(&lost);
-        device.set_device_lost_callback(move |_reason, _message| {
-            lost_flag.store(true, Ordering::Release);
-        });
+        let health = Arc::new(DeviceHealth::default());
+        let lost = Arc::clone(&health);
+        device.set_device_lost_callback(move |_reason, _message| lost.mark_lost());
+        let failed = Arc::clone(&health);
+        device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| failed.record(&error)));
         let limits = TargetLimits {
             maximum_dimension: device.limits().max_texture_dimension_2d,
             ..TargetLimits::default()
@@ -241,8 +373,10 @@ impl WgpuRenderer {
             owned_surface: surface.map(|surface| OwnedSurface {
                 surface,
                 state: SurfaceState::Unconfigured,
+                #[cfg(target_arch = "wasm32")]
+                canvas: None,
             }),
-            lost,
+            health,
         })
     }
 
@@ -254,6 +388,13 @@ impl WgpuRenderer {
     #[must_use]
     pub const fn metrics(&self) -> RecoveryMetrics {
         self.metrics
+    }
+
+    /// A handle that marks this renderer lost from outside it; see
+    /// [`LossSignal`].
+    #[must_use]
+    pub fn loss_signal(&self) -> LossSignal {
+        LossSignal(Arc::clone(&self.health))
     }
 
     /// Renders the same scene/material path directly into a native surface and
@@ -297,6 +438,16 @@ impl WgpuRenderer {
         let started = Stopwatch::start();
         self.check_presentable(request)?;
         let mut owned = self.owned_surface.take().ok_or(Error::InvalidTarget)?;
+        // Configuring sets the canvas's drawing-buffer size. A size set on
+        // the canvas directly no longer matches the depth target, so the
+        // surface is configured again, back to the renderer's size.
+        #[cfg(target_arch = "wasm32")]
+        if let (SurfaceState::Configured(configuration), Some(canvas)) =
+            (&owned.state, &owned.canvas)
+            && canvas.size() != (configuration.width, configuration.height)
+        {
+            owned.state = SurfaceState::Invalidated;
+        }
         let result = (|| {
             let configuration = if let Some(configuration) = owned
                 .state
@@ -330,12 +481,19 @@ impl WgpuRenderer {
         result
     }
 
-    /// [`Error::DeviceLost`] once wgpu has reported the device lost.
+    /// [`Error::DeviceLost`] once the device is lost, and
+    /// [`Error::Internal`] once an uncaptured GPU error was reported.
     fn check_device(&self) -> Result<(), Error> {
-        if self.lost.load(Ordering::Acquire) {
-            return Err(Error::DeviceLost);
+        #[cfg(target_arch = "wasm32")]
+        if self
+            .owned_surface
+            .as_ref()
+            .and_then(|owned| owned.canvas.as_ref())
+            .is_some_and(OwnedCanvas::context_lost)
+        {
+            self.health.mark_lost();
         }
-        Ok(())
+        self.health.check()
     }
 
     fn check_presentable(&self, request: &RenderRequest<'_>) -> Result<(), Error> {
@@ -356,19 +514,24 @@ impl WgpuRenderer {
         request: &RenderRequest<'_>,
         started: Stopwatch,
     ) -> Result<PresentationDescription, Error> {
-        let (frame, reconfigured, suboptimal) =
-            self.acquire_surface_frame(surface, configuration)?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let (depth_view, depth_allocated) = self.ensure_surface_depth();
         // The device must be able to hold the vertex stream before any
-        // resource is loaded or the cache changes.
+        // resource is loaded or the cache changes. The scene is prepared
+        // before a frame is acquired, so a scene that fails presents nothing:
+        // an acquired WebGPU canvas texture is presented even if dropped.
         self.check_vertex_stream(request.scene)?;
         let prepared = self.prepare_sprites(request.scene, request.resources.as_ref())?;
         let vertices = vertices(request.scene, &prepared)?;
         let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
         let pipelines = self.ensure_surface_pipelines(configuration.format);
+        let (frame, reconfigured, suboptimal) =
+            self.acquire_surface_frame(surface, configuration)?;
+        if reconfigured {
+            self.metrics.surface_reconfigurations += 1;
+        }
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let (depth_view, depth_allocated) = self.ensure_surface_depth();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -385,6 +548,8 @@ impl WgpuRenderer {
         )?;
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
+        // WebGL2 reports errors while the frame is encoded and submitted.
+        self.check_device()?;
         self.metrics.frames_submitted += 1;
         self.metrics.resource_requests = prepared
             .iter()
@@ -408,9 +573,6 @@ impl WgpuRenderer {
         };
         self.metrics.readback_bytes = 0;
         self.metrics.frame_cpu_micros = started.elapsed_micros();
-        if reconfigured {
-            self.metrics.surface_reconfigurations += 1;
-        }
         Ok(PresentationDescription {
             width: self.target.width,
             height: self.target.height,

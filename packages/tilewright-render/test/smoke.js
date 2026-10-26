@@ -111,6 +111,9 @@ async function run() {
   });
   renderer.submit(outside);
   const frameOutside = await codeOf(() => renderer.readFrame());
+  // A failed render presents nothing: the canvas keeps the last frame.
+  const failedRender = await codeOf(() => renderer.render());
+  const failedDifference = colourDifference(canvasPixels(canvas), reference.rgba);
   const invalidScene = await codeOf(() =>
     renderer.submit(
       new SceneBuilder({ width: WIDTH, height: HEIGHT }).quad({
@@ -209,6 +212,18 @@ async function run() {
   const resizedPresented = renderer.render();
   const resizedScreen = canvasPixels(canvas);
 
+  // A size set on the canvas directly is reset at the next render, which
+  // counts as a reconfiguration.
+  const reconfigurations = renderer.metrics().surfaceReconfigurations;
+  canvas.width = 40;
+  const directPresented = renderer.render();
+  const direct = {
+    presented: directPresented,
+    canvas: [canvas.width, canvas.height],
+    reconfigurations: renderer.metrics().surfaceReconfigurations - reconfigurations,
+    presentedDifference: colourDifference(canvasPixels(canvas), resizedReference.rgba),
+  };
+
   // Destroying during a readback rejects it; later calls fail too. A second
   // renderer without a scene is destroyed before its readback starts.
   const inFlight = renderer.readFrame();
@@ -242,6 +257,9 @@ async function run() {
     metrics,
     unknownTexture,
     frameOutside,
+    failedRender,
+    failedDifference,
+    direct,
     invalidScene,
     oversized: [tooWide, tooLarge, imageTooLarge, shortPixels],
     conflict,

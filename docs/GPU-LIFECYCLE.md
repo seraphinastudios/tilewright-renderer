@@ -62,7 +62,16 @@ browser that offers an adapter but refuses the device reports
 `BackendUnavailable`. wgpu's device-lost notification marks the renderer
 lost, natively and in browsers: every later frame, and a readback waiting
 when it happens, fails with `DeviceLost`, and the owner recreates the
-renderer. A suboptimal owned surface presents its frame and is reconfigured
-before the next one, as a lost one is. `surface_reconfigurations` counts each
+renderer. wgpu reports no loss for WebGL2, so a renderer drawing to a canvas
+asks the canvas's WebGL2 context whether it is lost before every frame and
+at every readback poll. An owner can mark a renderer lost through its
+`LossSignal`, which ends a readback still waiting; the browser bindings do
+that when destroyed. wgpu's uncaptured errors (validation or out of memory)
+would panic, and in a browser trap the WebAssembly module, so the renderer
+records the first one instead and every later frame fails with `Internal`.
+A scene is prepared before an owned surface's frame is acquired, so a scene
+that fails presents nothing. A suboptimal owned surface presents its frame
+and is reconfigured before the next one, as a lost one is, and so is a
+canvas whose size was set directly rather than through `resize`. `surface_reconfigurations` counts each
 resize, each retry of an outdated surface, and each of these recoveries; the
 first configuration of a surface, and the one after a resize, add nothing more.

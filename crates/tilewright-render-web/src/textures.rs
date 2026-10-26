@@ -159,6 +159,13 @@ impl WebTextures {
         true
     }
 
+    /// Forgets every texture.
+    pub fn clear(&self) {
+        if let Ok(mut store) = self.store.write() {
+            *store = Store::default();
+        }
+    }
+
     /// The digest of a stored texture.
     #[must_use]
     pub fn digest(&self, id: ResourceId, revision: u64) -> Option<Digest256> {
@@ -301,6 +308,9 @@ mod tests {
             Err(Error::DigestMismatch)
         );
         assert!(textures.remove(ResourceId(2), 1, reused));
+        textures.clear();
+        assert_eq!(textures.stored_bytes(), 0);
+        assert_eq!(textures.digest(ResourceId(3), 1), None);
         // The default bound is the renderer's texture working set.
         assert_eq!(
             WebTextures::default().maximum_bytes,

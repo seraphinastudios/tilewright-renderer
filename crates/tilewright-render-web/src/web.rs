@@ -6,7 +6,8 @@
 //! own it while it waits. A shared state marks the renderer busy from the
 //! moment `readFrame` is called until it settles, so every call made in the
 //! meantime fails with the `busy` code instead of racing the frame, and
-//! marks it destroyed once `destroy` is called.
+//! marks it destroyed once `destroy` is called. Destroying also signals the
+//! renderer lost, so a readback still waiting ends at its next poll.
 
 use crate::{
     errors::{CodedError, parse_digest, safe_integer},
@@ -21,7 +22,7 @@ use std::{
 use tilewright_render_api::{
     BackendPreference, FrameOutput, RenderRequest, Renderer, TargetDescriptor, TargetKind,
 };
-use tilewright_render_wgpu::WgpuRenderer;
+use tilewright_render_wgpu::{LossSignal, WgpuRenderer};
 use tilewright_scene::{ResourceId, SceneBundle, SceneLimits, Viewport};
 use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::{HtmlCanvasElement, OffscreenCanvas};
@@ -84,6 +85,8 @@ pub struct WebRenderer {
     inner: Rc<RefCell<Inner>>,
     state: Rc<State>,
     textures: Arc<WebTextures>,
+    /// Ends a readback still waiting when the renderer is destroyed.
+    loss: LossSignal,
     backend: String,
     adapter: String,
 }
@@ -152,6 +155,7 @@ impl WebRenderer {
         }
         .to_owned();
         let adapter = renderer.adapter().name.clone();
+        let loss = renderer.loss_signal();
         Ok(Self {
             inner: Rc::new(RefCell::new(Inner {
                 renderer: Some(renderer),
@@ -159,6 +163,7 @@ impl WebRenderer {
             })),
             state: Rc::new(State::default()),
             textures: Arc::new(WebTextures::default()),
+            loss,
             backend,
             adapter,
         })
@@ -362,10 +367,12 @@ impl WebRenderer {
     }
 
     /// Releases the device and every cached texture; every later call fails
-    /// with `destroyed`. A readback in flight rejects with `destroyed` and
-    /// releases the device when it settles.
+    /// with `destroyed`. A readback in flight stops waiting at its next poll,
+    /// rejects with `destroyed` and releases the device.
     pub fn destroy(&self) {
         self.state.destroyed.set(true);
+        self.loss.mark_lost();
+        self.textures.clear();
         if !self.state.busy.get()
             && let Ok(mut inner) = self.inner.try_borrow_mut()
         {

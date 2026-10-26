@@ -21,8 +21,8 @@ The package ships two WebAssembly bundles with the same API:
 
 | Bundle | Backends | `.wasm` | gzip −9 |
 | --- | --- | --- | --- |
-| `webgpu` | WebGPU | 619 KB | 149 KB |
-| `full` | WebGPU and WebGL2 | 4,103 KB | 1,081 KB |
+| `webgpu` | WebGPU | 633 KB | 152 KB |
+| `full` | WebGPU and WebGL2 | 4,116 KB | 1,084 KB |
 
 WebGL2 needs wgpu's portable core, its shader translator and a GL backend in
 the bundle; WebGPU uses the browser's own implementation. `create` loads only
@@ -90,8 +90,11 @@ requestAnimationFrame(frame);
   lengths are checked before any pixels are copied into WebAssembly.
   `uploadImage` takes `ImageData` exactly, and reads other image sources at
   their intrinsic size through a 2D canvas, which can round partly
-  transparent texels. `removeTexture` forgets a texture named by its whole
-  handle; a stale digest removes nothing.
+  transparent texels. Handles are frozen. `removeTexture` forgets a texture
+  named by its whole handle; a stale digest removes nothing. Submit a scene
+  without a texture before removing it: the current scene may still draw it
+  from the renderer's cache, or fail with `resource`, and `renderReference`
+  fails.
 - Quads name a texture by its full identity, the handle's ID, revision and
   digest, so a stale handle is refused (`unknown-texture`) rather than
   drawing other pixels. Reuse handles: digests are parsed once per handle.
@@ -105,15 +108,25 @@ requestAnimationFrame(frame);
 - `submit(scene)` validates and keeps a scene; a scene that fails, including
   one of another size than the drawing buffer, leaves the previous scene
   current. `render()` presents it; `resize(width, height)` changes the
-  drawing buffer (submit a scene of the new size next). A builder's options
-  are validated and frozen; change them with `reset`.
+  drawing buffer (submit a scene of the new size next). The renderer owns
+  the canvas's drawing-buffer size: one set on the canvas directly is reset
+  at the next `render()`. A builder's options are validated and frozen;
+  change them with `reset`. Colours, points and UVs must have exactly their
+  number of entries, so a reused buffer never keeps an earlier quad's
+  values.
 - `readFrame()` renders offscreen and resolves with RGBA plus the exact
   semantic, depth and coverage planes. From the call until it settles the
   renderer is busy: every other call fails with `busy`. `renderReference()`
   returns the CPU reference frame for the same scene.
 - `metrics()` reports work counts. `destroy()` releases the device and its
-  textures; a readback in flight then rejects with `destroyed`, and so does
-  every later call.
+  textures; a readback in flight then stops waiting and rejects with
+  `destroyed`, and so does every later call.
+- A lost WebGL2 context, for example when the browser drops the oldest of
+  too many contexts, fails every later call and any waiting readback with
+  `device-lost`: create a renderer on a new canvas. An uncaptured GPU error
+  fails every later frame with `internal`. A WebAssembly trap, which would
+  be a renderer bug, leaves that renderer unusable: its calls keep failing
+  with the same `internal` error.
 
 Errors are `TilewrightError`s with a stable `code` (see `src/errors.ts`),
 such as `invalid-scene`, `unknown-texture`, `resource` (including a frame
@@ -184,6 +197,11 @@ Chromium with `playwright-core`. For each of WebGL2 and WebGPU it:
 - checks that the GPU frame's semantic, depth and coverage planes equal the
   reference and that its RGBA is within one 8-bit step;
 - checks the presented canvas pixels, typed errors, and a resize.
+
+A third test loses WebGL2 contexts through `WEBGL_lose_context`: while idle,
+before the first frame, during a readback and before a destroy. It checks the
+`device-lost` and `destroyed` codes, and that another renderer keeps
+drawing. Each test fails after two minutes rather than hanging.
 
 The browser is never downloaded. `TILEWRIGHT_CHROMIUM` names a Chromium
 executable; otherwise `PLAYWRIGHT_BROWSERS_PATH` selects Playwright's

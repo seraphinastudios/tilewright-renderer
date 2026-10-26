@@ -29,7 +29,7 @@ for bundle in full webgpu; do
     features=(--no-default-features)
   fi
   cargo build --locked --profile web --target wasm32-unknown-unknown \
-    --package tilewright-render-web "${features[@]}"
+    --package tilewright-render-web ${features[@]+"${features[@]}"}
   rm -rf -- "${package:?}/wasm/${bundle}"
   wasm-bindgen --target web --out-dir "${package}/wasm/${bundle}" "${wasm}"
 done

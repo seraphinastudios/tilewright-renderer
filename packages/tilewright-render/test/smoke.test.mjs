@@ -3,8 +3,8 @@
 
 // Headless Chromium smoke tests: the corpus atlas scene, built with the
 // TypeScript API, rendered with WebGPU and with WebGL2, against the CPU
-// reference. Set TILEWRIGHT_REQUIRE_WEBGPU=1 to fail rather than skip when
-// the browser offers no WebGPU adapter.
+// reference, and a lost WebGL2 context. Set TILEWRIGHT_REQUIRE_WEBGPU=1 to
+// fail rather than skip when the browser offers no WebGPU adapter.
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -16,6 +16,8 @@ const manifest = JSON.parse(
   await readFile(new URL('../../../corpus/manifest.json', import.meta.url), 'utf8'),
 );
 const corpus = manifest.cases.find((entry) => entry.name === 'atlas-layered-characters');
+// A hung page fails its test with a diagnostic instead of stalling CI.
+const TIMEOUT = { timeout: 120_000 };
 
 let browser;
 let site;
@@ -30,22 +32,25 @@ after(async () => {
   site?.server.close();
 });
 
-async function smoke(backend) {
+/** Loads a test page and returns the result it publishes on `window`. */
+async function visit(path, name) {
   const page = await browser.newPage();
   const messages = [];
   page.on('console', (message) => messages.push(`${message.type()}: ${message.text()}`));
   page.on('pageerror', (error) => messages.push(`pageerror: ${error.message}`));
   try {
-    await page.goto(`${site.base}/test/smoke.html?backend=${backend}`);
-    const result = await page.evaluate(() => window.smokeResult);
+    await page.goto(`${site.base}/test/${path}`);
+    const result = await page.evaluate((key) => window[key], name);
     return { result, messages };
   } finally {
     await page.close();
   }
 }
 
+const smoke = (backend) => visit(`smoke.html?backend=${backend}`, 'smokeResult');
+
 for (const backend of ['webgl2', 'webgpu']) {
-  test(`${backend} renders the atlas scene like the CPU reference`, async (context) => {
+  test(`${backend} renders the atlas scene like the CPU reference`, TIMEOUT, async (context) => {
     const { result, messages } = await smoke(backend);
     if (result.unavailable) {
       if (backend === 'webgpu' && process.env.TILEWRIGHT_REQUIRE_WEBGPU !== '1') {
@@ -76,6 +81,15 @@ for (const backend of ['webgl2', 'webgpu']) {
     assert.equal(result.metrics.vertexCount, corpus.performance.vertex_count);
     assert.equal(result.unknownTexture, 'unknown-texture');
     assert.equal(result.frameOutside, 'resource');
+    assert.equal(result.failedRender, 'resource');
+    assert.ok(result.failedDifference <= 1, `a failed render changed the canvas by ${result.failedDifference}`);
+    assert.deepEqual(result.direct, {
+      presented: true,
+      canvas: [56, 32],
+      reconfigurations: 1,
+      presentedDifference: result.direct.presentedDifference,
+    });
+    assert.ok(result.direct.presentedDifference <= 1, `canvas differs by ${result.direct.presentedDifference}`);
     assert.equal(result.invalidScene, 'invalid-scene');
     assert.equal(result.conflict, 'invalid-texture');
     assert.equal(result.stale, 'unknown-texture');
@@ -98,3 +112,15 @@ for (const backend of ['webgl2', 'webgpu']) {
     assert.ok(result.resized.presentedDifference <= 1);
   });
 }
+
+test('a lost WebGL2 context fails calls and readbacks with device-lost', TIMEOUT, async () => {
+  const { result, messages } = await visit('loss.html', 'lossResult');
+  assert.equal(result.error, undefined, `${result.error}\n${result.stack}\n${messages.join('\n')}`);
+  assert.equal(result.presented, true);
+  assert.deepEqual(result.idleCodes, ['device-lost', 'device-lost']);
+  assert.equal(result.idleDestroy, 'none');
+  assert.deepEqual(result.beforeCodes, ['device-lost', 'device-lost']);
+  assert.deepEqual(result.duringCodes, ['device-lost', 'device-lost']);
+  assert.equal(result.destroyedCode, 'destroyed');
+  assert.deepEqual(result.other, { width: 8, presented: true, white: 255 });
+});
