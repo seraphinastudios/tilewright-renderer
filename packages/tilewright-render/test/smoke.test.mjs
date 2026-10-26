@@ -83,6 +83,8 @@ for (const backend of ['webgl2', 'webgpu']) {
     assert.deepEqual(result.destroyedCodes, ['destroyed', 'destroyed', 'destroyed']);
     assert.equal(result.wrongSize, 'invalid-target');
     assert.equal(result.forgedRecords, 'invalid-scene');
+    assert.equal(result.forgedClear, 'invalid-argument');
+    assert.deepEqual(result.removed, [false, true, false]);
     assert.deepEqual(result.oversized, [
       'invalid-texture',
       'limit-exceeded',

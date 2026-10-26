@@ -100,6 +100,18 @@ export const MAXIMUM_QUADS = 131_072;
 const RECORD_WORDS = QUAD_RECORD_BYTES / 4;
 const digests = new WeakMap<TextureIdentity, Uint8Array>();
 
+/** A texture's digest, checked to be 64 lowercase hexadecimal digits. */
+export function checkDigest(texture: TextureIdentity): string {
+  const digest = texture.digest;
+  if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
+    throw new TilewrightError(
+      'invalid-argument',
+      'texture digest must be 64 lowercase hexadecimal digits',
+    );
+  }
+  return digest;
+}
+
 /**
  * A texture's 32 digest bytes, parsed once per identity object: reuse the
  * handle `uploadTexture` returns rather than building identities per quad.
@@ -107,13 +119,7 @@ const digests = new WeakMap<TextureIdentity, Uint8Array>();
 function digestBytes(texture: TextureIdentity): Uint8Array {
   let bytes = digests.get(texture);
   if (bytes === undefined) {
-    const digest = texture.digest;
-    if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
-      throw new TilewrightError(
-        'invalid-argument',
-        'texture digest must be 64 lowercase hexadecimal digits',
-      );
-    }
+    const digest = checkDigest(texture);
     bytes = new Uint8Array(32);
     for (let index = 0; index < 32; index += 1) {
       bytes[index] = parseInt(digest.slice(index * 2, index * 2 + 2), 16);
@@ -150,6 +156,23 @@ function integer(value: number, name: string, minimum: number, maximum: number):
 const U32_MAX = 0xffff_ffff;
 const SAFE_MAX = Number.MAX_SAFE_INTEGER;
 
+/**
+ * A frozen copy of exactly four colour channels from an array or typed
+ * array of length 4. Only those four entries are read, whatever `value`
+ * claims; the renderer checks their range.
+ */
+export function colorChannels(value: unknown, name: string): Color {
+  const color = value as ArrayLike<unknown> | null | undefined;
+  const channels =
+    color != null && typeof color === 'object' && color.length === 4
+      ? [color[0], color[1], color[2], color[3]]
+      : [];
+  if (channels.length !== 4 || !channels.every((channel) => typeof channel === 'number')) {
+    throw new TilewrightError('invalid-argument', `${name} must be four numbers`);
+  }
+  return Object.freeze(channels) as unknown as Color;
+}
+
 /** Builds one scene as packed quad records. */
 export class SceneBuilder {
   #words: Uint32Array;
@@ -172,12 +195,11 @@ export class SceneBuilder {
   }
 
   static #resolve(options: SceneOptions): Required<SceneOptions> {
-    const clear = options.clearColor ?? [0, 0, 0, 1];
     return Object.freeze({
       width: integer(options.width, 'width', 1, U32_MAX),
       height: integer(options.height, 'height', 1, U32_MAX),
       // A copy, so later changes to the caller's array have no effect.
-      clearColor: Object.freeze([clear[0], clear[1], clear[2], clear[3]] as const),
+      clearColor: colorChannels(options.clearColor ?? [0, 0, 0, 1], 'clearColor'),
       scaleMilli: integer(options.scaleMilli ?? 1_000, 'scaleMilli', 1, U32_MAX),
       revision: integer(options.revision ?? 1, 'revision', 1, SAFE_MAX),
       clockMillis: integer(options.clockMillis ?? 0, 'clockMillis', 0, SAFE_MAX),

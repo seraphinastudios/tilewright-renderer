@@ -15,6 +15,8 @@ import {
   SceneBuilder,
   type SceneOptions,
   type TextureIdentity,
+  checkDigest,
+  colorChannels,
 } from './scene.js';
 
 export { TilewrightError, type TilewrightErrorCode } from './errors.js';
@@ -353,9 +355,14 @@ export class TilewrightRenderer {
     return this.uploadTexture({ id, revision, width, height, rgba: pixels });
   }
 
-  /** Forgets an uploaded texture; returns whether it was stored. */
+  /**
+   * Forgets an uploaded texture; returns whether it was stored. The whole
+   * identity must match, digest included, so a stale handle whose ID and
+   * revision now name other pixels removes nothing.
+   */
   removeTexture(texture: TextureIdentity): boolean {
-    return this.#call((inner) => inner.removeTexture(texture.id, texture.revision));
+    const digest = checkDigest(texture);
+    return this.#call((inner) => inner.removeTexture(texture.id, texture.revision, digest));
   }
 
   /** Validates a scene and makes it the one `render` and `readFrame` draw. */
@@ -383,7 +390,8 @@ export class TilewrightRenderer {
     if (records.byteLength > MAXIMUM_QUADS * QUAD_RECORD_BYTES) {
       throw new TilewrightError('limit-exceeded', `a scene holds at most ${MAXIMUM_QUADS} quads`);
     }
-    const clear = new Float32Array(options.clearColor);
+    // Read as exactly four numbers: `options` may come from a subclass.
+    const clear = Float32Array.from(colorChannels(options.clearColor, 'clearColor'));
     this.#call((inner) =>
       inner.submit(
         options.revision,

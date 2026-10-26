@@ -9,7 +9,7 @@
 //! marks it destroyed once `destroy` is called.
 
 use crate::{
-    errors::{CodedError, safe_integer},
+    errors::{CodedError, parse_digest, safe_integer},
     packed::{SceneHeader, decode_scene},
     textures::WebTextures,
 };
@@ -210,17 +210,21 @@ impl WebRenderer {
             }))
     }
 
-    /// Forgets an uploaded texture; returns whether it was stored. Scenes
-    /// submitted later cannot name it.
+    /// Forgets an uploaded texture named by its full identity, the digest
+    /// [`WebRenderer::upload_texture`] returned included; returns whether it
+    /// was stored. A stale identity removes nothing. Scenes submitted later
+    /// cannot name it.
     ///
     /// # Errors
-    /// Throws `invalid-argument` for an identity that is not a safe integer.
+    /// Throws `invalid-argument` for an identity that is not a safe integer
+    /// or a digest that is not 64 lowercase hexadecimal digits.
     #[wasm_bindgen(js_name = removeTexture)]
-    pub fn remove_texture(&self, id: f64, revision: f64) -> Result<bool, JsError> {
+    pub fn remove_texture(&self, id: f64, revision: f64, digest: &str) -> Result<bool, JsError> {
         self.ready()?;
         let id = safe_integer(id, "id").map_err(js_error)?;
         let revision = safe_integer(revision, "revision").map_err(js_error)?;
-        Ok(self.textures.remove(ResourceId(id), revision))
+        let digest = parse_digest(digest).map_err(js_error)?;
+        Ok(self.textures.remove(ResourceId(id), revision, digest))
     }
 
     /// Validates and stores the scene that [`WebRenderer::render`] and

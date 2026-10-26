@@ -8,7 +8,7 @@
 
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     sync::{Arc, RwLock},
 };
 use tilewright_render_resources::{
@@ -140,19 +140,23 @@ impl WebTextures {
         Ok(digest)
     }
 
-    /// Forgets one texture; returns whether it was stored. Renderers keep
-    /// their own decoded copy until their cache evicts it.
-    pub fn remove(&self, id: ResourceId, revision: u64) -> bool {
+    /// Forgets one texture if it is stored under its full identity, digest
+    /// included; returns whether it was. A stale or foreign identity whose
+    /// ID and revision match another stored texture removes nothing.
+    /// Renderers keep their own decoded copy until their cache evicts it.
+    pub fn remove(&self, id: ResourceId, revision: u64, digest: Digest256) -> bool {
         let Ok(mut store) = self.store.write() else {
             return false;
         };
-        match store.textures.remove(&(id, revision)) {
-            Some(texture) => {
-                store.bytes -= texture.envelope.len() as u64;
-                true
-            }
-            None => false,
+        let Entry::Occupied(entry) = store.textures.entry((id, revision)) else {
+            return false;
+        };
+        if entry.get().digest != digest {
+            return false;
         }
+        let texture = entry.remove();
+        store.bytes -= texture.envelope.len() as u64;
+        true
     }
 
     /// The digest of a stored texture.
@@ -278,10 +282,25 @@ mod tests {
             Err(TextureError::Conflict)
         );
         assert!(textures.insert(ResourceId(1), 2, 2, 2, &[1; 16]).is_err());
-        assert!(textures.remove(ResourceId(1), 1));
-        assert!(!textures.remove(ResourceId(1), 1));
+        let digest = textures.digest(ResourceId(1), 1).unwrap();
+        // Removal needs the digest too: another one removes nothing.
+        assert!(!textures.remove(ResourceId(1), 1, Digest256([7; 32])));
+        assert_eq!(textures.digest(ResourceId(1), 1), Some(digest));
+        assert!(textures.remove(ResourceId(1), 1, digest));
+        assert!(!textures.remove(ResourceId(1), 1, digest));
         assert_eq!(textures.stored_bytes(), 2 * 28);
         assert!(textures.insert(ResourceId(4), 1, 2, 2, &pixels).is_ok());
+        // A pair reused for other pixels after removal is a new identity: the
+        // old handle can neither remove nor load it.
+        assert!(textures.remove(ResourceId(2), 1, digest));
+        let reused = textures.insert(ResourceId(2), 1, 2, 2, &[3; 16]).unwrap();
+        assert_ne!(reused, digest);
+        assert!(!textures.remove(ResourceId(2), 1, digest));
+        assert_eq!(
+            textures.load(request(2, 1, digest)),
+            Err(Error::DigestMismatch)
+        );
+        assert!(textures.remove(ResourceId(2), 1, reused));
         // The default bound is the renderer's texture working set.
         assert_eq!(
             WebTextures::default().maximum_bytes,

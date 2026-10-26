@@ -148,6 +148,23 @@ async function run() {
   const forged = new SceneBuilder({ width: WIDTH, height: HEIGHT });
   forged.records = () => new Uint8Array(10);
   const forgedRecords = await codeOf(() => renderer.submit(forged));
+  class ForgedOptions extends SceneBuilder {
+    get options() {
+      return { ...super.options, clearColor: { length: 100_000_000 } };
+    }
+  }
+  const forgedClear = await codeOf(() =>
+    renderer.submit(new ForgedOptions({ width: WIDTH, height: HEIGHT })),
+  );
+
+  // Removal needs the whole identity: a stale digest removes nothing, so
+  // the atlas still draws below.
+  const extra = renderer.uploadTexture({ id: 61, width: 1, height: 1, rgba: new Uint8Array(4) });
+  const removed = [
+    renderer.removeTexture({ ...texture, digest: 'cd'.repeat(32) }),
+    renderer.removeTexture(extra),
+    renderer.removeTexture(extra),
+  ];
 
   // A readback makes the renderer busy from the call until it settles.
   renderer.submit(scene(renderer, texture));
@@ -231,6 +248,8 @@ async function run() {
     stale,
     wrongSize,
     forgedRecords,
+    forgedClear,
+    removed,
     busyCodes,
     destroyedCodes,
     resized: {

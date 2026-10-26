@@ -49,6 +49,15 @@ test('scene options are validated copies that cannot change', () => {
   }, TypeError);
   assert.equal(scene.options.width, 4);
   assert.equal(code(() => scene.reset({ width: 2 ** 32 + 32 })), 'invalid-argument');
+  // Exactly four numbers, from an array or a typed array; nothing past them
+  // is read.
+  assert.deepEqual(
+    [...new SceneBuilder({ width: 4, height: 4, clearColor: new Float32Array([0, 0.5, 1, 1]) }).options.clearColor],
+    [0, 0.5, 1, 1],
+  );
+  for (const clearColor of [[0, 0, 0], [0, 0, 0, 1, 1], [0, 0, '0', 1], { length: 100_000_000 }, 'rgba']) {
+    assert.equal(code(() => new SceneBuilder({ width: 4, height: 4, clearColor })), 'invalid-argument', String(clearColor));
+  }
 });
 
 test('records pack every field little-endian', () => {

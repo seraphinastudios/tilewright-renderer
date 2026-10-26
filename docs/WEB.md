@@ -21,8 +21,8 @@ The package ships two WebAssembly bundles with the same API:
 
 | Bundle | Backends | `.wasm` | gzip −9 |
 | --- | --- | --- | --- |
-| `webgpu` | WebGPU | 616 KB | 148 KB |
-| `full` | WebGPU and WebGL2 | 4,102 KB | 1,079 KB |
+| `webgpu` | WebGPU | 619 KB | 149 KB |
+| `full` | WebGPU and WebGL2 | 4,103 KB | 1,081 KB |
 
 WebGL2 needs wgpu's portable core, its shader translator and a GL backend in
 the bundle; WebGPU uses the browser's own implementation. `create` loads only
@@ -90,7 +90,8 @@ requestAnimationFrame(frame);
   lengths are checked before any pixels are copied into WebAssembly.
   `uploadImage` takes `ImageData` exactly, and reads other image sources at
   their intrinsic size through a 2D canvas, which can round partly
-  transparent texels. `removeTexture` forgets a texture.
+  transparent texels. `removeTexture` forgets a texture named by its whole
+  handle; a stale digest removes nothing.
 - Quads name a texture by its full identity, the handle's ID, revision and
   digest, so a stale handle is refused (`unknown-texture`) rather than
   drawing other pixels. Reuse handles: digests are parsed once per handle.

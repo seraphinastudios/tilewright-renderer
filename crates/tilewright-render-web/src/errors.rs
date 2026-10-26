@@ -113,9 +113,37 @@ pub fn safe_integer(value: f64, name: &str) -> Result<u64, CodedError> {
     }
 }
 
+/// A texture digest as `uploadTexture` returns it: 64 lowercase
+/// hexadecimal digits.
+///
+/// # Errors
+/// Returns an `invalid-argument` error otherwise.
+pub fn parse_digest(value: &str) -> Result<tilewright_scene::Digest256, CodedError> {
+    let invalid = || {
+        CodedError::new(
+            "invalid-argument",
+            "texture digest must be 64 lowercase hexadecimal digits",
+        )
+    };
+    let digits = value.as_bytes();
+    if digits.len() != 64 {
+        return Err(invalid());
+    }
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let mut digest = [0_u8; 32];
+    for (byte, pair) in digest.iter_mut().zip(digits.chunks_exact(2)) {
+        *byte = (digit(pair[0]).ok_or_else(invalid)? << 4) | digit(pair[1]).ok_or_else(invalid)?;
+    }
+    Ok(tilewright_scene::Digest256(digest))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CodedError, safe_integer};
+    use super::{CodedError, parse_digest, safe_integer};
     use crate::{packed::DecodeError, textures::TextureError};
     use tilewright_render_api::Error as RenderError;
 
@@ -163,6 +191,28 @@ mod tests {
         for invalid in [-1.0, 0.5, 9_007_199_254_740_992.0, f64::NAN, f64::INFINITY] {
             assert_eq!(
                 safe_integer(invalid, "id").map_err(|error| error.code),
+                Err("invalid-argument"),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn digests_are_lowercase_hexadecimal() {
+        let hex = "00ff10".to_owned() + &"ab".repeat(29);
+        let digest = parse_digest(&hex).unwrap();
+        assert_eq!(digest.0[..3], [0x00, 0xff, 0x10]);
+        assert_eq!(digest.0[3..], [0xab; 29]);
+        for invalid in [
+            String::new(),
+            "ab".repeat(31),
+            "ab".repeat(33),
+            "AB".repeat(32),
+            "g0".repeat(32),
+            "é".repeat(32),
+        ] {
+            assert_eq!(
+                parse_digest(&invalid).map_err(|error| error.code),
                 Err("invalid-argument"),
                 "{invalid}"
             );

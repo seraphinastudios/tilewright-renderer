@@ -85,7 +85,37 @@ pub struct WgpuRenderer {
 /// once the first frame has been presented at the current size.
 struct OwnedSurface {
     surface: wgpu::Surface<'static>,
-    configuration: Option<wgpu::SurfaceConfiguration>,
+    state: SurfaceState,
+}
+
+/// Whether an owned surface's configuration can be reused.
+enum SurfaceState {
+    /// Never configured at the current size: on creation and after a resize,
+    /// which counts its own reconfiguration.
+    Unconfigured,
+    Configured(wgpu::SurfaceConfiguration),
+    /// The last frame was suboptimal or the surface was lost; configuring it
+    /// again is a recovery and counts as a reconfiguration.
+    Invalidated,
+}
+
+impl SurfaceState {
+    /// The configuration to reuse at `width` × `height`, if any, leaving the
+    /// state [`SurfaceState::Unconfigured`] or [`SurfaceState::Invalidated`].
+    fn take_matching(&mut self, width: u32, height: u32) -> Option<wgpu::SurfaceConfiguration> {
+        match std::mem::replace(self, Self::Unconfigured) {
+            Self::Configured(configuration)
+                if configuration.width == width && configuration.height == height =>
+            {
+                Some(configuration)
+            }
+            Self::Invalidated => {
+                *self = Self::Invalidated;
+                None
+            }
+            Self::Configured(_) | Self::Unconfigured => None,
+        }
+    }
 }
 
 struct OffscreenTarget {
@@ -210,7 +240,7 @@ impl WgpuRenderer {
             limits,
             owned_surface: surface.map(|surface| OwnedSurface {
                 surface,
-                configuration: None,
+                state: SurfaceState::Unconfigured,
             }),
             lost,
         })
@@ -268,29 +298,32 @@ impl WgpuRenderer {
         self.check_presentable(request)?;
         let mut owned = self.owned_surface.take().ok_or(Error::InvalidTarget)?;
         let result = (|| {
-            let configuration = match owned.configuration.take() {
-                Some(configuration)
-                    if configuration.width == self.target.width
-                        && configuration.height == self.target.height =>
-                {
-                    configuration
+            let configuration = if let Some(configuration) = owned
+                .state
+                .take_matching(self.target.width, self.target.height)
+            {
+                configuration
+            } else {
+                let configuration = self.surface_configuration(&owned.surface)?;
+                owned.surface.configure(&self.device, &configuration);
+                // Initial and resize configurations are not recoveries;
+                // `resize` counts its own.
+                if matches!(owned.state, SurfaceState::Invalidated) {
+                    self.metrics.surface_reconfigurations += 1;
                 }
-                _ => {
-                    let configuration = self.surface_configuration(&owned.surface)?;
-                    owned.surface.configure(&self.device, &configuration);
-                    configuration
-                }
+                owned.state = SurfaceState::Unconfigured;
+                configuration
             };
             let presented =
                 self.present_configured(&owned.surface, &configuration, request, started);
             // A suboptimal or lost surface is reconfigured before the next
             // frame; any other outcome, skipped frames and scene errors
             // included, leaves the configuration valid.
-            match &presented {
-                Ok(description) if description.suboptimal => {}
-                Err(Error::SurfaceLost) => {}
-                _ => owned.configuration = Some(configuration),
-            }
+            owned.state = match &presented {
+                Ok(description) if description.suboptimal => SurfaceState::Invalidated,
+                Err(Error::SurfaceLost) => SurfaceState::Invalidated,
+                _ => SurfaceState::Configured(configuration),
+            };
             presented
         })();
         self.owned_surface = Some(owned);
@@ -961,8 +994,9 @@ impl Renderer for WgpuRenderer {
         self.metrics.surface_reconfigurations += 1;
         self.offscreen = None;
         self.surface_depth = None;
+        // Counted above, so the next configuration is not a recovery too.
         if let Some(owned) = &mut self.owned_surface {
-            owned.configuration = None;
+            owned.state = SurfaceState::Unconfigured;
         }
         Ok(())
     }
@@ -2809,6 +2843,37 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(frame.semantic_ids, reference.semantic_ids);
+    }
+
+    #[test]
+    fn owned_surfaces_reuse_only_a_valid_configuration_of_the_target_size() {
+        use super::SurfaceState;
+        let configuration = |width, height| wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: Vec::new(),
+            desired_maximum_frame_latency: 2,
+        };
+        let mut state = SurfaceState::Configured(configuration(8, 4));
+        assert_eq!(
+            state.take_matching(8, 4).map(|c| (c.width, c.height)),
+            Some((8, 4))
+        );
+        assert!(matches!(state, SurfaceState::Unconfigured));
+        // Another size is configured afresh, which is not a recovery.
+        let mut state = SurfaceState::Configured(configuration(8, 4));
+        assert!(state.take_matching(9, 4).is_none());
+        assert!(matches!(state, SurfaceState::Unconfigured));
+        // An invalidated surface stays marked until it is configured again,
+        // so that configuration counts as a reconfiguration.
+        let mut state = SurfaceState::Invalidated;
+        assert!(state.take_matching(8, 4).is_none());
+        assert!(matches!(state, SurfaceState::Invalidated));
     }
 
     #[test]

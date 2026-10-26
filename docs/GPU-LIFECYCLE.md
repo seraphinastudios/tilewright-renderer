@@ -63,4 +63,6 @@ browser that offers an adapter but refuses the device reports
 lost, natively and in browsers: every later frame, and a readback waiting
 when it happens, fails with `DeviceLost`, and the owner recreates the
 renderer. A suboptimal owned surface presents its frame and is reconfigured
-before the next one.
+before the next one, as a lost one is. `surface_reconfigurations` counts each
+resize, each retry of an outdated surface, and each of these recoveries; the
+first configuration of a surface, and the one after a resize, add nothing more.
