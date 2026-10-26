@@ -27,6 +27,80 @@ use tilewright_scene::{ResourceId, SceneBundle, SceneLimits, Viewport};
 use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::{HtmlCanvasElement, OffscreenCanvas};
 
+thread_local! {
+    /// The page's trap handler; see [`set_trap_handler`].
+    static TRAP_HANDLER: std::cell::RefCell<Option<js_sys::Function>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Calls `handler` with the panic message whenever this module panics,
+/// just before the panic traps the module. A trap aborts mid-call: a
+/// readback in progress never settles, and the module, which every renderer
+/// of the bundle shares, is left in an undefined state. The TypeScript
+/// wrapper uses the handler to stop every renderer and reject waiting
+/// readbacks.
+#[wasm_bindgen(js_name = setTrapHandler)]
+pub fn set_trap_handler(handler: js_sys::Function) {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    TRAP_HANDLER.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            *slot = Some(handler);
+        }
+    });
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let message = JsValue::from_str(&info.to_string());
+            TRAP_HANDLER.with(|slot| {
+                if let Ok(slot) = slot.try_borrow()
+                    && let Some(handler) = slot.as_ref()
+                {
+                    let _ = handler.call1(&JsValue::NULL, &message);
+                }
+            });
+            previous(info);
+        }));
+    });
+}
+
+/// Test hooks, built only with the `test-hooks` feature: the browser tests
+/// make the module panic at a chosen point to check trap handling.
+#[cfg(feature = "test-hooks")]
+mod test_hooks {
+    use wasm_bindgen::prelude::*;
+
+    thread_local! {
+        static PANIC_AT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Panics at the next `point` reached: `"submit"` or `"readback"`.
+    #[wasm_bindgen(js_name = panicForTest)]
+    pub fn panic_for_test(point: &str) {
+        let point = match point {
+            "submit" => "submit",
+            "readback" => "readback",
+            _ => return,
+        };
+        PANIC_AT.with(|at| at.set(Some(point)));
+    }
+
+    pub(super) fn reached(point: &'static str) {
+        if PANIC_AT.with(std::cell::Cell::get) == Some(point) {
+            PANIC_AT.with(|at| at.set(None));
+            panic!("test panic at {point}");
+        }
+    }
+}
+
+/// A point where the browser tests can make the module panic.
+#[cfg(feature = "test-hooks")]
+fn test_point(point: &'static str) {
+    test_hooks::reached(point);
+}
+
+#[cfg(not(feature = "test-hooks"))]
+const fn test_point(_point: &'static str) {}
+
 fn js_error(error: impl Into<CodedError>) -> JsError {
     JsError::new(&error.into().message())
 }
@@ -156,13 +230,15 @@ impl WebRenderer {
         .to_owned();
         let adapter = renderer.adapter().name.clone();
         let loss = renderer.loss_signal();
+        let textures =
+            WebTextures::default().with_maximum_dimension(renderer.maximum_texture_dimension());
         Ok(Self {
             inner: Rc::new(RefCell::new(Inner {
                 renderer: Some(renderer),
                 scene: None,
             })),
             state: Rc::new(State::default()),
-            textures: Arc::new(WebTextures::default()),
+            textures: Arc::new(textures),
             loss,
             backend,
             adapter,
@@ -183,12 +259,23 @@ impl WebRenderer {
         self.adapter.clone()
     }
 
+    /// The largest texture side this device accepts, at most 8,192.
+    #[wasm_bindgen(getter, js_name = maximumTextureSide)]
+    #[must_use]
+    pub fn maximum_texture_side(&self) -> u32 {
+        self.textures.maximum_dimension()
+    }
+
     /// Stores `width` × `height` RGBA8 pixels (row-major, unpremultiplied)
-    /// as texture `id` at `revision`, replacing any earlier upload of the
-    /// pair, and returns the SHA-256 of its envelope in hexadecimal.
+    /// as texture `id` at `revision` and returns the SHA-256 of its envelope
+    /// in hexadecimal. A stored pair never changes: the same pixels are
+    /// accepted again, and different pixels need a new revision (or
+    /// [`WebRenderer::remove_texture`] first).
     ///
     /// # Errors
-    /// Throws `invalid-argument`, `invalid-texture` or `limit-exceeded`.
+    /// Throws `invalid-argument`, `invalid-texture` (including different
+    /// pixels under a stored pair) or `limit-exceeded` (including a side
+    /// above the device's limit).
     #[wasm_bindgen(js_name = uploadTexture)]
     pub fn upload_texture(
         &self,
@@ -251,6 +338,7 @@ impl WebRenderer {
         quads: &[u8],
     ) -> Result<(), JsError> {
         self.ready()?;
+        test_point("submit");
         let [red, green, blue, alpha] = clear else {
             return Err(js_error(CodedError::new(
                 "invalid-argument",
@@ -349,6 +437,7 @@ impl WebRenderer {
             }
             let Inner { renderer, scene } = &mut *inner;
             let scene = scene.as_ref().ok_or_else(no_scene)?;
+            test_point("readback");
             let frame = renderer
                 .as_mut()
                 .ok_or_else(destroyed)?

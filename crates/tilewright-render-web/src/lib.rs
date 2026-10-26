@@ -20,4 +20,4 @@ pub mod textures;
 mod web;
 
 #[cfg(target_arch = "wasm32")]
-pub use web::{WebFrame, WebMetrics, WebRenderer};
+pub use web::{WebFrame, WebMetrics, WebRenderer, set_trap_handler};

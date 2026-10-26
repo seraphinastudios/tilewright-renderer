@@ -159,6 +159,9 @@ async function run() {
   const forgedClear = await codeOf(() =>
     renderer.submit(new ForgedOptions({ width: WIDTH, height: HEIGHT })),
   );
+  // None of the failed submits replaced the scene with a frame outside its
+  // texture.
+  const keptScene = await codeOf(() => renderer.renderReference());
 
   // Removal needs the whole identity: a stale digest removes nothing, so
   // the atlas still draws below.
@@ -224,6 +227,31 @@ async function run() {
     presentedDifference: colourDifference(canvasPixels(canvas), resizedReference.rgba),
   };
 
+  // A transparent clear still presents an opaque canvas on both backends.
+  renderer.submit(
+    new SceneBuilder({ width: 56, height: 32, revision: 6, clearColor: [0, 0, 0, 0] }).sprite({
+      id: 7,
+      texture,
+      frame: { x: 0, y: 48, width: 16, height: 16 },
+      color: [1, 1, 1, 0.5],
+      x: 8,
+      y: 8,
+      width: 32,
+      height: 16,
+    }),
+  );
+  const transparentReference = renderer.renderReference();
+  renderer.render();
+  const transparentScreen = canvasPixels(canvas);
+  let minimumAlpha = 255;
+  for (let index = 3; index < transparentScreen.length; index += 4) {
+    minimumAlpha = Math.min(minimumAlpha, transparentScreen[index]);
+  }
+  const transparent = {
+    minimumAlpha,
+    difference: colourDifference(transparentScreen, transparentReference.rgba),
+  };
+
   // Destroying during a readback rejects it; later calls fail too. A second
   // renderer without a scene is destroyed before its readback starts.
   const inFlight = renderer.readFrame();
@@ -267,6 +295,8 @@ async function run() {
     wrongSize,
     forgedRecords,
     forgedClear,
+    keptScene,
+    transparent,
     removed,
     busyCodes,
     destroyedCodes,

@@ -3,8 +3,11 @@
 
 // Headless Chromium smoke tests: the corpus atlas scene, built with the
 // TypeScript API, rendered with WebGPU and with WebGL2, against the CPU
-// reference, and a lost WebGL2 context. Set TILEWRIGHT_REQUIRE_WEBGPU=1 to
-// fail rather than skip when the browser offers no WebGPU adapter.
+// reference; lost WebGL2 contexts; and traps. Both backends are required:
+// set TILEWRIGHT_REQUIRE_WEBGPU=0 to skip, rather than fail, WebGPU where the
+// browser offers no adapter. The trap tests need a full bundle built with
+// TILEWRIGHT_WEB_TEST_HOOKS=1, as tools/validate-web.sh builds it; with that
+// variable set they fail rather than skip without the hooks.
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -53,7 +56,7 @@ for (const backend of ['webgl2', 'webgpu']) {
   test(`${backend} renders the atlas scene like the CPU reference`, TIMEOUT, async (context) => {
     const { result, messages } = await smoke(backend);
     if (result.unavailable) {
-      if (backend === 'webgpu' && process.env.TILEWRIGHT_REQUIRE_WEBGPU !== '1') {
+      if (backend === 'webgpu' && process.env.TILEWRIGHT_REQUIRE_WEBGPU === '0') {
         context.skip(`no WebGPU adapter: ${result.error}`);
         return;
       }
@@ -90,6 +93,9 @@ for (const backend of ['webgl2', 'webgpu']) {
       presentedDifference: result.direct.presentedDifference,
     });
     assert.ok(result.direct.presentedDifference <= 1, `canvas differs by ${result.direct.presentedDifference}`);
+    // Canvases are opaque on both backends, whatever the clear alpha.
+    assert.equal(result.transparent.minimumAlpha, 255);
+    assert.ok(result.transparent.difference <= 1, `canvas differs by ${result.transparent.difference}`);
     assert.equal(result.invalidScene, 'invalid-scene');
     assert.equal(result.conflict, 'invalid-texture');
     assert.equal(result.stale, 'unknown-texture');
@@ -97,6 +103,8 @@ for (const backend of ['webgl2', 'webgpu']) {
     assert.deepEqual(result.destroyedCodes, ['destroyed', 'destroyed', 'destroyed']);
     assert.equal(result.wrongSize, 'invalid-target');
     assert.equal(result.forgedRecords, 'invalid-scene');
+    // The failed submits left the scene with a frame outside its texture.
+    assert.equal(result.keptScene, 'resource');
     assert.equal(result.forgedClear, 'invalid-argument');
     assert.deepEqual(result.removed, [false, true, false]);
     assert.deepEqual(result.oversized, [
@@ -121,6 +129,22 @@ test('a lost WebGL2 context fails calls and readbacks with device-lost', TIMEOUT
   assert.equal(result.idleDestroy, 'none');
   assert.deepEqual(result.beforeCodes, ['device-lost', 'device-lost']);
   assert.deepEqual(result.duringCodes, ['device-lost', 'device-lost']);
-  assert.equal(result.destroyedCode, 'destroyed');
+  assert.deepEqual(result.destroyedCodes, ['pending', 'destroyed']);
   assert.deepEqual(result.other, { width: 8, presented: true, white: 255 });
 });
+
+for (const point of ['submit', 'readback']) {
+  test(`a trap in ${point} stops every renderer with internal`, TIMEOUT, async (context) => {
+    const { result, messages } = await visit(`trap.html?point=${point}`, 'trapResult');
+    assert.equal(result.error, undefined, `${result.error}\n${result.stack}\n${messages.join('\n')}`);
+    if (!result.hooks) {
+      assert.notEqual(process.env.TILEWRIGHT_WEB_TEST_HOOKS, '1', 'the full bundle has no test hooks');
+      context.skip('the full bundle has no test hooks; build it with TILEWRIGHT_WEB_TEST_HOOKS=1');
+      return;
+    }
+    assert.equal(result.trapped, 'internal');
+    assert.match(result.message, new RegExp(`test panic at ${point}`));
+    assert.deepEqual(result.after, ['internal', 'internal', 'internal']);
+    assert.equal(result.destroyed, 'none');
+  });
+}

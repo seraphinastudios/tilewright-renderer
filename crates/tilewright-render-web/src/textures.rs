@@ -18,7 +18,8 @@ use tilewright_render_resources::{
 };
 use tilewright_scene::{Digest256, ResourceId};
 
-/// Largest texture side the store accepts, matching the renderer's bound.
+/// Largest texture side any store accepts: the renderer's bound on the web.
+/// A store for one device accepts at most that device's limit.
 pub const MAXIMUM_TEXTURE_DIMENSION: u32 = 8_192;
 /// Most textures the store holds at once.
 pub const MAXIMUM_STORED_TEXTURES: usize = MAXIMUM_SCENE_TEXTURES * 4;
@@ -33,7 +34,7 @@ pub enum TextureError {
     /// buffer whose length is not `width × height × 4`.
     InvalidTexture,
     /// The texture, or the store with it, would exceed its byte or count
-    /// bound.
+    /// bound, or a side exceeds the device's texture limit.
     LimitExceeded,
     /// The identity and revision already hold different pixels. A stored
     /// texture never changes; upload changed pixels as a new revision.
@@ -58,6 +59,7 @@ pub struct WebTextures {
     store: RwLock<Store>,
     maximum_bytes: u64,
     maximum_textures: usize,
+    maximum_dimension: u32,
 }
 
 impl Default for WebTextures {
@@ -75,7 +77,23 @@ impl WebTextures {
             store: RwLock::default(),
             maximum_bytes,
             maximum_textures,
+            maximum_dimension: MAXIMUM_TEXTURE_DIMENSION,
         }
+    }
+
+    /// The same store for a device whose textures are at most `side` texels
+    /// on a side, so a texture the device cannot hold is refused on upload
+    /// rather than failing every frame.
+    #[must_use]
+    pub fn with_maximum_dimension(mut self, side: u32) -> Self {
+        self.maximum_dimension = side.min(MAXIMUM_TEXTURE_DIMENSION);
+        self
+    }
+
+    /// The largest texture side this store accepts.
+    #[must_use]
+    pub const fn maximum_dimension(&self) -> u32 {
+        self.maximum_dimension
     }
 
     /// Stores RGBA8 pixels as one texture identity and revision and returns
@@ -85,7 +103,8 @@ impl WebTextures {
     /// # Errors
     /// Returns [`TextureError::InvalidTexture`] for a malformed texture,
     /// [`TextureError::Conflict`] for different pixels under a stored pair,
-    /// and [`TextureError::LimitExceeded`] above the size or store bounds.
+    /// and [`TextureError::LimitExceeded`] above the device's texture side
+    /// or the size or store bounds.
     pub fn insert(
         &self,
         id: ResourceId,
@@ -102,6 +121,9 @@ impl WebTextures {
             || height > MAXIMUM_TEXTURE_DIMENSION
         {
             return Err(TextureError::InvalidTexture);
+        }
+        if width > self.maximum_dimension || height > self.maximum_dimension {
+            return Err(TextureError::LimitExceeded);
         }
         let expected = u64::from(width) * u64::from(height) * 4;
         if u64::try_from(rgba.len()).ok() != Some(expected) {
@@ -315,6 +337,28 @@ mod tests {
         assert_eq!(
             WebTextures::default().maximum_bytes,
             super::MAXIMUM_STORED_BYTES
+        );
+    }
+
+    #[test]
+    fn a_device_texture_limit_is_checked_on_upload() {
+        let textures = WebTextures::default().with_maximum_dimension(4);
+        assert_eq!(textures.maximum_dimension(), 4);
+        assert!(textures.insert(ResourceId(1), 1, 4, 1, &[0; 16]).is_ok());
+        assert_eq!(
+            textures.insert(ResourceId(2), 1, 5, 1, &[0; 20]),
+            Err(TextureError::LimitExceeded)
+        );
+        assert_eq!(
+            textures.insert(ResourceId(2), 1, 1, 5, &[0; 20]),
+            Err(TextureError::LimitExceeded)
+        );
+        // No device raises the store's own bound.
+        assert_eq!(
+            WebTextures::default()
+                .with_maximum_dimension(16_384)
+                .maximum_dimension(),
+            super::MAXIMUM_TEXTURE_DIMENSION
         );
     }
 

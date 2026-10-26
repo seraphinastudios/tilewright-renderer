@@ -17,6 +17,9 @@ default = ["webgl"]
 # WebGL2 for browsers without WebGPU; without it the bundle is WebGPU-only
 # and far smaller.
 webgl = ["tilewright-render-wgpu/webgl"]
+# Exports `panicForTest` for the browser tests' trap checks; never in a
+# shipped bundle.
+test-hooks = []
 
 [dependencies]
 tilewright-render-api.workspace = true

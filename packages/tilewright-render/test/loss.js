@@ -63,10 +63,11 @@ async function run() {
   ];
   before.renderer.destroy();
 
-  // Lost while a readback waits for the GPU.
+  // Lost while a readback waits for the GPU: the readback's first poll runs
+  // in a microtask queued before this function resumes.
   const during = await renderer('during');
   const waiting = during.renderer.readFrame();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await Promise.resolve();
   lose(during.canvas);
   const duringCodes = [
     await settled(waiting, 5_000),
@@ -74,15 +75,33 @@ async function run() {
   ];
   during.renderer.destroy();
 
-  // Destroyed while a readback waits on a lost context.
+  // Destroyed while a readback waits on a loss the renderer cannot see, as
+  // if the context never reported it: only destroying ends the wait.
   const destroyed = await renderer('destroyed');
-  const abandoned = destroyed.renderer.readFrame();
-  lose(destroyed.canvas);
-  destroyed.renderer.destroy();
-  const destroyedCode = await settled(abandoned, 5_000);
+  const isContextLost = WebGL2RenderingContext.prototype.isContextLost;
+  WebGL2RenderingContext.prototype.isContextLost = () => false;
+  let destroyedCodes;
+  try {
+    const abandoned = destroyed.renderer.readFrame();
+    await Promise.resolve();
+    lose(destroyed.canvas);
+    const beforeDestroy = await settled(abandoned, 300);
+    destroyed.renderer.destroy();
+    destroyedCodes = [beforeDestroy, await settled(abandoned, 5_000)];
+  } finally {
+    WebGL2RenderingContext.prototype.isContextLost = isContextLost;
+  }
 
-  // Another renderer keeps working.
+  // Destroyed renderers give up their contexts at once, so creating and
+  // destroying more renderers than the browser keeps contexts for never
+  // loses a live one.
   const other = await renderer('other');
+  for (let index = 0; index < 20; index += 1) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 8;
+    canvas.height = 8;
+    (await TilewrightRenderer.create(canvas, { backend: 'webgl2' })).destroy();
+  }
   const frame = await other.renderer.readFrame();
   const otherPresented = other.renderer.render();
   other.renderer.destroy();
@@ -93,7 +112,7 @@ async function run() {
     idleDestroy,
     beforeCodes,
     duringCodes,
-    destroyedCode,
+    destroyedCodes,
     other: { width: frame.width, presented: otherPresented, white: frame.rgba[0] },
   };
 }

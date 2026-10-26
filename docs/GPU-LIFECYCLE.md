@@ -28,8 +28,8 @@ cross-checks the non-SDL renderer crates and default portable CLI for the
 Windows GNU target; native D3D12 presentation remains a documented manual test
 because the GNU cross toolchain is not a Windows runtime.
 
-`Automatic` natively enables only Vulkan and D3D12, requests the high-performance class,
-and does not force a fallback adapter. wgpu may still return a CPU adapter when
+`Automatic` natively enables only Vulkan and D3D12, requests the
+high-performance class, and does not force a fallback adapter. wgpu may still return a CPU adapter when
 it is the only conforming implementation, as in headless CI; diagnostics record
 that device type, driver, backend, startup time, maximum 2D texture dimension,
 and buffer limit. Explicit Vulkan/D3D12 requests never cross-fallback to the
@@ -67,11 +67,18 @@ asks the canvas's WebGL2 context whether it is lost before every frame and
 at every readback poll. An owner can mark a renderer lost through its
 `LossSignal`, which ends a readback still waiting; the browser bindings do
 that when destroyed. wgpu's uncaptured errors (validation or out of memory)
-would panic, and in a browser trap the WebAssembly module, so the renderer
-records the first one instead and every later frame fails with `Internal`.
-A scene is prepared before an owned surface's frame is acquired, so a scene
-that fails presents nothing. A suboptimal owned surface presents its frame
-and is reconfigured before the next one, as a lost one is, and so is a
-canvas whose size was set directly rather than through `resize`. `surface_reconfigurations` counts each
-resize, each retry of an outdated surface, and each of these recoveries; the
-first configuration of a surface, and the one after a resize, add nothing more.
+would panic natively and on WebGL2, and in a browser trap the WebAssembly
+module, so the renderer records the first one instead and every later frame
+fails with `Internal`; a browser's WebGPU reports them later, so a later
+frame fails. In browsers a dropped renderer destroys its device and gives up
+its WebGL2 context at once, because wgpu's browser objects free nothing
+until garbage collection. A scene is prepared before an owned surface's
+frame is acquired, so a scene that fails presents nothing, and vertices are
+uploaded only once a frame is acquired, so a skipped frame queues no
+upload. Presented frames are opaque on every backend: surface pipelines do
+not write alpha and the clear writes 1. A suboptimal owned surface presents
+its frame and is reconfigured before the next one, as a lost one is, and so
+is a canvas whose size was set directly rather than through `resize`.
+`surface_reconfigurations` counts each resize, each retry of an outdated
+surface, and each of these recoveries; the first configuration of a surface,
+and the one after a resize, add nothing more.

@@ -3,6 +3,8 @@
 # glue, and the TypeScript wrapper. Prints each bundle's raw and gzipped
 # size. Requires the wasm32-unknown-unknown target, a wasm-bindgen CLI of
 # exactly the locked wasm-bindgen version, and Node with npm.
+# TILEWRIGHT_WEB_TEST_HOOKS=1 builds the `full` bundle with the browser
+# tests' trap hooks; never ship such a build.
 set -euo pipefail
 
 repository=$(git rev-parse --show-toplevel)
@@ -27,6 +29,8 @@ for bundle in full webgpu; do
   features=()
   if [ "${bundle}" = webgpu ]; then
     features=(--no-default-features)
+  elif [ "${TILEWRIGHT_WEB_TEST_HOOKS:-0}" = 1 ]; then
+    features=(--features test-hooks)
   fi
   cargo build --locked --profile web --target wasm32-unknown-unknown \
     --package tilewright-render-web ${features[@]+"${features[@]}"}

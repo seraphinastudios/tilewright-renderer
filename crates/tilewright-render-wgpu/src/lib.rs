@@ -82,10 +82,11 @@ pub struct WgpuRenderer {
 }
 
 /// What is known about the device's health. wgpu's device-lost callback, a
-/// lost WebGL2 canvas context and [`LossSignal`] mark it lost; wgpu reports
+/// lost WebGL2 canvas context and [`LossSignal`] mark it lost. wgpu reports
 /// validation and out-of-memory errors no call returned as uncaptured
-/// errors, which would otherwise panic and, in a browser, trap the whole
-/// WebAssembly module.
+/// errors. Natively and on WebGL2 they arrive during the call and would
+/// otherwise panic, which in a browser traps the whole WebAssembly module;
+/// browsers' WebGPU reports them later, so a later frame fails.
 #[derive(Default)]
 struct DeviceHealth {
     lost: AtomicBool,
@@ -193,14 +194,62 @@ impl OwnedCanvas {
     }
 
     fn context_lost(&self) -> bool {
-        use wasm_bindgen::{JsCast, JsValue};
         self.webgl2.as_ref().is_some_and(|context| {
-            js_sys::Reflect::get(context, &JsValue::from_str("isContextLost"))
-                .ok()
-                .and_then(|function| function.dyn_into::<js_sys::Function>().ok())
-                .and_then(|function| function.call0(context).ok())
-                .is_some_and(|lost| lost.is_truthy())
+            call_method(context, "isContextLost", None).is_some_and(|lost| lost.is_truthy())
         })
+    }
+
+    /// Gives up the WebGL2 context at once rather than at garbage
+    /// collection, so it stops counting against the browser's limit of live
+    /// contexts, past which the oldest is lost.
+    fn release_context(&self) {
+        let Some(context) = &self.webgl2 else {
+            return;
+        };
+        let extension = wasm_bindgen::JsValue::from_str("WEBGL_lose_context");
+        if let Some(extension) = call_method(context, "getExtension", Some(&extension))
+            .filter(wasm_bindgen::JsValue::is_object)
+        {
+            let _ = call_method(&extension, "loseContext", None);
+        }
+    }
+}
+
+/// Calls `object[name](argument)`, or `None` if that throws or is not a
+/// function.
+#[cfg(target_arch = "wasm32")]
+fn call_method(
+    object: &wasm_bindgen::JsValue,
+    name: &str,
+    argument: Option<&wasm_bindgen::JsValue>,
+) -> Option<wasm_bindgen::JsValue> {
+    use wasm_bindgen::{JsCast, JsValue};
+    let function = js_sys::Reflect::get(object, &JsValue::from_str(name))
+        .ok()?
+        .dyn_into::<js_sys::Function>()
+        .ok()?;
+    match argument {
+        Some(argument) => function.call1(object, argument),
+        None => function.call0(object),
+    }
+    .ok()
+}
+
+/// Browsers keep a device, its memory and a WebGL2 context until garbage
+/// collection: wgpu's browser objects free nothing when dropped. A dropped
+/// renderer destroys its device and gives up its context at once.
+#[cfg(target_arch = "wasm32")]
+impl Drop for WgpuRenderer {
+    fn drop(&mut self) {
+        self.health.mark_lost();
+        self.device.destroy();
+        if let Some(canvas) = self
+            .owned_surface
+            .as_ref()
+            .and_then(|owned| owned.canvas.as_ref())
+        {
+            canvas.release_context();
+        }
     }
 }
 
@@ -271,9 +320,11 @@ impl WgpuRenderer {
         pollster::block_on(Self::new_async(target))
     }
 
-    /// Creates a renderer for offscreen targets without blocking. Browsers
-    /// cannot create a WebGL2 device without a canvas; use
-    /// [`WgpuRenderer::with_canvas`] there.
+    /// Creates a renderer for offscreen targets. In browsers this never
+    /// blocks; natively, adapter and device creation run on the calling
+    /// thread when the future is first polled. Browsers cannot create a
+    /// WebGL2 device without a canvas; use [`WgpuRenderer::with_canvas`]
+    /// there.
     ///
     /// # Errors
     /// Returns a typed target, adapter, or device creation error.
@@ -351,7 +402,14 @@ impl WgpuRenderer {
             create_sampler(&device, wgpu::FilterMode::Nearest),
             create_sampler(&device, wgpu::FilterMode::Linear),
         ];
-        let pipelines = create_pipelines(&device, &texture_layout, OUTPUT_FORMAT);
+        let pipelines = create_pipelines(
+            &device,
+            &texture_layout,
+            OUTPUT_FORMAT,
+            wgpu::ColorWrites::ALL,
+        );
+        // wgpu-core reports pipeline-creation errors as uncaptured errors.
+        health.check()?;
         Ok(Self {
             target,
             instance,
@@ -390,6 +448,13 @@ impl WgpuRenderer {
         self.metrics
     }
 
+    /// The largest texture side the device accepts: its 2D texture limit,
+    /// which on the web is at most 8,192.
+    #[must_use]
+    pub const fn maximum_texture_dimension(&self) -> u32 {
+        self.limits.maximum_dimension
+    }
+
     /// A handle that marks this renderer lost from outside it; see
     /// [`LossSignal`].
     #[must_use]
@@ -420,6 +485,8 @@ impl WgpuRenderer {
             .map_err(|error| Error::Internal(error.to_string()))?;
         let configuration = self.surface_configuration(&surface)?;
         surface.configure(&self.device, &configuration);
+        // Acquiring from a surface whose configuration failed panics.
+        self.check_device()?;
         self.present_configured(&surface, &configuration, request, started)
     }
 
@@ -457,6 +524,8 @@ impl WgpuRenderer {
             } else {
                 let configuration = self.surface_configuration(&owned.surface)?;
                 owned.surface.configure(&self.device, &configuration);
+                // Acquiring from a surface whose configuration failed panics.
+                self.health.check()?;
                 // Initial and resize configurations are not recoveries;
                 // `resize` counts its own.
                 if matches!(owned.state, SurfaceState::Invalidated) {
@@ -478,6 +547,9 @@ impl WgpuRenderer {
             presented
         })();
         self.owned_surface = Some(owned);
+        // A context lost during the frame drew nothing: report it now, with
+        // the canvas back in place to ask.
+        self.check_device()?;
         result
     }
 
@@ -521,13 +593,13 @@ impl WgpuRenderer {
         self.check_vertex_stream(request.scene)?;
         let prepared = self.prepare_sprites(request.scene, request.resources.as_ref())?;
         let vertices = vertices(request.scene, &prepared)?;
-        let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
         let pipelines = self.ensure_surface_pipelines(configuration.format);
         let (frame, reconfigured, suboptimal) =
             self.acquire_surface_frame(surface, configuration)?;
-        if reconfigured {
-            self.metrics.surface_reconfigurations += 1;
-        }
+        // Uploaded only for a frame that draws: a skipped frame submits
+        // nothing, and wgpu frees staged writes only at the next submission.
+        // The stream fits: `check_vertex_stream` applied the same bound.
+        let (vertex_buffer, vertex_allocation_bytes) = self.ensure_vertex_buffer(&vertices)?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -537,6 +609,10 @@ impl WgpuRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Tilewright surface frame encoder"),
             });
+        // Presented frames are opaque on every backend: surface pipelines
+        // never write alpha, and the clear writes 1, so a WebGL2 canvas,
+        // whose context keeps alpha, composites like an opaque WebGPU one.
+        let [red, green, blue, _] = request.scene.clear_color();
         encode_scene(
             &mut encoder,
             &pipelines,
@@ -544,7 +620,7 @@ impl WgpuRenderer {
             &depth_view,
             &vertex_buffer,
             &prepared,
-            request.scene.clear_color(),
+            [red, green, blue, 1.0],
         )?;
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
@@ -633,6 +709,8 @@ impl WgpuRenderer {
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Ok((frame, false, true)),
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&self.device, configuration);
+                self.metrics.surface_reconfigurations += 1;
+                self.check_device()?;
                 match surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(frame) => Ok((frame, true, false)),
                     wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Ok((frame, true, true)),
@@ -653,7 +731,14 @@ impl WgpuRenderer {
     fn ensure_surface_pipelines(&mut self, format: wgpu::TextureFormat) -> Pipelines {
         self.surface_pipelines
             .entry(format)
-            .or_insert_with(|| create_pipelines(&self.device, &self.texture_layout, format))
+            .or_insert_with(|| {
+                create_pipelines(
+                    &self.device,
+                    &self.texture_layout,
+                    format,
+                    wgpu::ColorWrites::COLOR,
+                )
+            })
             .clone()
     }
 
@@ -1182,8 +1267,10 @@ impl Renderer for WgpuRenderer {
 }
 
 impl WgpuRenderer {
-    /// Renders offscreen and reads the frame back without blocking: the
-    /// same frame [`Renderer::render`] produces, on every platform.
+    /// Renders offscreen and reads the frame back: the same frame
+    /// [`Renderer::render`] produces, on every platform. In browsers it
+    /// never blocks. Natively it blocks the calling thread until the GPU has
+    /// finished, so async runtimes should run it on a blocking thread.
     ///
     /// # Errors
     /// Returns a typed target, resource, limit, or backend error.
@@ -1631,10 +1718,13 @@ impl Pipelines {
     }
 }
 
+/// The scene pipelines for one output format. Offscreen targets write
+/// every channel; presented surfaces write colour only.
 fn create_pipelines(
     device: &wgpu::Device,
     texture_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
+    writes: wgpu::ColorWrites,
 ) -> Pipelines {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Tilewright sprite shader"),
@@ -1646,9 +1736,23 @@ fn create_pipelines(
         immediate_size: 0,
     });
     Pipelines {
-        whole: create_pipeline(device, &shader, &layout, format, None),
-        framed_nearest: create_pipeline(device, &shader, &layout, format, Some(Sampling::Nearest)),
-        framed_linear: create_pipeline(device, &shader, &layout, format, Some(Sampling::Linear)),
+        whole: create_pipeline(device, &shader, &layout, format, writes, None),
+        framed_nearest: create_pipeline(
+            device,
+            &shader,
+            &layout,
+            format,
+            writes,
+            Some(Sampling::Nearest),
+        ),
+        framed_linear: create_pipeline(
+            device,
+            &shader,
+            &layout,
+            format,
+            writes,
+            Some(Sampling::Linear),
+        ),
     }
 }
 
@@ -1657,6 +1761,7 @@ fn create_pipeline(
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     format: wgpu::TextureFormat,
+    writes: wgpu::ColorWrites,
     framed: Option<Sampling>,
 ) -> wgpu::RenderPipeline {
     let constants = [
@@ -1690,7 +1795,7 @@ fn create_pipeline(
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
+                write_mask: writes,
             })],
         }),
         primitive: wgpu::PrimitiveState::default(),

@@ -21,8 +21,8 @@ The package ships two WebAssembly bundles with the same API:
 
 | Bundle | Backends | `.wasm` | gzip −9 |
 | --- | --- | --- | --- |
-| `webgpu` | WebGPU | 633 KB | 152 KB |
-| `full` | WebGPU and WebGL2 | 4,116 KB | 1,084 KB |
+| `webgpu` | WebGPU | 649 KB | 157 KB |
+| `full` | WebGPU and WebGL2 | 4,133 KB | 1,089 KB |
 
 WebGL2 needs wgpu's portable core, its shader translator and a GL backend in
 the bundle; WebGPU uses the browser's own implementation. `create` loads only
@@ -47,6 +47,10 @@ tools/build-web.sh                   # both bundles, glue and TypeScript
 (cd packages/tilewright-render && npm test)
 tools/validate-web.sh                # Clippy for wasm32, build, browser tests
 ```
+
+`TILEWRIGHT_WEB_TEST_HOOKS=1 tools/build-web.sh` builds the `full` bundle with
+the trap tests' hooks, as `tools/validate-web.sh` does; never ship that build.
+Without the hooks `npm test` skips the trap tests.
 
 The build writes `packages/tilewright-render/wasm/{webgpu,full}/` and
 `packages/tilewright-render/dist/`; neither is committed. Bundlers that
@@ -81,13 +85,18 @@ requestAnimationFrame(frame);
 - `create(canvas, { backend, bundle, wasm, width, height })`. `backend` is
   `auto` (default), `webgpu` or `webgl2`. An explicit backend never falls
   back. A canvas keeps the first context type it gets, so a WebGPU failure
-  after `auto` chose WebGPU cannot switch that canvas to WebGL2.
+  after `auto` chose WebGPU cannot switch that canvas to WebGL2. With the
+  `webgpu` bundle, `auto` on a browser without WebGPU fails with
+  `backend-unavailable`.
 - `uploadTexture({ id, revision, width, height, rgba })` stores unpremultiplied
   RGBA8 pixels and returns a handle with the texture's SHA-256. The texture
   goes through the same verified resource contract as native textures. A
   stored identity and revision never change: uploading the same pixels again
-  is accepted, and different pixels must use a new revision. Sizes and pixel
-  lengths are checked before any pixels are copied into WebAssembly.
+  is accepted, and different pixels must use a new revision, or
+  `removeTexture` first. Sizes and pixel lengths are checked before any
+  pixels are copied into WebAssembly, against `maximumTextureSide`, the
+  device's limit (at most 8,192; WebGL2 devices may allow 4,096 or less),
+  with `limit-exceeded` above it.
   `uploadImage` takes `ImageData` exactly, and reads other image sources at
   their intrinsic size through a 2D canvas, which can round partly
   transparent texels. Handles are frozen. `removeTexture` forgets a texture
@@ -110,7 +119,9 @@ requestAnimationFrame(frame);
   current. `render()` presents it; `resize(width, height)` changes the
   drawing buffer (submit a scene of the new size next). The renderer owns
   the canvas's drawing-buffer size: one set on the canvas directly is reset
-  at the next `render()`. A builder's options are validated and frozen;
+  at the next `render()`. The canvas is opaque on both backends: a
+  transparent clear colour or quad never shows the page through it. A
+  builder's options are validated and frozen;
   change them with `reset`. Colours, points and UVs must have exactly their
   number of entries, so a reused buffer never keeps an earlier quad's
   values.
@@ -118,15 +129,23 @@ requestAnimationFrame(frame);
   semantic, depth and coverage planes. From the call until it settles the
   renderer is busy: every other call fails with `busy`. `renderReference()`
   returns the CPU reference frame for the same scene.
-- `metrics()` reports work counts. `destroy()` releases the device and its
-  textures; a readback in flight then stops waiting and rejects with
-  `destroyed`, and so does every later call.
+- `metrics()` reports work counts. `destroy()` destroys the device, gives up
+  a WebGL2 context at once rather than at garbage collection, so destroyed
+  renderers never count against the browser's limit of live contexts, and
+  drops the textures. A readback in flight then stops waiting and rejects
+  with `destroyed`, and so does every later call. Create a later renderer on
+  a new canvas.
 - A lost WebGL2 context, for example when the browser drops the oldest of
-  too many contexts, fails every later call and any waiting readback with
-  `device-lost`: create a renderer on a new canvas. An uncaptured GPU error
-  fails every later frame with `internal`. A WebAssembly trap, which would
-  be a renderer bug, leaves that renderer unusable: its calls keep failing
-  with the same `internal` error.
+  too many contexts, fails every later frame and readback (`render`,
+  `readFrame`), and any readback waiting, with `device-lost`. Other calls
+  keep working, but the renderer never draws again: create one on a new
+  canvas. An uncaptured GPU error fails every later frame with `internal`.
+- A WebAssembly trap, which would be a renderer bug, aborts mid-call and
+  leaves the module every renderer shares in an undefined state, so every
+  renderer of the page stops: its calls, `create` and any readback waiting
+  fail with the same `internal` error. Reload the page. A trap that is not a
+  Rust panic, such as WebAssembly running out of memory, during `readFrame`
+  is not reported: that promise never settles.
 
 Errors are `TilewrightError`s with a stable `code` (see `src/errors.ts`),
 such as `invalid-scene`, `unknown-texture`, `resource` (including a frame
@@ -173,16 +192,18 @@ decoded quads then pass the full scene validation.
   16,777,216 pixels, 4,096 distinct textures and the raster-sample budget.
 - A texture is at most 8,192 pixels per side and 16 MiB as an envelope
   (about 4.2 megapixels, for example 2,047 × 2,048).
-- The page's texture store holds at most 256 MiB of envelopes and 16,384
-  textures. The renderer keeps its own decoded copy of each texture a scene
-  uses, within the native 256 MiB working set, plus the GPU copy.
-- WebGPU limits follow the browser's adapter. WebGL2 uses wgpu's WebGL2
-  downlevel limits with the adapter's texture size, up to 8,192.
+- Each renderer has its own texture store, holding at most 256 MiB of
+  envelopes and 16,384 textures; handles do not cross renderers. The
+  renderer keeps its own decoded copy of each texture a scene uses, within
+  the native 256 MiB working set, plus the GPU copy.
+- Devices use wgpu's downlevel limits, WebGL2's for WebGL2, with the
+  adapter's 2D texture size up to 8,192, not every limit the adapter
+  offers.
 - `frame_cpu_micros` and `startup_micros` are zero in browsers, where Rust has
   no clock; measure time with `performance.now()`.
-- Readback never blocks the page. WebGPU resolves it from the browser's event
-  loop; on WebGL2 the renderer polls once per browser task, because WebGL2
-  reports finished GPU work only between tasks.
+- Readback never blocks the page: the renderer checks once per browser task
+  until the mapping settles. WebGPU settles it from the browser's event
+  loop; WebGL2 reports finished GPU work only between tasks.
 
 ## Browser tests
 
@@ -199,9 +220,13 @@ Chromium with `playwright-core`. For each of WebGL2 and WebGPU it:
 - checks the presented canvas pixels, typed errors, and a resize.
 
 A third test loses WebGL2 contexts through `WEBGL_lose_context`: while idle,
-before the first frame, during a readback and before a destroy. It checks the
-`device-lost` and `destroyed` codes, and that another renderer keeps
-drawing. Each test fails after two minutes rather than hanging.
+before the first frame and during a readback, each expecting `device-lost`;
+and with the loss hidden from the renderer, where only `destroy` ends the
+waiting readback, with `destroyed`. It then creates and destroys 20
+renderers and checks that a live one keeps drawing. Two trap tests make the
+module panic in `submit` and inside a readback and expect `internal` from
+every renderer; they need the test hooks. Each test fails after two minutes
+rather than hanging.
 
 The browser is never downloaded. `TILEWRIGHT_CHROMIUM` names a Chromium
 executable; otherwise `PLAYWRIGHT_BROWSERS_PATH` selects Playwright's
@@ -225,6 +250,7 @@ Chromium.
 | CI (GitHub `ubuntu-24.04`, no GPU, inside `Renderer validation`) | Chrome, SwiftShader | Chrome, SwiftShader |
 | Any developer machine | Chrome, SwiftShader | Chrome, SwiftShader |
 
-Both backends are required. `TILEWRIGHT_REQUIRE_WEBGPU=0` skips WebGPU,
-rather than failing, on a browser that offers no WebGPU adapter. The
+Both backends are required, by `npm test` as by `tools/validate-web.sh`.
+`TILEWRIGHT_REQUIRE_WEBGPU=0` skips WebGPU, rather than failing, on a browser
+that offers no WebGPU adapter. The
 tests check correctness, not speed, so they do not need a GPU.

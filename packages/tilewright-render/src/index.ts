@@ -230,15 +230,46 @@ function frameFrom(frame: WebFrame): Frame {
   }
 }
 
+/**
+ * Set once the WebAssembly module traps. A trap aborts mid-call and leaves
+ * the module, which every renderer of the page shares, in an undefined
+ * state, so every renderer stops with this error: reload the page.
+ */
+let pageTrap: TilewrightError | undefined;
+/** Rejects the readbacks still waiting when a trap stops the module. */
+const waiting = new Set<(error: TilewrightError) => void>();
+
+/**
+ * Records a trap: from the module's panic hook just before it traps, or
+ * from a call that threw `WebAssembly.RuntimeError`.
+ */
+function reportTrap(detail: string, cause?: unknown): TilewrightError {
+  if (pageTrap === undefined) {
+    pageTrap = new TilewrightError(
+      'internal',
+      `the renderer's WebAssembly module trapped; reload the page: ${detail}`,
+      { cause },
+    );
+    for (const reject of waiting) {
+      reject(pageTrap);
+    }
+    waiting.clear();
+  }
+  return pageTrap;
+}
+
 /** A renderer drawing scenes into one canvas. */
 export class TilewrightRenderer {
   readonly backend: Backend;
   readonly bundle: Bundle;
   /** The adapter's name as the browser reports it; often empty. */
   readonly adapter: string;
+  /**
+   * The largest texture side the device accepts, at most
+   * `MAXIMUM_TEXTURE_SIDE`; larger uploads fail with `limit-exceeded`.
+   */
+  readonly maximumTextureSide: number;
   #inner: WebRenderer | undefined;
-  /** Set once the WebAssembly module trapped in a call; the renderer is then unusable. */
-  #trap: TilewrightError | undefined;
   #width: number;
   #height: number;
 
@@ -247,6 +278,7 @@ export class TilewrightRenderer {
     this.backend = inner.backend as Backend;
     this.bundle = bundle;
     this.adapter = inner.adapter;
+    this.maximumTextureSide = inner.maximumTextureSide;
     this.#width = width;
     this.#height = height;
   }
@@ -256,6 +288,9 @@ export class TilewrightRenderer {
     canvas: HTMLCanvasElement | OffscreenCanvas,
     options: RendererOptions = {},
   ): Promise<TilewrightRenderer> {
+    if (pageTrap !== undefined) {
+      throw pageTrap;
+    }
     const requested = options.backend ?? 'auto';
     if (requested !== 'auto' && requested !== 'webgpu' && requested !== 'webgl2') {
       throw new TilewrightError('invalid-argument', `unknown backend ${String(requested)}`);
@@ -267,13 +302,22 @@ export class TilewrightRenderer {
       throw new TilewrightError('invalid-argument', `unknown bundle ${String(bundle)}`);
     }
     if (bundle === 'webgpu' && backend === 'webgl2') {
-      throw new TilewrightError('invalid-argument', 'the webgpu bundle cannot draw with WebGL2');
+      // With `auto`, the options are valid; the browser lacks WebGPU.
+      throw requested === 'auto'
+        ? new TilewrightError(
+            'backend-unavailable',
+            'the browser offers no WebGPU adapter, and the webgpu bundle cannot draw with WebGL2',
+          )
+        : new TilewrightError('invalid-argument', 'the webgpu bundle cannot draw with WebGL2');
     }
     const width = options.width ?? canvas.width;
     const height = options.height ?? canvas.height;
     checkTargetSize(width, height);
     try {
       const bindings = await loadBindings(bundle, options.wasm?.[bundle]);
+      bindings.setTrapHandler((message: string) => {
+        reportTrap(message);
+      });
       const inner = await bindings.WebRenderer.create(canvas, width, height, backend);
       return new TilewrightRenderer(inner, bundle, width, height);
     } catch (error) {
@@ -297,8 +341,8 @@ export class TilewrightRenderer {
   }
 
   #renderer(): WebRenderer {
-    if (this.#trap !== undefined) {
-      throw this.#trap;
+    if (pageTrap !== undefined) {
+      throw pageTrap;
     }
     if (this.#inner === undefined) {
       throw new TilewrightError('destroyed', 'the renderer was destroyed');
@@ -307,20 +351,25 @@ export class TilewrightRenderer {
   }
 
   /**
-   * Converts a binding error. A WebAssembly trap leaves the renderer's Rust
-   * state borrowed mid-call, so the renderer is abandoned: every later call
-   * fails with the same `internal` error, and `destroy` only forgets it.
+   * Converts a binding error. After a trap every renderer stops: every
+   * later call fails with the same `internal` error, and `destroy` only
+   * forgets the renderer.
    */
   #failed(error: unknown): TilewrightError {
     if (error instanceof WebAssembly.RuntimeError) {
-      this.#trap = new TilewrightError(
-        'internal',
-        `the renderer trapped and is unusable; create another: ${error.message}`,
-        { cause: error },
-      );
-      return this.#trap;
+      return reportTrap(error.message, error);
     }
-    return TilewrightError.from(error);
+    return pageTrap ?? TilewrightError.from(error);
+  }
+
+  /** Rejects a texture larger than this device accepts. */
+  #checkDeviceTextureSize(width: number, height: number): void {
+    if (width > this.maximumTextureSide || height > this.maximumTextureSide) {
+      throw new TilewrightError(
+        'limit-exceeded',
+        `a ${width} × ${height} texture exceeds this device's ${this.maximumTextureSide}-texel side`,
+      );
+    }
   }
 
   #call<T>(action: (inner: WebRenderer) => T): T {
@@ -333,9 +382,11 @@ export class TilewrightRenderer {
   }
 
   /**
-   * Uploads RGBA8 pixels as texture `id` at `revision` (1 by default),
-   * replacing any earlier upload of that pair. Atlases and sprite sheets are
-   * ordinary textures; quads pick their frames.
+   * Uploads RGBA8 pixels as texture `id` at `revision` (1 by default). A
+   * stored pair never changes: the same pixels are accepted again, and
+   * different pixels need a new revision (or `removeTexture` first), else
+   * `invalid-texture`. Atlases and sprite sheets are ordinary textures;
+   * quads pick their frames.
    */
   uploadTexture(texture: TextureUpload): TextureHandle {
     const revision = texture.revision ?? 1;
@@ -348,6 +399,7 @@ export class TilewrightRenderer {
       }
     }
     checkTextureSize(texture.width, texture.height);
+    this.#checkDeviceTextureSize(texture.width, texture.height);
     const rgba = plainBytes(texture.rgba, 'rgba', 'invalid-texture');
     if (rgba.byteLength !== texture.width * texture.height * 4) {
       throw new TilewrightError(
@@ -387,6 +439,7 @@ export class TilewrightRenderer {
     const [width, height] = intrinsicSize(image as CanvasImageSource);
     // Checked before the canvas and its pixels are allocated.
     checkTextureSize(width, height);
+    this.#checkDeviceTextureSize(width, height);
     if (typeof OffscreenCanvas === 'undefined') {
       throw new TilewrightError('unsupported', 'reading an image needs OffscreenCanvas');
     }
@@ -486,10 +539,19 @@ export class TilewrightRenderer {
   /** Renders the submitted scene offscreen and reads every plane back. */
   async readFrame(): Promise<Frame> {
     const inner = this.#renderer();
+    // A trap inside the readback never settles its promise; the trap
+    // handler rejects this one instead.
+    let stopWaiting = (): void => {};
+    const trapped = new Promise<never>((_resolve, reject) => {
+      waiting.add(reject);
+      stopWaiting = () => waiting.delete(reject);
+    });
     try {
-      return frameFrom((await inner.readFrame()) as WebFrame);
+      return frameFrom((await Promise.race([inner.readFrame(), trapped])) as WebFrame);
     } catch (error) {
       throw this.#failed(error);
+    } finally {
+      stopWaiting();
     }
   }
 
@@ -529,7 +591,7 @@ export class TilewrightRenderer {
     // and releases the device; otherwise the device is released now.
     const inner = this.#inner;
     this.#inner = undefined;
-    if (inner === undefined || this.#trap !== undefined) {
+    if (inner === undefined || pageTrap !== undefined) {
       // A trapped call keeps the Rust object borrowed: freeing it would throw.
       return;
     }

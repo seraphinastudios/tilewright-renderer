@@ -5,7 +5,8 @@
  * Error codes:
  *
  * - `invalid-argument`: a value the API does not accept.
- * - `invalid-texture`: an upload with a bad identity, size or pixel length.
+ * - `invalid-texture`: an upload with a bad identity, size or pixel length,
+ *   or different pixels under a stored identity and revision.
  * - `invalid-scene`: a scene the renderer's scene contract rejects.
  * - `unknown-texture`: a scene naming a texture that is not uploaded.
  * - `limit-exceeded`: a size, count or memory bound.
@@ -17,7 +18,8 @@
  * - `busy`: a readback is still in flight.
  * - `destroyed`: the renderer was destroyed.
  * - `unsupported`: the host cannot run the package.
- * - `internal`: an unexpected renderer failure.
+ * - `internal`: an unexpected renderer failure, an uncaptured GPU error, or
+ *   a WebAssembly trap, after which every renderer stops (reload the page).
  */
 export type TilewrightErrorCode =
   | 'invalid-argument'

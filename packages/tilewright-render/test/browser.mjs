@@ -23,12 +23,6 @@ export const SOFTWARE_FLAGS = [
   '--use-webgpu-adapter=swiftshader',
 ];
 
-/**
- * Flags that let headless Chrome use the machine's GPU for WebGL2. Its
- * WebGPU stays on SwiftShader; see docs/WEB.md for a hardware WebGPU setup.
- */
-export const GPU_FLAGS = ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--enable-gpu'];
-
 export function launch(flags = SOFTWARE_FLAGS, options = {}) {
   const settings = { ...options, args: flags };
   if (process.env.TILEWRIGHT_CHROMIUM) {

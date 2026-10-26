@@ -126,11 +126,16 @@ test('a short colour or point never keeps an earlier quad\'s values', () => {
     assert.equal(code(add), 'invalid-argument', JSON.stringify(quad).slice(0, 80));
   }
   assert.equal(scene.length, 0);
-  // Typed arrays are accepted, and sprites add their edges in f32.
-  scene.sprite({ ...sprite(1), color: new Float32Array([1, 0, 0, 1]), x: 0.1, width: 0.2 });
+  // Typed arrays are accepted, and sprites add their edges in f32: in f64,
+  // 0.3 + 0.6 and 0.4 + 1.3 round to other f32 values.
+  scene.sprite({ ...sprite(1), color: new Float32Array([1, 0, 0, 1]), x: 0.3, width: 0.6, y: 0.4, height: 1.3 });
   const floats = new Float32Array(scene.records().slice().buffer);
   assert.deepEqual([...floats.slice(28, 32)], [1, 0, 0, 1]);
-  assert.equal(floats[14], Math.fround(Math.fround(0.1) + Math.fround(0.2)));
+  const right = Math.fround(Math.fround(0.3) + Math.fround(0.6));
+  const bottom = Math.fround(Math.fround(0.4) + Math.fround(1.3));
+  assert.notEqual(right, Math.fround(0.3 + 0.6));
+  assert.notEqual(bottom, Math.fround(0.4 + 1.3));
+  assert.deepEqual([...floats.slice(12, 20)], [Math.fround(0.3), Math.fround(0.4), right, Math.fround(0.4), right, bottom, Math.fround(0.3), bottom]);
 });
 
 test('sprite sheets number frames row by row', () => {

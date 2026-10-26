@@ -270,24 +270,34 @@ export class SceneBuilder {
     if (!(sprite.width > 0) || !(sprite.height > 0)) {
       throw new TilewrightError('invalid-argument', 'sprite width and height must be positive');
     }
-    // In f32, as the Rust `Sprite` adds them.
+    // In f32, as the Rust `Sprite` adds them; written straight into the
+    // record, without building corner arrays.
     const left = Math.fround(sprite.x);
     const top = Math.fround(sprite.y);
     const right = Math.fround(left + Math.fround(sprite.width));
     const bottom = Math.fround(top + Math.fround(sprite.height));
-    return this.quad({
-      ...sprite,
-      positions: [
-        [left, top],
-        [right, top],
-        [right, bottom],
-        [left, bottom],
-      ],
-    });
+    return this.#add(sprite, true, left, top, right, bottom);
   }
 
   /** Adds a quad. Integer fields are checked here; the renderer validates the rest on submit. */
   quad(quad: QuadInput): this {
+    return this.#add(quad, false, 0, 0, 0, 0);
+  }
+
+  /**
+   * Writes one record: corners from `quad.positions`, or the rectangle
+   * `left`–`right` × `top`–`bottom` for a sprite. Sprites keep any `uvs` or
+   * `glow` a plain-JavaScript caller passes.
+   */
+  #add(
+    input: QuadInput | SpriteInput,
+    rectangle: boolean,
+    left: number,
+    top: number,
+    right: number,
+    bottom: number,
+  ): this {
+    const quad = input as QuadInput;
     // The renderer would refuse a larger scene; stop before allocating for it.
     if (this.#count >= MAXIMUM_QUADS) {
       throw new TilewrightError(
@@ -331,7 +341,18 @@ export class SceneBuilder {
     words[base + 9] = frame ? integer(frame.y, 'frame y', 0, U32_MAX) : 0;
     words[base + 10] = frame ? integer(frame.width, 'frame width', 1, U32_MAX) : 0;
     words[base + 11] = frame ? integer(frame.height, 'frame height', 1, U32_MAX) : 0;
-    writeCorners(floats, base + 12, quad.positions, 'positions');
+    if (rectangle) {
+      floats[base + 12] = left;
+      floats[base + 13] = top;
+      floats[base + 14] = right;
+      floats[base + 15] = top;
+      floats[base + 16] = right;
+      floats[base + 17] = bottom;
+      floats[base + 18] = left;
+      floats[base + 19] = bottom;
+    } else {
+      writeCorners(floats, base + 12, quad.positions, 'positions');
+    }
     writeCorners(floats, base + 20, quad.uvs ?? WHOLE_UVS, 'uvs');
     writeNumbers(floats, base + 28, quad.color ?? WHITE, 4, 'color');
     const grayscale = quad.grayscale ?? 0;
