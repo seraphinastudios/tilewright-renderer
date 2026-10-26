@@ -684,17 +684,26 @@ class BoundaryTests(unittest.TestCase):
 class BootstrapPacingTests(unittest.TestCase):
     """crates.io allows a burst of new names, then one per refill period."""
 
-    def run_bootstrap(self, count, burst=R.NEW_CRATE_BURST, outcomes=(), confirm=None):
+    def run_bootstrap(self, count, burst=R.NEW_CRATE_BURST, outcomes=(), confirm=None, present=(), interrupt=False):
+        """`present` holds crates.io created_at values for the first crates, already published."""
         rows = [{'name': f'crate{index}', 'version': '0.1.0', 'sha256': 'c' * 64, 'metadata': {'deps': []}}
                 for index in range(count)]
+        published = {f'crate{index}': created for index, created in enumerate(present)}
         release, events, outcomes = {'id': 10}, [], list(outcomes)
         def get(url, absent=False, **_):
             if url.endswith('/api/v1/users/owner'):
                 return R.canonical({'user': {'id': 123, 'login': 'owner'}})
             if url.endswith('/owners'):
                 return R.canonical({'users': [{'kind': 'user', 'id': 123, 'login': 'owner'}]})
+            name = url.removeprefix(R.REGISTRY + '/api/v1/crates/')
+            if not absent and name in published:
+                return R.canonical({'crate': {'name': name, 'created_at': published[name]}})
             self.assertTrue(absent)
             return None
+        def sleep(seconds):
+            events.append(('sleep', seconds))
+            if interrupt:
+                raise KeyboardInterrupt
         def prompt(text):
             events.append(('prompt',))
             return 'PUBLISH AS owner'
@@ -716,8 +725,8 @@ class BootstrapPacingTests(unittest.TestCase):
                 {'status': 'identical'} if suffix.startswith('compare/') else release))
             stack.enter_context(patch.object(R, 'release_evidence', return_value=(
                 release, {'crates': rows}, {item['name']: item['name'] for item in rows})))
-            stack.enter_context(patch.object(R, 'registry_state',
-                side_effect=lambda item: events.append(('check', item['name'])) or 'absent'))
+            stack.enter_context(patch.object(R, 'registry_state', side_effect=lambda item:
+                events.append(('check', item['name'])) or ('present' if item['name'] in published else 'absent')))
             stack.enter_context(patch.object(R, 'get', side_effect=get))
             stack.enter_context(patch('builtins.input', side_effect=prompt))
             stack.enter_context(patch.object(R.getpass, 'getpass', return_value='test-only-token'))
@@ -726,10 +735,10 @@ class BootstrapPacingTests(unittest.TestCase):
                 side_effect=lambda config, value, item, *args: events.append(('reserve', item['name']))))
             stack.enter_context(patch.object(R, 'put_once', side_effect=put))
             stack.enter_context(patch.object(R, 'confirm', side_effect=confirmed))
-            stack.enter_context(patch.object(R.time, 'sleep', side_effect=lambda seconds: events.append(('sleep', seconds))))
+            stack.enter_context(patch.object(R.time, 'sleep', side_effect=sleep))
             try:
                 R.bootstrap(CONFIG, 10, REVISION, 'b' * 64, 'owner', '123', burst=burst)
-            except ValueError as raised:
+            except (ValueError, KeyboardInterrupt) as raised:
                 error = raised
         return events, stderr.getvalue(), error
 
@@ -773,6 +782,65 @@ class BootstrapPacingTests(unittest.TestCase):
                     self.assertIn(f'10m10s until reserving crate{burst}@0.1.0 ({burst + 1} of {count})', output)
                 else:
                     self.assertNotIn('wait', output)
+
+    def created(self, minutes):
+        moment = R.datetime.datetime.now(R.datetime.timezone.utc) - R.datetime.timedelta(minutes=minutes)
+        return moment.isoformat().replace('+00:00', 'Z')  # crates.io's created_at form
+
+    def paced_names(self, events):
+        return [name for name, segment in self.segments(events) if any(event[0] == 'sleep' for event in segment)]
+
+    def test_resumed_run_lowers_burst_for_names_this_release_just_created(self):
+        cases = [  # (created_at of the already published crates, effective burst)
+            ([self.created(5)] * 5, 0),                                       # all 5 tokens just spent
+            ([self.created(12), self.created(40), self.created(120)], 3),     # 2 inside the window
+            ([self.created(51)] * 5, 5),                                      # all outside the window
+            (['not a time', None, '2026-10-26T12:00:00'], 2),                 # unreadable counts as recent
+            ([self.created(-3)], 4),                                          # clock skew counts as recent
+        ]
+        for present, burst in cases:
+            with self.subTest(present=present):
+                events, output, error = self.run_bootstrap(8, present=present)
+                self.assertIsNone(error)
+                remaining = [f'crate{index}' for index in range(len(present), 8)]
+                self.assertEqual([event[1] for event in events if event[0] == 'put'], remaining)
+                self.assertEqual(self.paced_names(events), remaining[burst:])
+                lowered = [line for line in output.splitlines() if 'lowering --burst' in line]
+                self.assertEqual(lowered, [] if burst == 5 else [
+                    f'{5 - burst} of these crates were first published within the last 50 minutes;'
+                    f' lowering --burst from 5 to {burst}.'])
+
+    def test_resumed_run_reports_how_far_it_lowered_the_burst(self):
+        _, output, _ = self.run_bootstrap(8, present=[self.created(5)] * 2, burst=4)
+        self.assertIn('2 of these crates were first published within the last 50 minutes;'
+                      ' lowering --burst from 4 to 2.', output)
+        _, output, _ = self.run_bootstrap(8, present=[self.created(5)] * 5, burst=3)
+        self.assertIn('lowering --burst from 3 to 0.', output)
+
+    def test_every_abort_after_an_upload_advises_burst_zero(self):
+        advice = 'If you re-run within the next hour, pass --burst 0.'
+        # Ctrl-C during the wait after the burst.
+        events, output, error = self.run_bootstrap(6, interrupt=True)
+        self.assertIsInstance(error, KeyboardInterrupt)
+        self.assertNotIn(('reserve', 'crate5'), events)
+        self.assertIn(f'This run sent 5 new crate upload(s) to crates.io. {advice}', output)
+        # An unresolved upload, and a refused one.
+        for outcomes, confirm in [((R.PutOutcome(False),), ValueError('registry readiness unresolved')),
+                                  ((R.PutOutcome(True), R.PutOutcome(False, True, None)), None)]:
+            with self.subTest(outcomes=outcomes):
+                _, output, error = self.run_bootstrap(3, outcomes=outcomes, confirm=confirm)
+                self.assertIsInstance(error, ValueError)
+                self.assertIn(advice, output)
+        # Nothing sent yet: an interrupted first wait needs no advice.
+        events, output, error = self.run_bootstrap(2, burst=0, interrupt=True)
+        self.assertIsInstance(error, KeyboardInterrupt)
+        self.assertNotIn('put', [event[0] for event in events])
+        self.assertNotIn(advice, output)
+        # A complete run warns about other bootstraps with the same account.
+        _, output, error = self.run_bootstrap(2)
+        self.assertIsNone(error)
+        self.assertNotIn(advice, output)
+        self.assertIn('crates.io counts these 2 new names for the next hour; pass --burst 0', output)
 
     def test_out_of_range_burst_is_refused_before_any_read(self):
         for burst in (-1, 6, True, '3', 2.0):

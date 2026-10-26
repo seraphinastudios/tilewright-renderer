@@ -51,6 +51,8 @@ NEW_CRATE_RATE_SECONDS = 600
 # Covers request latency and clock differences between this terminal and crates.io.
 NEW_CRATE_MARGIN_SECONDS = 10
 PROGRESS_SECONDS = 60
+# Window in which earlier new names may still hold tokens: 5 refill periods, plus margin.
+NEW_CRATE_WINDOW_SECONDS = NEW_CRATE_BURST * NEW_CRATE_RATE_SECONDS + NEW_CRATE_MARGIN_SECONDS
 # Job names in .github/workflows/release.yml that build and attest the evidence.
 EVIDENCE_JOBS = ('Prepare renderer release without publication credentials',
                  'Attest verified renderer source release manifest')
@@ -922,6 +924,15 @@ def report_put_failure(config, row, outcome):
         print(line, file=sys.stderr)
 
 
+def recently_created(name, now):
+    """Whether crates.io created NAME inside the new-crate window; an unreadable time counts as recent."""
+    crate = json.loads(get(f'{REGISTRY}/api/v1/crates/{name}'))['crate']
+    try:
+        return (now - datetime.datetime.fromisoformat(crate['created_at'])).total_seconds() < NEW_CRATE_WINDOW_SECONDS
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return True
+
+
 def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, expected_owner_id,
               burst=NEW_CRATE_BURST):
     """One-time owner-terminal bootstrap; never an Actions fallback credential."""
@@ -948,10 +959,13 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
         users = json.loads(get(f'{REGISTRY}/api/v1/crates/{name}/owners'))['users']
         require(any(user.get('kind') == 'user' and str(user.get('id')) == str(expected_owner_id)
                     and user.get('login') == expected_owner for user in users), 'bootstrap owner mismatch')
-    to_publish = []
+    to_publish, recent = [], 0
+    now = datetime.datetime.now(datetime.timezone.utc)
     for row in ordered(manifest['crates']):
         if registry_state(row) == 'present':
             owned(row['name'])
+            # A resumed run: names published here moments ago still hold crates.io tokens.
+            recent += recently_created(row['name'], now)
             continue
         # A name that exists at any other coordinate is not a first publication.
         require(get(f"{REGISTRY}/api/v1/crates/{row['name']}", absent=True) is None,
@@ -959,6 +973,10 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
         to_publish.append(row)
     if not to_publish:
         return
+    if recent:
+        print(f'{recent} of these crates were first published within the last {NEW_CRATE_WINDOW_SECONDS // 60}'
+              f' minutes; lowering --burst from {burst} to {max(0, burst - recent)}.', file=sys.stderr)
+        burst = max(0, burst - recent)
     coordinates = ', '.join(f"{row['name']}@{row['version']}" for row in to_publish)
     print(f'First publication of {coordinates} as {expected_owner} ({expected_owner_id}).', file=sys.stderr)
     paced = max(0, len(to_publish) - burst)
@@ -971,29 +989,39 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
     github_token = host_write_authority(config, expected_owner)
     token = getpass.getpass('One-use crates.io token (hidden): ')
     require(0 < len(token) <= 8192 and all(33 <= ord(char) <= 126 for char in token), 'invalid bootstrap token')
-    for position, row in enumerate(to_publish, 1):
-        if position > burst:
-            # Pace before the checks and intent: a refused PUT would strand its reservation.
-            wait_for_new_crate_token(row, position, len(to_publish))
-        require(release_snapshot(api(config, f'releases/{release_id}')) == release_snapshot(release),
-                'bootstrap source changed')
-        require(registry_state(row) == 'absent' and
-                get(f"{REGISTRY}/api/v1/crates/{row['name']}", absent=True) is None,
-                'bootstrap coordinate is no longer absent')
-        reserve_upload(config, release, row, revision, manifest_sha256, github_token)
-        outcome = put_once(snapshots[row['name']], row['metadata'], token)
-        if outcome.rate_limited:
-            report_put_failure(config, row, outcome)
-            raise ValueError('crates.io rate limit refused the upload; intent retained')
-        if not outcome.accepted:
-            print(f"crates.io did not acknowledge {row['name']}@{row['version']}; checking registry reads.",
-                  file=sys.stderr)
-        try:
-            confirm([row])
-        except Exception:
-            report_put_failure(config, row, outcome)
-            raise
-        owned(row['name'])
+    sent = 0
+    try:
+        for position, row in enumerate(to_publish, 1):
+            if position > burst:
+                # Pace before the checks and intent: a refused PUT would strand its reservation.
+                wait_for_new_crate_token(row, position, len(to_publish))
+            require(release_snapshot(api(config, f'releases/{release_id}')) == release_snapshot(release),
+                    'bootstrap source changed')
+            require(registry_state(row) == 'absent' and
+                    get(f"{REGISTRY}/api/v1/crates/{row['name']}", absent=True) is None,
+                    'bootstrap coordinate is no longer absent')
+            reserve_upload(config, release, row, revision, manifest_sha256, github_token)
+            sent += 1  # Counted before the PUT: an interrupted request may still have reached crates.io.
+            outcome = put_once(snapshots[row['name']], row['metadata'], token)
+            if outcome.rate_limited:
+                report_put_failure(config, row, outcome)
+                raise ValueError('crates.io rate limit refused the upload; intent retained')
+            if not outcome.accepted:
+                print(f"crates.io did not acknowledge {row['name']}@{row['version']}; checking registry reads.",
+                      file=sys.stderr)
+            try:
+                confirm([row])
+            except Exception:
+                report_put_failure(config, row, outcome)
+                raise
+            owned(row['name'])
+    except BaseException:
+        if sent:
+            print(f'This run sent {sent} new crate upload(s) to crates.io. If you re-run within the next hour,'
+                  ' pass --burst 0.', file=sys.stderr)
+        raise
+    print(f'crates.io counts these {sent} new names for the next hour; pass --burst 0 to any other'
+          ' bootstrap with this account before then.', file=sys.stderr)
     print('Bootstrap confirmed; revoke this one-use token and register Trusted Publishing.', file=sys.stderr)
 
 
@@ -1006,7 +1034,8 @@ def main():
     parser.add_argument('--burst', type=new_crate_burst, default=NEW_CRATE_BURST, help=(
         f'bootstrap: new crate names to upload before pacing to one per {NEW_CRATE_RATE_SECONDS // 60} minutes'
         f' (0-{NEW_CRATE_BURST}, default {NEW_CRATE_BURST}). Lower it if this crates.io account published'
-        f' new crate names in the last hour: {NEW_CRATE_BURST} minus that count, or 0 when unsure.'))
+        f' other new crate names in the last hour: {NEW_CRATE_BURST} minus that count, or 0 when unsure.'
+        " This release's own recently published crates are counted automatically."))
     args = parser.parse_args()
     config = policy()
     if args.operation == 'bootstrap':

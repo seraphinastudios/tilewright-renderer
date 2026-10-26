@@ -173,11 +173,19 @@ waits 610 seconds, one refill period plus a 10-second margin, and prints the
 remaining time. With the default burst, eight new names take a little over
 30 minutes.
 
-Lower `--burst` if this crates.io account published new crate names in the
-last hour, including through an earlier bootstrap run: use 5 minus that
-count, or `--burst 0` to wait before every upload. If `--burst` is too high,
-crates.io refuses the upload with HTTP 429 and the run stops as described
-below.
+A resumed run accounts for its own release: for each crate of this release
+that is already published, the bootstrap reads its creation time from crates.io
+and lowers the burst by those created in the last 50 minutes (five refill
+periods plus the margin). An unreadable creation time counts as recent. The
+bootstrap cannot see other new names this account published, for example
+through another repository's bootstrap. Lower `--burst` for those yourself: use
+5 minus that count, or `--burst 0` to wait before every upload. If `--burst` is
+too high, crates.io refuses the upload with HTTP 429 and the run stops as
+described below.
+
+Once a run has sent an upload, every stop, Ctrl-C included, ends with advice to
+pass `--burst 0` to a re-run within the next hour. A completed run gives the
+same advice for any other bootstrap with this account.
 
 ### Stopped bootstrap uploads
 
