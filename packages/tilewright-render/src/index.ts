@@ -597,8 +597,11 @@ export class TilewrightRenderer {
     }
     try {
       inner.destroy();
-    } finally {
       inner.free();
+    } catch (error) {
+      // Never thrown: only a trap, which `#failed` records, or the object it
+      // left borrowed, which nothing can free, end up here.
+      this.#failed(error);
     }
   }
 }
