@@ -7,6 +7,8 @@ here. The same schema is copied into each physical producer repository.
 from __future__ import annotations
 
 import argparse
+import datetime
+import email.utils
 import hashlib
 import gzip
 import getpass
@@ -22,6 +24,7 @@ import tarfile
 import tempfile
 import time
 import tomllib
+import typing
 import secrets
 import resource
 import urllib.error
@@ -40,6 +43,17 @@ NAME = re.compile(r'[a-z][a-z0-9_-]{0,63}')
 VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
 SHA = re.compile(r'[0-9a-f]{40}')
 DIGEST = re.compile(r'[0-9a-f]{64}')
+# crates.io gives each account a token bucket for new crate names: a burst of
+# 5, then one more every 600 s (LimitedAction::PublishNew in rust-lang/crates.io
+# src/rate_limiter.rs). Versions of existing crates use a separate bucket.
+NEW_CRATE_BURST = 5
+NEW_CRATE_RATE_SECONDS = 600
+# Covers request latency and clock differences between this terminal and crates.io.
+NEW_CRATE_MARGIN_SECONDS = 10
+PROGRESS_SECONDS = 60
+# The Retry-After format crates.io writes (TooManyRequests in src/util/errors/json.rs).
+HTTP_DATE = (r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+             r' [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT')
 
 
 def require(ok, message):
@@ -630,6 +644,41 @@ def release_evidence(config, release_id, revision, manifest_sha256):
     return release, manifest, snapshots
 
 
+class PutOutcome(typing.NamedTuple):
+    """One registry PUT. Only HTTP 429 is a definite refusal: crates.io checks its
+    rate limits before it reads the archive, and commits nothing for a 429."""
+    accepted: bool
+    rate_limited: bool = False
+    retry_after: str | None = None  # normalized UTC time, never registry text
+
+    def __bool__(self):
+        # Keeps the former boolean meaning: true only for an acknowledged upload.
+        return self.accepted
+
+
+def http_date(value):
+    if not re.fullmatch(HTTP_DATE, value):
+        return None
+    try:
+        return email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def retry_time(headers, body):
+    """crates.io's retry time from Retry-After or the error detail's "try again
+    after" text. Only a strictly parsed time is reformatted for the terminal."""
+    value = (headers.get('Retry-After') or '').strip() if headers is not None else ''
+    if re.fullmatch(r'[0-9]{1,6}', value):
+        moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(value))
+    else:
+        moment = http_date(value)
+        if moment is None:
+            found = re.search('try again after (' + HTTP_DATE + ')', body.decode('utf-8', 'replace'))
+            moment = found and http_date(found[1])
+    return moment.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC') if moment else None
+
+
 def put_once(data, metadata_value, token):
     encoded = canonical(metadata_value)
     payload = struct.pack('<I', len(encoded)) + encoded + struct.pack('<I', len(data)) + data
@@ -640,12 +689,20 @@ def put_once(data, metadata_value, token):
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=30) as response:
             raw = response.read(65537)
-            return response.geturl() == endpoint and 200 <= response.status < 300 and len(raw) <= 65536 and 'errors' not in json.loads(raw)
+            return PutOutcome(response.geturl() == endpoint and 200 <= response.status < 300 and len(raw) <= 65536
+                              and 'errors' not in json.loads(raw))
     except urllib.error.HTTPError as error:
+        retry_after = None
+        if error.code == 429:
+            try:
+                retry_after = retry_time(error.headers, error.read(65536))
+            except Exception:
+                pass  # The status alone is definite; its retry time is optional.
         error.close()
+        return PutOutcome(False, error.code == 429, retry_after)
     except Exception:
         pass
-    return False
+    return PutOutcome(False)
 
 
 def release_snapshot(release):
@@ -792,7 +849,55 @@ def finalize(config, source_tag, directory):
     return manifest
 
 
-def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, expected_owner_id):
+def new_crate_burst(value):
+    """argparse type for --burst: from 0 to crates.io's new-crate burst."""
+    if not re.fullmatch(r'[0-9]{1,2}', value) or int(value) > NEW_CRATE_BURST:
+        raise argparse.ArgumentTypeError(f'expected an integer from 0 to {NEW_CRATE_BURST}')
+    return int(value)
+
+
+def wait_for_new_crate_token(row, position, total):
+    """One full refill period plus margin, so the next new name has a token."""
+    remaining = NEW_CRATE_RATE_SECONDS + NEW_CRATE_MARGIN_SECONDS
+    while remaining > 0:
+        print(f"crates.io new-crate rate limit: {remaining // 60}m{remaining % 60:02d}s until reserving "
+              f"{row['name']}@{row['version']} ({position} of {total}).", file=sys.stderr)
+        step = min(PROGRESS_SECONDS, remaining)
+        time.sleep(step)
+        remaining -= step
+
+
+def report_put_failure(config, row, outcome):
+    """Owner recovery for a stopped upload. Intents are never removed here."""
+    ref = f"refs/tags/crate-upload-intent/{row['name']}/{row['version']}"
+    remove = f"gh api --method DELETE repos/{config['repository']}/git/{ref}"
+    rerun = 'Re-run this bootstrap with --burst 0; it skips crates that are already published.'
+    coordinate = f"{row['name']}@{row['version']}"
+    if outcome.rate_limited:
+        when = (f'crates.io accepts another new crate name after {outcome.retry_after}.' if outcome.retry_after
+                else 'crates.io gave no retry time; wait at least 10 minutes.')
+        lines = [f'crates.io refused {coordinate} with HTTP 429 (rate limit) before accepting it.', when,
+                 f'Its intent {ref} is still reserved and blocks another attempt. After that time:',
+                 f"  1. Confirm {row['name']} is still absent: {REGISTRY}/api/v1/crates/{row['name']} returns 404"
+                 ' and your crates.io dashboard does not list it.',
+                 f'  2. Remove the intent with your owner GitHub session: {remove}', f'  3. {rerun}']
+    elif outcome.accepted:
+        lines = [f'crates.io acknowledged {coordinate}, but registry reads did not confirm it in time.',
+                 f'Keep its intent {ref}: a published coordinate keeps its reservation permanently.',
+                 'Re-run this bootstrap with --burst 0 once the crate is visible; it skips published crates.']
+    else:
+        lines = [f'The upload of {coordinate} has no definite result, and registry reads did not confirm it.',
+                 f'Its intent {ref} stays reserved: crates.io may still have accepted the write,'
+                 ' and public absence alone does not prove that it did not.',
+                 f"If {coordinate} appears with sha256 {row['sha256']}, keep the intent and re-run this bootstrap.",
+                 'Only after authoritative confirmation that crates.io accepted no write, for example from'
+                 f' crates.io support, remove the intent: {remove}', rerun]
+    for line in lines:
+        print(line, file=sys.stderr)
+
+
+def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, expected_owner_id,
+              burst=NEW_CRATE_BURST):
     """One-time owner-terminal bootstrap; never an Actions fallback credential."""
     require(not os.environ.get('GITHUB_ACTIONS') and not os.environ.get('CI') and
             not os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL') and
@@ -802,6 +907,7 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
     require(sys.stdin.isatty() and sys.stderr.isatty(), 'bootstrap requires interactive terminal')
     require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,63}', expected_owner or '')
             and str(expected_owner_id).isdigit(), 'explicit owner identity required')
+    require(type(burst) is int and 0 <= burst <= NEW_CRATE_BURST, 'new-crate burst out of range')
     require(not subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT), 'dirty bootstrap checkout')
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     require(api(config, f'compare/{head}...main')['status'] in ('identical', 'ahead'), 'bootstrap tooling must be reviewed on main')
@@ -829,20 +935,38 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
         return
     coordinates = ', '.join(f"{row['name']}@{row['version']}" for row in to_publish)
     print(f'First publication of {coordinates} as {expected_owner} ({expected_owner_id}).', file=sys.stderr)
+    paced = max(0, len(to_publish) - burst)
+    if paced:
+        wait = NEW_CRATE_RATE_SECONDS + NEW_CRATE_MARGIN_SECONDS
+        print(f'Pacing for the crates.io new-crate rate limit: {len(to_publish) - paced} at once, then {paced}'
+              f' after a {wait} s wait each (at least {paced * wait // 60} minutes).', file=sys.stderr)
     print('Use a short-lived publish-new token created in this owner account; no token identity API is available.', file=sys.stderr)
     require(input(f'Type PUBLISH AS {expected_owner}: ') == f'PUBLISH AS {expected_owner}', 'bootstrap not confirmed')
     github_token = host_write_authority(config, expected_owner)
     token = getpass.getpass('One-use crates.io token (hidden): ')
     require(0 < len(token) <= 8192 and all(33 <= ord(char) <= 126 for char in token), 'invalid bootstrap token')
-    for row in to_publish:
+    for position, row in enumerate(to_publish, 1):
+        if position > burst:
+            # Pace before the checks and intent: a refused PUT would strand its reservation.
+            wait_for_new_crate_token(row, position, len(to_publish))
         require(release_snapshot(api(config, f'releases/{release_id}')) == release_snapshot(release),
                 'bootstrap source changed')
         require(registry_state(row) == 'absent' and
                 get(f"{REGISTRY}/api/v1/crates/{row['name']}", absent=True) is None,
                 'bootstrap coordinate is no longer absent')
         reserve_upload(config, release, row, revision, manifest_sha256, github_token)
-        put_once(snapshots[row['name']], row['metadata'], token)
-        confirm([row])
+        outcome = put_once(snapshots[row['name']], row['metadata'], token)
+        if outcome.rate_limited:
+            report_put_failure(config, row, outcome)
+            raise ValueError('crates.io rate limit refused the upload; intent retained')
+        if not outcome.accepted:
+            print(f"crates.io did not acknowledge {row['name']}@{row['version']}; checking registry reads.",
+                  file=sys.stderr)
+        try:
+            confirm([row])
+        except Exception:
+            report_put_failure(config, row, outcome)
+            raise
         owned(row['name'])
     print('Bootstrap confirmed; revoke this one-use token and register Trusted Publishing.', file=sys.stderr)
 
@@ -853,10 +977,15 @@ def main():
     parser.add_argument('--release-id'); parser.add_argument('--revision'); parser.add_argument('--manifest-sha256')
     parser.add_argument('--source-tag'); parser.add_argument('--archives', type=Path)
     parser.add_argument('--expected-owner'); parser.add_argument('--expected-owner-id')
+    parser.add_argument('--burst', type=new_crate_burst, default=NEW_CRATE_BURST, help=(
+        f'bootstrap: new crate names to upload before pacing to one per {NEW_CRATE_RATE_SECONDS // 60} minutes'
+        f' (0-{NEW_CRATE_BURST}, default {NEW_CRATE_BURST}). Lower it if this crates.io account published'
+        f' new crate names in the last hour: {NEW_CRATE_BURST} minus that count, or 0 when unsure.'))
     args = parser.parse_args()
     config = policy()
     if args.operation == 'bootstrap':
-        bootstrap(config, args.release_id, args.revision, args.manifest_sha256, args.expected_owner, args.expected_owner_id)
+        bootstrap(config, args.release_id, args.revision, args.manifest_sha256, args.expected_owner,
+                  args.expected_owner_id, args.burst)
     elif args.operation == 'finalize':
         require(args.archives is not None, 'prepared directory required')
         finalize(config, args.source_tag, args.archives)

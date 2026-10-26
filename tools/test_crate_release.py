@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import copy
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
+import email.message
 import gzip
 import io
 import json
@@ -16,6 +17,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 import unittest
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 from tools import crate_release as R
@@ -79,6 +81,12 @@ def row():
             'asset': 'example-0.1.0.crate', 'sha256': R.digest(data),
             'content_sha256': R.content_digest(contents), 'inventory': sorted(contents),
             'metadata': R.metadata(contents, 'example', '0.1.0')}, data
+
+
+class Terminal(io.StringIO):
+    """Captured stderr that still passes the bootstrap's interactive check."""
+    def isatty(self):
+        return True
 
 
 class ApiEndpointTests(unittest.TestCase):
@@ -490,7 +498,7 @@ class BoundaryTests(unittest.TestCase):
             with self.subTest(existing=existing), ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ, {}, clear=True))
                 stack.enter_context(patch.object(R.sys.stdin, 'isatty', return_value=True))
-                stack.enter_context(patch.object(R.sys.stderr, 'isatty', return_value=True))
+                stderr = stack.enter_context(patch.object(R.sys, 'stderr', Terminal()))
                 stack.enter_context(patch.object(R.subprocess, 'check_output', side_effect=[b'', REVISION]))
                 stack.enter_context(patch.object(R, 'api', side_effect=[{'status': 'identical'}, release]))
                 stack.enter_context(patch.object(R, 'release_evidence', return_value=(release, {'crates': [entry]}, {'example': data})))
@@ -502,10 +510,19 @@ class BoundaryTests(unittest.TestCase):
                 stack.enter_context(patch.object(R, 'host_write_authority', return_value='test-github-token'))
                 stack.enter_context(patch.object(R, 'reserve_upload'))
                 stack.enter_context(patch.object(R, 'confirm', side_effect=ValueError('unresolved')))
-                put = stack.enter_context(patch.object(R, 'put_once', return_value=False))
+                put = stack.enter_context(patch.object(R, 'put_once', return_value=R.PutOutcome(False)))
                 with self.assertRaisesRegex(ValueError, 'name already exists' if existing else 'unresolved'):
                     R.bootstrap(CONFIG, 10, REVISION, 'b' * 64, 'owner', '123')
                 self.assertEqual(put.call_count, 0 if existing else 1)
+                output = stderr.getvalue()
+                if uncertain:
+                    # Ambiguous results keep the intent until authoritative owner confirmation.
+                    self.assertIn('no definite result', output)
+                    self.assertIn('intent refs/tags/crate-upload-intent/example/0.1.0 stays reserved', output)
+                    self.assertIn('Only after authoritative confirmation', output)
+                    self.assertNotIn('429', output)
+                else:
+                    self.assertNotIn('intent', output)
 
     def test_maintenance_preparation_cannot_claim_coordinates(self):
         entry, data = row()
@@ -597,6 +614,214 @@ class BoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'inventory coverage'):
                     R.finalize(CONFIG, 'v1.0.0', directory)
 
+
+class BootstrapPacingTests(unittest.TestCase):
+    """crates.io allows a burst of new names, then one per refill period."""
+
+    def run_bootstrap(self, count, burst=R.NEW_CRATE_BURST, outcomes=(), confirm=None):
+        rows = [{'name': f'crate{index}', 'version': '0.1.0', 'sha256': 'c' * 64, 'metadata': {'deps': []}}
+                for index in range(count)]
+        release, events, outcomes = {'id': 10}, [], list(outcomes)
+        def get(url, absent=False, **_):
+            if url.endswith('/api/v1/users/owner'):
+                return R.canonical({'user': {'id': 123, 'login': 'owner'}})
+            if url.endswith('/owners'):
+                return R.canonical({'users': [{'kind': 'user', 'id': 123, 'login': 'owner'}]})
+            self.assertTrue(absent)
+            return None
+        def prompt(text):
+            events.append(('prompt',))
+            return 'PUBLISH AS owner'
+        def put(data, metadata_value, token):
+            events.append(('put', data))
+            return outcomes.pop(0) if outcomes else R.PutOutcome(True)
+        def confirmed(items):
+            events.append(('confirm', items[0]['name']))
+            if confirm:
+                raise confirm
+        stderr, error = Terminal(), None
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {}, clear=True))
+            stack.enter_context(patch.object(R.sys.stdin, 'isatty', return_value=True))
+            stack.enter_context(patch.object(R.sys, 'stderr', stderr))
+            stack.enter_context(patch.object(R.subprocess, 'check_output',
+                side_effect=lambda argv, **_: b'' if 'status' in argv else REVISION))
+            stack.enter_context(patch.object(R, 'api', side_effect=lambda config, suffix:
+                {'status': 'identical'} if suffix.startswith('compare/') else release))
+            stack.enter_context(patch.object(R, 'release_evidence', return_value=(
+                release, {'crates': rows}, {item['name']: item['name'] for item in rows})))
+            stack.enter_context(patch.object(R, 'registry_state',
+                side_effect=lambda item: events.append(('check', item['name'])) or 'absent'))
+            stack.enter_context(patch.object(R, 'get', side_effect=get))
+            stack.enter_context(patch('builtins.input', side_effect=prompt))
+            stack.enter_context(patch.object(R.getpass, 'getpass', return_value='test-only-token'))
+            stack.enter_context(patch.object(R, 'host_write_authority', return_value='test-github-token'))
+            stack.enter_context(patch.object(R, 'reserve_upload',
+                side_effect=lambda config, value, item, *args: events.append(('reserve', item['name']))))
+            stack.enter_context(patch.object(R, 'put_once', side_effect=put))
+            stack.enter_context(patch.object(R, 'confirm', side_effect=confirmed))
+            stack.enter_context(patch.object(R.time, 'sleep', side_effect=lambda seconds: events.append(('sleep', seconds))))
+            try:
+                R.bootstrap(CONFIG, 10, REVISION, 'b' * 64, 'owner', '123', burst=burst)
+            except ValueError as raised:
+                error = raised
+        return events, stderr.getvalue(), error
+
+    def segments(self, events):
+        """What happens between the previous upload (or the confirmation) and each reservation."""
+        result, segment = [], []
+        for event in events:
+            if event[0] == 'reserve':
+                result.append((event[1], segment))
+            if event[0] in ('reserve', 'prompt', 'put', 'confirm'):
+                segment = []
+            else:
+                segment.append(event)
+        return result
+
+    def test_first_burst_then_one_full_wait_before_each_further_intent(self):
+        for count, burst in [(8, 5), (8, 0), (5, 5), (3, 2), (2, 5)]:
+            with self.subTest(count=count, burst=burst):
+                events, output, error = self.run_bootstrap(count, burst)
+                self.assertIsNone(error)
+                names = [f'crate{index}' for index in range(count)]
+                self.assertEqual([event[1] for event in events if event[0] == 'put'], names)
+                segments = self.segments(events)
+                self.assertEqual([name for name, _ in segments], names)
+                for position, (name, segment) in enumerate(segments, 1):
+                    sleeps = [event for event in segment if event[0] == 'sleep']
+                    # The wait finishes before the absence re-check, which precedes the intent.
+                    self.assertEqual(segment, sleeps + [('check', name)])
+                    if position > burst:
+                        self.assertEqual(sum(value for _, value in sleeps),
+                                         R.NEW_CRATE_RATE_SECONDS + R.NEW_CRATE_MARGIN_SECONDS)
+                        self.assertTrue(all(0 < value <= R.PROGRESS_SECONDS for _, value in sleeps))
+                    else:
+                        self.assertEqual(sleeps, [])
+                paced = max(0, count - burst)
+                waits = sum(1 for event in events if event[0] == 'sleep')
+                self.assertEqual(waits, paced * 11)
+                self.assertEqual(output.count(' until reserving crate'), waits)
+                if paced:
+                    self.assertIn(f'rate limit: {count - paced} at once, then {paced} after a 610 s wait each', output)
+                    self.assertIn(f'10m10s until reserving crate{burst}@0.1.0 ({burst + 1} of {count})', output)
+                else:
+                    self.assertNotIn('wait', output)
+
+    def test_out_of_range_burst_is_refused_before_any_read(self):
+        for burst in (-1, 6, True, '3', 2.0):
+            with self.subTest(burst=burst), patch.dict(os.environ, {}, clear=True), \
+                 patch.object(R.sys.stdin, 'isatty', return_value=True), patch.object(R.sys, 'stderr', Terminal()), \
+                 patch.object(R.subprocess, 'check_output') as git, patch.object(R, 'api') as api, \
+                 self.assertRaisesRegex(ValueError, 'burst out of range'):
+                R.bootstrap(CONFIG, 10, REVISION, 'b' * 64, 'owner', '123', burst=burst)
+            git.assert_not_called(); api.assert_not_called()
+
+    def test_command_line_burst_bounds_and_default(self):
+        for value, expected in [('0', 0), ('3', 3), ('5', 5)]:
+            self.assertEqual(R.new_crate_burst(value), expected)
+        for value in ('-1', '6', '10', '1.5', 'five', '', ' 3', '٣'):
+            with self.subTest(value=value), self.assertRaises(R.argparse.ArgumentTypeError):
+                R.new_crate_burst(value)
+        for extra, expected in [([], R.NEW_CRATE_BURST), (['--burst', '2'], 2), (['--burst', '0'], 0)]:
+            with self.subTest(extra=extra), patch.object(R, 'policy', return_value=CONFIG), \
+                 patch.object(R, 'bootstrap') as bootstrap, redirect_stdout(io.StringIO()), \
+                 patch.object(R.sys, 'argv', ['crate_release.py', 'bootstrap', *extra]):
+                R.main()
+                self.assertEqual(bootstrap.call_args.args[-1], expected)
+        for value in ('6', '-1'):
+            with self.subTest(value=value), patch.object(R, 'bootstrap') as bootstrap, \
+                 patch.object(R.sys, 'stderr', io.StringIO()) as stderr, self.assertRaises(SystemExit), \
+                 patch.object(R.sys, 'argv', ['crate_release.py', 'bootstrap', '--burst', value]):
+                R.main()
+            bootstrap.assert_not_called()
+            self.assertIn('from 0 to 5', stderr.getvalue())
+
+    def test_rate_limit_refusal_stops_with_owner_recovery_and_keeps_intent(self):
+        for retry_after, when in [('2026-10-26 12:34:56 UTC', 'after 2026-10-26 12:34:56 UTC'),
+                                  (None, 'gave no retry time; wait at least 10 minutes')]:
+            with self.subTest(retry_after=retry_after), patch.object(R, 'github_write') as writer:
+                events, output, error = self.run_bootstrap(
+                    3, outcomes=[R.PutOutcome(True), R.PutOutcome(False, True, retry_after)])
+                self.assertRegex(str(error), 'rate limit refused the upload; intent retained')
+                # No read-only confirmation wait, no later intent, and no intent removal.
+                self.assertEqual([event for event in events if event[0] in ('reserve', 'put', 'confirm')],
+                                 [('reserve', 'crate0'), ('put', 'crate0'), ('confirm', 'crate0'),
+                                  ('reserve', 'crate1'), ('put', 'crate1')])
+                writer.assert_not_called()
+                for text in ['crates.io refused crate1@0.1.0 with HTTP 429 (rate limit) before accepting it.', when,
+                             'intent refs/tags/crate-upload-intent/crate1/0.1.0 is still reserved',
+                             'https://crates.io/api/v1/crates/crate1 returns 404',
+                             'gh api --method DELETE repos/seraphinastudios/example/git/refs/tags/crate-upload-intent/crate1/0.1.0',
+                             '3. Re-run this bootstrap with --burst 0']:
+                    self.assertIn(text, output)
+
+    def test_acknowledged_but_unconfirmed_upload_keeps_its_intent(self):
+        events, output, error = self.run_bootstrap(1, confirm=ValueError('registry readiness unresolved'))
+        self.assertRegex(str(error), 'readiness unresolved')
+        self.assertIn('crates.io acknowledged crate0@0.1.0', output)
+        self.assertIn('a published coordinate keeps its reservation permanently', output)
+        self.assertNotIn('DELETE', output)
+
+
+class PutOnceTests(unittest.TestCase):
+    def put(self, outcome):
+        opener = MagicMock()
+        if isinstance(outcome, BaseException):
+            opener.open.side_effect = outcome
+        else:
+            opener.open.return_value = outcome
+        with patch.object(R.urllib.request, 'build_opener', return_value=opener):
+            result = R.put_once(b'archive', {'name': 'example'}, 'test-token')
+        self.assertEqual(opener.open.call_count, 1)
+        return result
+
+    def refusal(self, code, retry_after=None, body=b''):
+        headers = email.message.Message()
+        if retry_after is not None:
+            headers['Retry-After'] = retry_after
+        return urllib.error.HTTPError(R.REGISTRY + '/api/v1/crates/new', code, 'refused', headers, io.BytesIO(body))
+
+    def test_rate_limit_is_definite_and_reports_only_a_parsed_retry_time(self):
+        # The body crates.io sends with its Retry-After header (src/util/errors/json.rs).
+        detail = R.canonical({'errors': [{'detail': 'You have published too many new crates in a short period'
+            ' of time. Please try again after Tue, 27 Oct 2026 01:02:03 GMT and see'
+            ' https://crates.io/docs/rate-limits for more details.'}]})
+        for retry_after, body, expected in [
+                ('Mon, 26 Oct 2026 12:34:56 GMT', detail, '2026-10-26 12:34:56 UTC'),
+                (None, detail, '2026-10-27 01:02:03 UTC'),
+                ('\x1b]8;;https://attacker.invalid\x07', detail, '2026-10-27 01:02:03 UTC'),
+                ('Mon, 26 Oct 2026 12:34:56 GMT\x1b[2J', b'try again after \x1b[2J', None),
+                ('Mon, 31 Feb 2026 12:34:56 GMT', b'', None),
+                (None, b'not json', None)]:
+            with self.subTest(retry_after=retry_after, body=body):
+                outcome = self.put(self.refusal(429, retry_after, body))
+                self.assertEqual(outcome, R.PutOutcome(False, True, expected))
+                self.assertFalse(outcome)
+        self.assertRegex(self.put(self.refusal(429, '120')).retry_after,
+                         r'[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC')
+
+    def test_unreadable_rate_limit_details_are_still_a_refusal(self):
+        error = self.refusal(429, 'Mon, 26 Oct 2026 12:34:56 GMT')
+        with patch.object(error, 'read', side_effect=ConnectionResetError('reset')):
+            self.assertEqual(self.put(error), R.PutOutcome(False, True, None))
+
+    def test_other_failures_stay_ambiguous(self):
+        for failure in (self.refusal(500, 'Mon, 26 Oct 2026 12:34:56 GMT'), self.refusal(403),
+                        TimeoutError('lost'), urllib.error.URLError('reset'), ValueError('redirect refused')):
+            with self.subTest(failure=failure):
+                self.assertEqual(self.put(failure), R.PutOutcome(False))
+
+    def test_only_acknowledged_success_is_accepted(self):
+        for body, accepted in [(b'{"warnings":{}}', True), (b'{"errors":[{"detail":"refused"}]}', False)]:
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.status = 200
+            response.read.return_value = body
+            response.geturl.return_value = R.REGISTRY + '/api/v1/crates/new'
+            outcome = self.put(response)
+            self.assertEqual(outcome, R.PutOutcome(accepted))
+            self.assertEqual(bool(outcome), accepted)
 
 
 class CatalogTests(unittest.TestCase):

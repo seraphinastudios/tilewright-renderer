@@ -125,3 +125,79 @@ For recovery, dispatch the existing eligible release through the same workflow
 with its exact release ID, revision and manifest checksum. Never rebuild or
 replace release archives to recover a failed upload. Correct conflicting
 packages through a new reviewed Cargo version and source release.
+
+### Owner bootstrap
+
+`tools/crate_release.py bootstrap` performs the initial publication from the
+owner's terminal, never from Actions. It needs:
+
+- a clean checkout of `main` that includes the reviewed bootstrap tooling;
+- GitHub CLI 2.68 or newer, signed in as the owner with push access to this
+  repository. The tool refuses older versions: `gh attestation verify` checks
+  the manifest attestation, and the owner session reserves the upload intents;
+- a crates.io API token with the `publish-new` scope from the owner account,
+  typed at the hidden prompt and never placed in the environment. Its expiry
+  must outlast the paced run described below.
+
+For the v1.14.0 source release:
+
+```sh
+python3 tools/crate_release.py bootstrap \
+  --release-id 418808670 \
+  --revision 8f02a371066e002357b29fed94fb16a926b3a977 \
+  --manifest-sha256 fadd48beb920aeaa5cca5a1d4999f719e6a8858df813ee5bbe82c9fc4db20875 \
+  --expected-owner zoeyrose \
+  --expected-owner-id 437663 \
+  --burst 5
+```
+
+`--expected-owner` and `--expected-owner-id` are the owner's crates.io login
+and numeric user ID, as shown by `https://crates.io/api/v1/users/LOGIN`. The
+tool verifies the release evidence, lists the absent crates and asks the owner
+to type `PUBLISH AS zoeyrose` before it reads the GitHub session or the token.
+Crates already published with matching checksums and ownership are skipped, so
+a later run continues where an earlier one stopped.
+
+### New-crate rate limit
+
+crates.io lets an account publish 5 new crate names in a burst, then one more
+every 10 minutes (`LimitedAction::PublishNew` in rust-lang/crates.io
+`src/rate_limiter.rs`). A refused upload would strand the intent reserved for
+it, so the bootstrap paces itself before each reservation. It uploads
+the first `--burst` crates (default 5) at once. Before each further crate it
+waits 610 seconds, one refill period plus a 10-second margin, and prints the
+remaining time. With the default burst, eight new names take a little over
+30 minutes.
+
+Lower `--burst` if this crates.io account published new crate names in the
+last hour, including through an earlier bootstrap run: use 5 minus that
+count, or `--burst 0` to wait before every upload. If `--burst` is too high,
+crates.io refuses the upload with HTTP 429 and the run stops as described
+below.
+
+### Stopped bootstrap uploads
+
+The bootstrap never removes an intent. When an upload fails it stops, keeps
+the intent and prints the recovery for that crate:
+
+- **HTTP 429 (definite rejection).** crates.io checks its rate limits before
+  it reads the archive, and it publishes nothing for a 429. The bootstrap prints
+  the retry time from crates.io's `Retry-After` header or its "try again
+  after" detail. After that time, confirm the crate is still absent:
+  `https://crates.io/api/v1/crates/NAME` returns 404 and the crates.io
+  dashboard does not list it. Then remove the intent with the owner's GitHub
+  session and re-run with `--burst 0`:
+
+  ```sh
+  gh api --method DELETE \
+    repos/seraphinastudios/tilewright-renderer/git/refs/tags/crate-upload-intent/NAME/VERSION
+  ```
+
+- **No definite result** (timeout, connection loss, another error status or
+  an unacknowledged response). The bootstrap checks registry reads for about a
+  minute and continues if they confirm the crate. Otherwise the ambiguous-result
+  rule above applies: keep the intent until crates.io authoritatively confirms
+  that it accepted no write, for example through crates.io support.
+- **Acknowledged but not yet visible.** Keep the intent, because a published
+  coordinate keeps its reservation permanently, and re-run once the crate
+  appears.
