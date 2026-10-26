@@ -83,8 +83,12 @@ to storage. The preinstalled official GitHub CLI (2.68 or newer) verifies their
 signatures in a fresh configuration without registry or GitHub write credentials.
 Certificate checks bind the subject digest, repository ID, protected `main`,
 source and workflow revisions, GitHub-hosted runner, and exact source workflow
-run and attempt. That producing invocation must succeed; unrelated successful
-runs cannot authorize publication.
+run and attempt. In that producing attempt, the jobs that built and attested
+the evidence (`Prepare renderer release without publication credentials` and
+`Attest verified renderer source release manifest`) must have succeeded once
+the attempt completes. The later `Release renderer` job only publishes the
+release and dispatches the publisher, so its failure after publication does not
+invalidate the evidence. Unrelated successful runs cannot authorize publication.
 
 Before each registry PUT, the publisher atomically creates and reads back
 `refs/tags/crate-upload-intent/NAME/VERSION`, recording the archive and manifest
@@ -201,3 +205,32 @@ the intent and prints the recovery for that crate:
 - **Acknowledged but not yet visible.** Keep the intent, because a published
   coordinate keeps its reservation permanently, and re-run once the crate
   appears.
+
+### Activation order
+
+`publish-crate.yml` and `reconcile-crates.yml` have been disabled since
+2026-10-17. While the publisher is disabled, the final `dispatch` step of every
+release that owns new coordinates fails after the release is published, as it
+did for v1.12.0, v1.13.0 and v1.14.0. Their prepare and attest jobs succeeded,
+so their evidence remains valid. Trusted Publishing cannot create crate names,
+so the publisher cannot publish the first versions anyway. Activate in this
+order:
+
+1. Merge the bootstrap tooling to `main`. Every merge to `main` starts a minor
+   source release. Until v1.14.0's 0.3.0 crates exist on crates.io, its prepare
+   job stops with "owned crate registry readiness unresolved". That job has
+   read-only repository permissions and stops before attestation, tagging and
+   release, so the failed run publishes nothing.
+2. The owner runs the bootstrap for v1.14.0, as shown above, from a clean
+   checkout of that `main`.
+3. The owner configures each crate's trusted publisher: this repository ID,
+   `publish-crate.yml` and environment `crates-io-release`.
+4. The next merge releases normally. Preparation reuses v1.14.0's published
+   0.3.0 archives, so the new release owns no new coordinates and dispatches
+   nothing.
+
+Re-enable `publish-crate.yml` and `reconcile-crates.yml` only after step 3,
+before the next Cargo version bump needs automatic publication. Reconciliation
+dispatches every eligible release with absent crates, so it would then also
+try to publish v1.13.0's 0.2.1 and v1.12.0's 0.2.0 coordinates, which were
+never published. Decide whether that is wanted before re-enabling it.

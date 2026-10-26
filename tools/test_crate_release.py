@@ -300,16 +300,82 @@ class AttestationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'subject mismatch'):
             R.attestation_identity(CONFIG, statement, REVISION, 'c' * 64)
 
-    def test_only_attested_run_attempt_success_is_accepted(self):
-        producer = {'run_id': 100, 'run_attempt': 2}
-        run = dict(producer, id=100, workflow_id=9, head_sha=REVISION, head_branch='main', event='push',
-                   repository={'id': 123}, head_repository={'id': 123}, status='completed', conclusion='success')
-        with patch.object(R, 'api', side_effect=[{'id': 9}, run]):
-            self.assertEqual(R.producing_run(CONFIG, [producer], REVISION), producer)
+    PRODUCER = {'run_id': 100, 'run_attempt': 2}
+
+    def producing_run_record(self, **change):
+        return dict(dict(self.PRODUCER, id=100, workflow_id=9, head_sha=REVISION, head_branch='main', event='push',
+                         repository={'id': 123}, head_repository={'id': 123}, status='completed',
+                         conclusion='success'), **change)
+
+    def evidence_jobs(self, *jobs, release='success'):
+        """The producing attempt's job inventory: prepare, attest and the publishing release job."""
+        rows = list(jobs) if jobs else [self.job(name) for name in R.EVIDENCE_JOBS]
+        rows.append(self.job('Release renderer', conclusion=release))
+        return {'total_count': len(rows), 'jobs': rows}
+
+    def job(self, name, **change):
+        return dict({'name': name, 'run_id': 100, 'run_attempt': 2, 'head_sha': REVISION,
+                     'status': 'completed', 'conclusion': 'success'}, **change)
+
+    def test_only_attested_run_attempt_with_successful_evidence_is_accepted(self):
+        with patch.object(R, 'api', side_effect=[{'id': 9}, self.producing_run_record(), self.evidence_jobs()]) as api:
+            self.assertEqual(R.producing_run(CONFIG, [self.PRODUCER], REVISION), self.PRODUCER)
+        self.assertEqual(api.call_args_list[-1].args[1], 'actions/runs/100/attempts/2/jobs?per_page=100')
         for change in [{'id': 101}, {'run_attempt': 1}, {'head_sha': 'c' * 40}, {'head_branch': '1.0.x'},
-                       {'workflow_id': 8}, {'conclusion': 'failure'}]:
-            with patch.object(R, 'api', side_effect=[{'id': 9}, dict(run, **change)]), self.assertRaises(ValueError):
-                R.producing_run(CONFIG, [producer], REVISION)
+                       {'workflow_id': 8}, {'event': 'pull_request'}, {'repository': {'id': 456}},
+                       {'head_repository': {'id': 456}}]:
+            with self.subTest(change=change), self.assertRaises(ValueError), patch.object(R, 'api', side_effect=[
+                    {'id': 9}, self.producing_run_record(**change), self.evidence_jobs()]):
+                R.producing_run(CONFIG, [self.PRODUCER], REVISION)
+
+    def test_failed_release_job_after_successful_evidence_is_accepted(self):
+        # v1.14.0's shape: prepare and attest succeeded; the later dispatch step failed the run.
+        for conclusion in ('failure', 'cancelled'):
+            with self.subTest(conclusion=conclusion), patch.object(R, 'api', side_effect=[
+                    {'id': 9}, self.producing_run_record(conclusion=conclusion), self.evidence_jobs(release=conclusion)]):
+                self.assertEqual(R.producing_run(CONFIG, [self.PRODUCER], REVISION), self.PRODUCER)
+
+    def test_failed_missing_or_foreign_evidence_job_is_refused(self):
+        prepare, attest = R.EVIDENCE_JOBS
+        cases = {
+            'prepare failed': [self.job(prepare, conclusion='failure'), self.job(attest)],
+            'attest failed': [self.job(prepare), self.job(attest, conclusion='failure')],
+            'attest skipped': [self.job(prepare), self.job(attest, conclusion='skipped')],
+            'attest unfinished': [self.job(prepare), self.job(attest, status='in_progress', conclusion=None)],
+            'attest missing': [self.job(prepare)],
+            'attest duplicated': [self.job(prepare), self.job(attest), self.job(attest)],
+            'other attempt': [self.job(prepare), self.job(attest, run_attempt=1)],
+            'other run': [self.job(prepare, run_id=99), self.job(attest)],
+            'other revision': [self.job(prepare), self.job(attest, head_sha='c' * 40)],
+        }
+        for label, jobs in cases.items():
+            with self.subTest(label=label), self.assertRaises(ValueError), patch.object(R, 'api', side_effect=[
+                    {'id': 9}, self.producing_run_record(conclusion='failure'), self.evidence_jobs(*jobs)]):
+                R.producing_run(CONFIG, [self.PRODUCER], REVISION)
+        incomplete = dict(self.evidence_jobs(), total_count=101)
+        with self.assertRaisesRegex(ValueError, 'job inventory'), patch.object(R, 'api', side_effect=[
+                {'id': 9}, self.producing_run_record(), incomplete]):
+            R.producing_run(CONFIG, [self.PRODUCER], REVISION)
+
+    def test_running_attempt_waits_for_completion(self):
+        running = self.producing_run_record(status='in_progress', conclusion=None)
+        with patch.object(R, 'api', side_effect=[{'id': 9}, running, running,
+                self.producing_run_record(conclusion='failure'), self.evidence_jobs(release='failure')]) as api, \
+             patch.object(R.time, 'sleep') as sleep:
+            self.assertEqual(R.producing_run(CONFIG, [self.PRODUCER], REVISION), self.PRODUCER)
+        self.assertEqual(sleep.call_count, 2)
+        # The jobs of an unfinished attempt are not consulted.
+        self.assertEqual(sum('/jobs' in call.args[1] for call in api.call_args_list), 1)
+        with patch.object(R, 'api', side_effect=lambda config, suffix: {'id': 9} if suffix.endswith('release.yml')
+                          else running), patch.object(R.time, 'sleep') as sleep, \
+             self.assertRaisesRegex(ValueError, 'completion timed out'):
+            R.producing_run(CONFIG, [self.PRODUCER], REVISION)
+        self.assertEqual(sleep.call_count, 23)
+
+    def test_evidence_job_names_match_the_release_workflow(self):
+        workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/release.yml').read_text()
+        for name in R.EVIDENCE_JOBS:
+            self.assertIn(f'\n    name: {name}\n', workflow)
 
     def test_verifier_child_has_no_credentials_or_host_auth_config(self):
         payload = b'candidate'

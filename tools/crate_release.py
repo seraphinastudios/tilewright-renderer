@@ -51,6 +51,9 @@ NEW_CRATE_RATE_SECONDS = 600
 # Covers request latency and clock differences between this terminal and crates.io.
 NEW_CRATE_MARGIN_SECONDS = 10
 PROGRESS_SECONDS = 60
+# Job names in .github/workflows/release.yml that build and attest the evidence.
+EVIDENCE_JOBS = ('Prepare renderer release without publication credentials',
+                 'Attest verified renderer source release manifest')
 # The Retry-After format crates.io writes (TooManyRequests in src/util/errors/json.rs).
 HTTP_DATE = (r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
              r' [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT')
@@ -321,6 +324,28 @@ def attestation_identity(config, verified, revision, manifest_sha256):
     return [{'run_id': run_id, 'run_attempt': attempt} for run_id, attempt in sorted(producers, reverse=True)]
 
 
+def evidence_jobs_succeeded(config, producer, revision):
+    """The attempt's prepare and attest jobs, which built and signed the evidence.
+
+    The later release job only publishes the release and dispatches the
+    publisher, so its failure (for example while the publisher workflow is
+    disabled) leaves the attested evidence intact.
+    """
+    suffix = f"actions/runs/{producer['run_id']}/attempts/{producer['run_attempt']}/jobs?per_page=100"
+    inventory = api(config, suffix)
+    jobs = inventory.get('jobs')
+    require(isinstance(jobs, list) and inventory.get('total_count') == len(jobs) <= 100, 'producing job inventory')
+    for name in EVIDENCE_JOBS:
+        matching = [job for job in jobs if job.get('name') == name]
+        require(len(matching) == 1, 'attested evidence job missing or duplicated')
+        job = matching[0]
+        require(job.get('run_id') == producer['run_id'] and job.get('run_attempt') == producer['run_attempt']
+                and job.get('head_sha') == revision, 'attested evidence job identity mismatch')
+        if job.get('status') != 'completed' or job.get('conclusion') != 'success':
+            return False
+    return True
+
+
 def producing_run(config, producers, revision):
     workflow_id = api(config, 'actions/workflows/release.yml')['id']
     for count in range(24):
@@ -333,7 +358,8 @@ def producing_run(config, producers, revision):
                 and run['head_branch'] == 'main' and run['event'] in ('push', 'workflow_dispatch')
                 and str(run['repository']['id']) == config['repository_id']
                 and str(run['head_repository']['id']) == config['repository_id'], 'attested producing run identity mismatch')
-            if run['status'] == 'completed' and run['conclusion'] == 'success':
+            # A finished attempt counts when its evidence jobs succeeded, whatever its later jobs did.
+            if run['status'] == 'completed' and evidence_jobs_succeeded(config, producer, revision):
                 return producer
             active = active or run['status'] != 'completed'
         require(active, 'no successful attested producing run')
