@@ -142,8 +142,11 @@ requestAnimationFrame(frame);
   too many contexts, fails every later frame and readback (`render`,
   `readFrame`), and any readback waiting, with `device-lost`. Other calls
   keep working, but the renderer never draws again, and `create` on that
-  canvas fails with `device-lost` too: create one on a new canvas. An
-  uncaptured GPU error fails every later frame with `internal`.
+  canvas fails with `device-lost` too: create one on a new canvas. Do not
+  restore a renderer's context (by preventing the default action of
+  `webglcontextlost`): the renderer cannot use a restored context and may
+  draw nothing without reporting it. An uncaptured GPU error fails every
+  later frame with `internal`.
 - A WebAssembly trap, which would be a renderer bug, aborts mid-call and
   leaves the bundle's module, which all its renderers share, in an
   undefined state. Every renderer of that bundle stops: its calls, `create`

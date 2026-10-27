@@ -121,3 +121,38 @@ test('a frame that arrives after a trap is never converted', async () => {
   // Resolving a promise asks for `then`; nothing else may be read.
   assert.deepEqual(touched.filter((key) => key !== 'then'), []);
 });
+
+test('bytes reach the binding as plain views of their real length, and handles are frozen', () => {
+  const received = {};
+  const subject = renderer(
+    fakeBinding({
+      uploadTexture(_id, _revision, _width, _height, rgba) {
+        received.rgba = rgba;
+        return '0f'.repeat(32);
+      },
+      submit(_revision, _clock, _width, _height, _scale, _clear, records) {
+        received.records = records;
+      },
+    }),
+    'bytes',
+  );
+  // wasm-bindgen sizes its copy from `length`, which a subclass can forge.
+  class Forged extends Uint8Array {
+    get length() {
+      return 1_000_000_000;
+    }
+    get byteLength() {
+      return 1_000_000_000;
+    }
+  }
+  const handle = subject.uploadTexture({ id: 1, width: 1, height: 1, rgba: new Forged(4) });
+  assert.equal(Object.getPrototypeOf(received.rgba), Uint8Array.prototype);
+  assert.equal(received.rgba.length, 4);
+  assert.ok(Object.isFrozen(handle));
+  const scene = subject.scene().sprite({ id: 1, texture: handle, x: 0, y: 0, width: 8, height: 8 });
+  const records = scene.records();
+  scene.records = () => new Forged(records.buffer, 0, records.byteLength);
+  subject.submit(scene);
+  assert.equal(Object.getPrototypeOf(received.records), Uint8Array.prototype);
+  assert.equal(received.records.length, records.byteLength);
+});
