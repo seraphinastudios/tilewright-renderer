@@ -110,7 +110,8 @@ never reaches the GitHub CLI.
 
 All eight names require an owner-run initial crates.io publication with a
 narrowly scoped local API token, using the verified source-release archives.
-Configure each crate's GitHub trusted publisher with this repository ID,
+Configure each crate's GitHub trusted publisher on crates.io with repository
+owner `seraphinastudios`, repository `tilewright-renderer`, workflow
 `publish-crate.yml` and environment `crates-io-release`. Keep the token out of
 GitHub Actions, logs and committed files. Repository code prepares this rollout;
 merging a candidate does not itself grant registry ownership or configure a
@@ -232,8 +233,12 @@ order:
    nothing.
 2. The owner runs the bootstrap for v1.14.0, as shown above, from a clean
    checkout of that `main`.
-3. The owner configures each crate's trusted publisher: this repository ID,
-   `publish-crate.yml` and environment `crates-io-release`.
+3. The owner configures each crate's GitHub trusted publisher on crates.io:
+   repository owner `seraphinastudios`, repository `tilewright-renderer`,
+   workflow `publish-crate.yml` and environment `crates-io-release`. crates.io
+   looks up and binds the owner's account ID itself, together with the
+   repository name, so renaming the repository requires reconfiguring the
+   publishers.
 4. The owner re-enables `publish-crate.yml` and `reconcile-crates.yml`. This
    is a repository Actions setting that only the owner changes; no code or
    agent re-enables them.
