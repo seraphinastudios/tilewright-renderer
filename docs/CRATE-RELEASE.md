@@ -236,9 +236,9 @@ order:
 3. The owner configures each crate's GitHub trusted publisher on crates.io:
    repository owner `seraphinastudios`, repository `tilewright-renderer`,
    workflow `publish-crate.yml` and environment `crates-io-release`. crates.io
-   looks up and binds the owner's account ID itself, together with the
-   repository name, so renaming the repository requires reconfiguring the
-   publishers.
+   records the repository owner's GitHub ID along with the owner and
+   repository names, so renaming or transferring the repository or the
+   organization requires reconfiguring the publishers.
 4. The owner re-enables `publish-crate.yml` and `reconcile-crates.yml`. This
    is a repository Actions setting that only the owner changes; no code or
    agent re-enables them.
