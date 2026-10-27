@@ -48,7 +48,7 @@ export interface RendererOptions {
    */
   readonly backend?: Backend | 'auto';
   /**
-   * The bundle to load: `webgpu` (WebGPU only, about an eighth of the size)
+   * The bundle to load: `webgpu` (WebGPU only, about a seventh of the size)
    * or `full` (WebGPU and WebGL2). By default WebGPU loads `webgpu` and
    * WebGL2 loads `full`.
    */
@@ -219,29 +219,36 @@ async function webgpuAdapterAvailable(): Promise<boolean> {
   }
 }
 
-function frameFrom(frame: WebFrame): Frame {
-  let planes: Frame;
+/**
+ * Reads a binding object with `read`, then frees it. If reading throws, a
+ * trapped getter leaves the object borrowed, so `free` throws too: the
+ * reading error is the one to report.
+ */
+function readThenFree<T>(object: { free(): void }, read: () => T): T {
+  let result: T;
   try {
-    planes = {
-      width: frame.width,
-      height: frame.height,
-      rgba: frame.rgba,
-      semanticIds: frame.semanticIds,
-      depth: frame.depth,
-      coverage: frame.coverage,
-    };
+    result = read();
   } catch (error) {
-    // A trapped getter leaves the frame borrowed, so `free` throws too; the
-    // getter's error is the one to report.
     try {
-      frame.free();
+      object.free();
     } catch {
       // Ignored: see above.
     }
     throw error;
   }
-  frame.free();
-  return planes;
+  object.free();
+  return result;
+}
+
+function frameFrom(frame: WebFrame): Frame {
+  return readThenFree(frame, () => ({
+    width: frame.width,
+    height: frame.height,
+    rgba: frame.rgba,
+    semanticIds: frame.semanticIds,
+    depth: frame.depth,
+    coverage: frame.coverage,
+  }));
 }
 
 /**
@@ -625,9 +632,9 @@ export class TilewrightRenderer {
 
   /** Work counts from the most recent frame. */
   metrics(): Metrics {
-    const metrics = this.#call((inner) => inner.metrics());
-    try {
-      return {
+    return this.#call((inner) => {
+      const metrics = inner.metrics();
+      return readThenFree(metrics, () => ({
         framesSubmitted: metrics.framesSubmitted,
         resourceRequests: metrics.resourceRequests,
         uploadedBytes: metrics.uploadedBytes,
@@ -639,10 +646,8 @@ export class TilewrightRenderer {
         targetAllocationBytes: metrics.targetAllocationBytes,
         readbackBytes: metrics.readbackBytes,
         frameCpuMicros: metrics.frameCpuMicros,
-      };
-    } finally {
-      metrics.free();
-    }
+      }));
+    });
   }
 
   /** Releases the GPU device and every texture. The renderer is unusable afterwards. */

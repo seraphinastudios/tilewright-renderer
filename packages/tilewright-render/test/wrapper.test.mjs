@@ -156,3 +156,63 @@ test('bytes reach the binding as plain views of their real length, and handles a
   assert.equal(Object.getPrototypeOf(received.records), Uint8Array.prototype);
   assert.equal(received.records.length, records.byteLength);
 });
+
+test('a trap in a metrics getter stops the bundle, though free then throws', () => {
+  const metrics = {
+    get framesSubmitted() {
+      throw new WebAssembly.RuntimeError('unreachable');
+    },
+    free() {
+      throw new Error('attempted to take ownership of Rust value while it was borrowed');
+    },
+  };
+  const subject = renderer(fakeBinding({ metrics: () => metrics }), 'metrics');
+  const sibling = renderer(fakeBinding(), 'metrics');
+  assert.throws(
+    () => subject.metrics(),
+    (error) =>
+      error instanceof TilewrightError && /metrics bundle's WebAssembly module trapped/.test(error.message),
+  );
+  assert.throws(() => sibling.render(), (error) => error instanceof TilewrightError && error.code === 'internal');
+});
+
+test('a trap between the readback settling and its conversion is caught', async () => {
+  const touched = [];
+  const frame = new Proxy(
+    {},
+    {
+      get(_target, key) {
+        touched.push(String(key));
+        return key === 'free' ? () => {} : undefined;
+      },
+    },
+  );
+  const trapping = renderer(
+    fakeBinding({
+      render() {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    }),
+    'gap',
+  );
+  // The readback resolves, then a sibling traps before the race's
+  // continuation runs: the re-check must stop the conversion.
+  const waiting = renderer(
+    fakeBinding({
+      readFrame: async () => {
+        queueMicrotask(() => {
+          try {
+            trapping.render();
+          } catch {
+            // The trap is what the test is about.
+          }
+        });
+        return frame;
+      },
+    }),
+    'gap',
+  );
+  await assert.rejects(waiting.readFrame(), /gap bundle's WebAssembly module trapped/);
+  // Resolving a promise asks for `then`; nothing else may be read.
+  assert.deepEqual(touched.filter((key) => key !== 'then'), []);
+});
