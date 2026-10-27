@@ -22,7 +22,7 @@ The package ships two WebAssembly bundles with the same API:
 | Bundle | Backends | `.wasm` | gzip −9 |
 | --- | --- | --- | --- |
 | `webgpu` | WebGPU | 649 KB | 157 KB |
-| `full` | WebGPU and WebGL2 | 4,133 KB | 1,089 KB |
+| `full` | WebGPU and WebGL2 | 4,133 KB | 1,090 KB |
 
 WebGL2 needs wgpu's portable core, its shader translator and a GL backend in
 the bundle; WebGPU uses the browser's own implementation. `create` loads only
@@ -49,8 +49,10 @@ tools/validate-web.sh                # Clippy for wasm32, build, browser tests
 ```
 
 `TILEWRIGHT_WEB_TEST_HOOKS=1 tools/build-web.sh` builds the `full` bundle with
-the trap tests' hooks, as `tools/validate-web.sh` does; never ship that build.
-Without the hooks `npm test` skips the trap tests.
+the trap tests' hooks; never ship that build. `tools/validate-web.sh` builds
+with the hooks for its tests and rebuilds without them on the way out, so
+the package directory never keeps the hook build. Without the hooks `npm
+test` skips the trap tests.
 
 The build writes `packages/tilewright-render/wasm/{webgpu,full}/` and
 `packages/tilewright-render/dist/`; neither is committed. Bundlers that
@@ -94,9 +96,9 @@ requestAnimationFrame(frame);
   stored identity and revision never change: uploading the same pixels again
   is accepted, and different pixels must use a new revision, or
   `removeTexture` first. Sizes and pixel lengths are checked before any
-  pixels are copied into WebAssembly, against `maximumTextureSide`, the
-  device's limit (at most 8,192; WebGL2 devices may allow 4,096 or less),
-  with `limit-exceeded` above it.
+  pixels are copied into WebAssembly: a side above `maximumTextureSide`,
+  the device's limit (at most 8,192; WebGL2 devices may allow 4,096 or
+  less), or more than 16 MiB fails with `limit-exceeded`.
   `uploadImage` takes `ImageData` exactly, and reads other image sources at
   their intrinsic size through a 2D canvas, which can round partly
   transparent texels. Handles are frozen. `removeTexture` forgets a texture
@@ -129,23 +131,27 @@ requestAnimationFrame(frame);
   semantic, depth and coverage planes. From the call until it settles the
   renderer is busy: every other call fails with `busy`. `renderReference()`
   returns the CPU reference frame for the same scene.
-- `metrics()` reports work counts. `destroy()` destroys the device, gives up
-  a WebGL2 context at once rather than at garbage collection, so destroyed
-  renderers never count against the browser's limit of live contexts, and
-  drops the textures. A readback in flight then stops waiting and rejects
-  with `destroyed`, and so does every later call. Create a later renderer on
-  a new canvas.
+- `metrics()` reports work counts. `destroy()` destroys the device at once,
+  rather than at garbage collection, and drops the textures. A readback in
+  flight then stops waiting and rejects with `destroyed`, and so does every
+  later call. The canvas keeps its context, so a later renderer can draw on
+  the same canvas, as a re-mounted view does. The browser frees a WebGL2
+  context with its canvas, and past about 16 live contexts it loses the
+  oldest, so reuse canvases rather than creating many.
 - A lost WebGL2 context, for example when the browser drops the oldest of
   too many contexts, fails every later frame and readback (`render`,
   `readFrame`), and any readback waiting, with `device-lost`. Other calls
-  keep working, but the renderer never draws again: create one on a new
-  canvas. An uncaptured GPU error fails every later frame with `internal`.
+  keep working, but the renderer never draws again, and `create` on that
+  canvas fails with `device-lost` too: create one on a new canvas. An
+  uncaptured GPU error fails every later frame with `internal`.
 - A WebAssembly trap, which would be a renderer bug, aborts mid-call and
-  leaves the module every renderer shares in an undefined state, so every
-  renderer of the page stops: its calls, `create` and any readback waiting
-  fail with the same `internal` error. Reload the page. A trap that is not a
-  Rust panic, such as WebAssembly running out of memory, during `readFrame`
-  is not reported: that promise never settles.
+  leaves the bundle's module, which all its renderers share, in an
+  undefined state. Every renderer of that bundle stops: its calls, `create`
+  and any readback or `create` in flight fail with the same `internal`
+  error. Reload the page. The other bundle is a separate module and keeps
+  working. A trap that is not a Rust panic, such as WebAssembly running out
+  of memory, during `readFrame` or `create` is not reported: that promise
+  never settles.
 
 Errors are `TilewrightError`s with a stable `code` (see `src/errors.ts`),
 such as `invalid-scene`, `unknown-texture`, `resource` (including a frame
@@ -222,11 +228,13 @@ Chromium with `playwright-core`. For each of WebGL2 and WebGPU it:
 A third test loses WebGL2 contexts through `WEBGL_lose_context`: while idle,
 before the first frame and during a readback, each expecting `device-lost`;
 and with the loss hidden from the renderer, where only `destroy` ends the
-waiting readback, with `destroyed`. It then creates and destroys 20
-renderers and checks that a live one keeps drawing. Two trap tests make the
-module panic in `submit` and inside a readback and expect `internal` from
-every renderer; they need the test hooks. Each test fails after two minutes
-rather than hanging.
+waiting readback, with `destroyed`. It checks that `create` on a lost canvas
+fails with `device-lost`, and that renderers created and destroyed 20 times
+on one canvas draw each time while another keeps drawing. Three trap tests
+make the module panic in `submit`, inside a readback and inside `create`,
+and expect `internal` from every renderer of the `full` bundle while a
+`webgpu` bundle renderer keeps working; they need the test hooks. Each test
+fails after two minutes rather than hanging.
 
 The browser is never downloaded. `TILEWRIGHT_CHROMIUM` names a Chromium
 executable; otherwise `PLAYWRIGHT_BROWSERS_PATH` selects Playwright's

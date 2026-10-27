@@ -30,11 +30,12 @@ const HEADER_BYTES: usize = 12;
 /// Why an upload was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextureError {
-    /// A zero identity or revision, an empty or oversized side, or a pixel
-    /// buffer whose length is not `width × height × 4`.
+    /// A zero identity or revision, an empty side, or a pixel buffer whose
+    /// length is not `width × height × 4`.
     InvalidTexture,
-    /// The texture, or the store with it, would exceed its byte or count
-    /// bound, or a side exceeds the device's texture limit.
+    /// A side exceeds the store's texture side (the device's limit, at most
+    /// 8,192), or the texture, or the store with it, would exceed its byte
+    /// or count bound.
     LimitExceeded,
     /// The identity and revision already hold different pixels. A stored
     /// texture never changes; upload changed pixels as a new revision.
@@ -113,13 +114,7 @@ impl WebTextures {
         height: u32,
         rgba: &[u8],
     ) -> Result<Digest256, TextureError> {
-        if id.0 == 0
-            || revision == 0
-            || width == 0
-            || height == 0
-            || width > MAXIMUM_TEXTURE_DIMENSION
-            || height > MAXIMUM_TEXTURE_DIMENSION
-        {
+        if id.0 == 0 || revision == 0 || width == 0 || height == 0 {
             return Err(TextureError::InvalidTexture);
         }
         if width > self.maximum_dimension || height > self.maximum_dimension {
@@ -268,7 +263,6 @@ mod tests {
             (1, 1, 0, 1, 0),
             (1, 1, 1, 1, 3),
             (1, 1, 1, 1, 5),
-            (1, 1, 8_193, 1, 8_193 * 4),
         ] {
             assert_eq!(
                 textures.insert(ResourceId(id), revision, width, height, &vec![0; length]),
@@ -276,6 +270,11 @@ mod tests {
                 "{id} {revision} {width}×{height} {length}"
             );
         }
+        // A side past 8,192 is refused before its length is checked.
+        assert_eq!(
+            textures.insert(ResourceId(1), 1, 8_193, 1, &[]),
+            Err(TextureError::LimitExceeded)
+        );
         // An envelope larger than one resource request is refused.
         let side = 2_048;
         assert_eq!(

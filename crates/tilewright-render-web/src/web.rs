@@ -73,12 +73,14 @@ mod test_hooks {
         static PANIC_AT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     }
 
-    /// Panics at the next `point` reached: `"submit"` or `"readback"`.
+    /// Panics at the next `point` reached: `"submit"`, `"readback"` or
+    /// `"create"`.
     #[wasm_bindgen(js_name = panicForTest)]
     pub fn panic_for_test(point: &str) {
         let point = match point {
             "submit" => "submit",
             "readback" => "readback",
+            "create" => "create",
             _ => return,
         };
         PANIC_AT.with(|at| at.set(Some(point)));
@@ -205,6 +207,7 @@ impl WebRenderer {
                 )));
             }
         };
+        test_point("create");
         let target = TargetDescriptor {
             kind: TargetKind::Embedded,
             width,
@@ -221,7 +224,13 @@ impl WebRenderer {
                 "canvas must be an HTMLCanvasElement or OffscreenCanvas",
             )));
         }
-        .map_err(|error| render_error(&error))?;
+        .map_err(|error| match error {
+            tilewright_render_api::Error::DeviceLost => js_error(CodedError::new(
+                "device-lost",
+                "the canvas's WebGL2 context is lost; create the renderer on a new canvas",
+            )),
+            error => render_error(&error),
+        })?;
         let backend = match renderer.adapter().backend.as_str() {
             "BrowserWebGpu" => "webgpu",
             "Gl" => "webgl2",

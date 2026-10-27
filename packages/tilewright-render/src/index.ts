@@ -149,17 +149,21 @@ function intrinsicSize(image: CanvasImageSource): [number, number] {
 
 /**
  * Rejects a texture size the renderer would refuse, before any pixels are
- * read or copied.
+ * read or copied: `invalid-texture` for a side that is not a positive
+ * integer, `limit-exceeded` above `MAXIMUM_TEXTURE_SIDE` or 16 MiB.
  */
 function checkTextureSize(width: number, height: number): void {
   for (const [name, side] of [
     ['width', width],
     ['height', height],
   ] as const) {
-    if (!Number.isInteger(side) || side < 1 || side > MAXIMUM_TEXTURE_SIDE) {
+    if (!Number.isInteger(side) || side < 1) {
+      throw new TilewrightError('invalid-texture', `texture ${name} must be a positive integer`);
+    }
+    if (side > MAXIMUM_TEXTURE_SIDE) {
       throw new TilewrightError(
-        'invalid-texture',
-        `texture ${name} must be an integer from 1 to ${MAXIMUM_TEXTURE_SIDE}`,
+        'limit-exceeded',
+        `texture ${name} ${side} exceeds ${MAXIMUM_TEXTURE_SIDE}`,
       );
     }
   }
@@ -231,31 +235,68 @@ function frameFrom(frame: WebFrame): Frame {
 }
 
 /**
- * Set once the WebAssembly module traps. A trap aborts mid-call and leaves
- * the module, which every renderer of the page shares, in an undefined
- * state, so every renderer stops with this error: reload the page.
+ * Per bundle, set once its WebAssembly module traps. A trap aborts mid-call
+ * and leaves the module, which every renderer of that bundle shares, in an
+ * undefined state, so those renderers stop with this error: reload the
+ * page. The other bundle, a separate module, keeps working.
  */
-let pageTrap: TilewrightError | undefined;
-/** Rejects the readbacks still waiting when a trap stops the module. */
-const waiting = new Set<(error: TilewrightError) => void>();
+const traps = new Map<Bundle, TilewrightError>();
+/** Per bundle, rejects the waits still pending when its module traps. */
+const waiting = new Map<Bundle, Set<(error: TilewrightError) => void>>();
 
 /**
  * Records a trap: from the module's panic hook just before it traps, or
  * from a call that threw `WebAssembly.RuntimeError`.
  */
-function reportTrap(detail: string, cause?: unknown): TilewrightError {
-  if (pageTrap === undefined) {
-    pageTrap = new TilewrightError(
+function reportTrap(bundle: Bundle, detail: string, cause?: unknown): TilewrightError {
+  let trap = traps.get(bundle);
+  if (trap === undefined) {
+    trap = new TilewrightError(
       'internal',
-      `the renderer's WebAssembly module trapped; reload the page: ${detail}`,
+      `the ${bundle} bundle's WebAssembly module trapped; reload the page: ${detail}`,
       { cause },
     );
-    for (const reject of waiting) {
-      reject(pageTrap);
+    traps.set(bundle, trap);
+    for (const reject of waiting.get(bundle) ?? []) {
+      reject(trap);
     }
-    waiting.clear();
+    waiting.delete(bundle);
   }
-  return pageTrap;
+  return trap;
+}
+
+/** Converts a binding error, recording a trap. */
+function failed(bundle: Bundle, error: unknown): TilewrightError {
+  if (error instanceof WebAssembly.RuntimeError) {
+    return reportTrap(bundle, error.message, error);
+  }
+  return traps.get(bundle) ?? TilewrightError.from(error);
+}
+
+/**
+ * Awaits a binding promise. A trap inside it never settles it, so a trap in
+ * its bundle rejects the wait instead.
+ */
+async function untilTrapped<T>(bundle: Bundle, pending: Promise<T>): Promise<T> {
+  let stopWaiting = (): void => {};
+  const trapped = new Promise<never>((_resolve, reject) => {
+    const set = waiting.get(bundle) ?? new Set();
+    waiting.set(bundle, set);
+    set.add(reject);
+    stopWaiting = () => set.delete(reject);
+  });
+  try {
+    const result = await Promise.race([pending, trapped]);
+    const trap = traps.get(bundle);
+    if (trap !== undefined) {
+      throw trap;
+    }
+    return result;
+  } catch (error) {
+    throw failed(bundle, error);
+  } finally {
+    stopWaiting();
+  }
 }
 
 /** A renderer drawing scenes into one canvas. */
@@ -266,7 +307,8 @@ export class TilewrightRenderer {
   readonly adapter: string;
   /**
    * The largest texture side the device accepts, at most
-   * `MAXIMUM_TEXTURE_SIDE`; larger uploads fail with `limit-exceeded`.
+   * `MAXIMUM_TEXTURE_SIDE`; uploads with a larger side fail with
+   * `limit-exceeded`.
    */
   readonly maximumTextureSide: number;
   #inner: WebRenderer | undefined;
@@ -288,9 +330,6 @@ export class TilewrightRenderer {
     canvas: HTMLCanvasElement | OffscreenCanvas,
     options: RendererOptions = {},
   ): Promise<TilewrightRenderer> {
-    if (pageTrap !== undefined) {
-      throw pageTrap;
-    }
     const requested = options.backend ?? 'auto';
     if (requested !== 'auto' && requested !== 'webgpu' && requested !== 'webgl2') {
       throw new TilewrightError('invalid-argument', `unknown backend ${String(requested)}`);
@@ -313,16 +352,24 @@ export class TilewrightRenderer {
     const width = options.width ?? canvas.width;
     const height = options.height ?? canvas.height;
     checkTargetSize(width, height);
-    try {
-      const bindings = await loadBindings(bundle, options.wasm?.[bundle]);
-      bindings.setTrapHandler((message: string) => {
-        reportTrap(message);
-      });
-      const inner = await bindings.WebRenderer.create(canvas, width, height, backend);
-      return new TilewrightRenderer(inner, bundle, width, height);
-    } catch (error) {
-      throw TilewrightError.from(error);
+    const trap = traps.get(bundle);
+    if (trap !== undefined) {
+      throw trap;
     }
+    let bindings: BindingsModule;
+    try {
+      bindings = await loadBindings(bundle, options.wasm?.[bundle]);
+      bindings.setTrapHandler((message: string) => {
+        reportTrap(bundle, message);
+      });
+    } catch (error) {
+      throw failed(bundle, error);
+    }
+    const inner = await untilTrapped(
+      bundle,
+      bindings.WebRenderer.create(canvas, width, height, backend),
+    );
+    return new TilewrightRenderer(inner, bundle, width, height);
   }
 
   /** The drawing-buffer width in pixels. */
@@ -341,8 +388,9 @@ export class TilewrightRenderer {
   }
 
   #renderer(): WebRenderer {
-    if (pageTrap !== undefined) {
-      throw pageTrap;
+    const trap = traps.get(this.bundle);
+    if (trap !== undefined) {
+      throw trap;
     }
     if (this.#inner === undefined) {
       throw new TilewrightError('destroyed', 'the renderer was destroyed');
@@ -351,15 +399,12 @@ export class TilewrightRenderer {
   }
 
   /**
-   * Converts a binding error. After a trap every renderer stops: every
-   * later call fails with the same `internal` error, and `destroy` only
-   * forgets the renderer.
+   * Converts a binding error. After a trap every renderer of the bundle
+   * stops: every later call fails with the same `internal` error, and
+   * `destroy` only forgets the renderer.
    */
   #failed(error: unknown): TilewrightError {
-    if (error instanceof WebAssembly.RuntimeError) {
-      return reportTrap(error.message, error);
-    }
-    return pageTrap ?? TilewrightError.from(error);
+    return failed(this.bundle, error);
   }
 
   /** Rejects a texture larger than this device accepts. */
@@ -538,21 +583,8 @@ export class TilewrightRenderer {
 
   /** Renders the submitted scene offscreen and reads every plane back. */
   async readFrame(): Promise<Frame> {
-    const inner = this.#renderer();
-    // A trap inside the readback never settles its promise; the trap
-    // handler rejects this one instead.
-    let stopWaiting = (): void => {};
-    const trapped = new Promise<never>((_resolve, reject) => {
-      waiting.add(reject);
-      stopWaiting = () => waiting.delete(reject);
-    });
-    try {
-      return frameFrom((await Promise.race([inner.readFrame(), trapped])) as WebFrame);
-    } catch (error) {
-      throw this.#failed(error);
-    } finally {
-      stopWaiting();
-    }
+    const frame = await untilTrapped(this.bundle, this.#renderer().readFrame());
+    return frameFrom(frame as WebFrame);
   }
 
   /**
@@ -591,7 +623,7 @@ export class TilewrightRenderer {
     // and releases the device; otherwise the device is released now.
     const inner = this.#inner;
     this.#inner = undefined;
-    if (inner === undefined || pageTrap !== undefined) {
+    if (inner === undefined || traps.has(this.bundle)) {
       // A trapped call keeps the Rust object borrowed: freeing it would throw.
       return;
     }

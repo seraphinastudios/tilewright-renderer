@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 // Browser half of the trap test: the full bundle, built with test hooks,
-// panics in `submit` or inside a readback. Either way the call fails with
-// `internal` instead of hanging, and every renderer of the page stops.
+// panics in `submit`, inside a readback, or inside `create`. Either way the
+// call fails with `internal` instead of hanging, every renderer of that
+// bundle stops, and a renderer of the webgpu bundle keeps working.
 // test/smoke.test.mjs asserts on `window.trapResult`.
 
 import { TilewrightError, TilewrightRenderer } from '../dist/index.js';
@@ -26,10 +27,8 @@ function settled(promise, millis) {
   ]);
 }
 
-async function renderer(id) {
-  const created = await TilewrightRenderer.create(document.getElementById(id), {
-    backend: 'webgl2',
-  });
+async function renderer(canvas, backend) {
+  const created = await TilewrightRenderer.create(canvas, { backend });
   const texture = created.uploadTexture({
     id: 1,
     width: 1,
@@ -43,24 +42,31 @@ async function renderer(id) {
 
 async function run() {
   const point = new URLSearchParams(location.search).get('point');
-  const first = await renderer('first');
-  const second = await renderer('second');
+  const first = await renderer(document.getElementById('first'), 'webgl2');
+  const second = await renderer(document.getElementById('second'), 'webgl2');
+  const other = await renderer(new OffscreenCanvas(8, 8), 'webgpu');
   if (typeof bindings.panicForTest !== 'function') {
     return { hooks: false };
   }
   bindings.panicForTest(point);
   let message = '';
-  const trapped =
-    point === 'submit'
-      ? await codeOf(() => first.renderer.submit(first.scene))
-      : await settled(
-          first.renderer.readFrame().catch((error) => {
-            message = error.message;
-            throw error;
-          }),
-          5_000,
-        );
+  const remember = (promise) =>
+    promise.catch((error) => {
+      message = error.message;
+      throw error;
+    });
+  let trapped;
   if (point === 'submit') {
+    trapped = await codeOf(() => first.renderer.submit(first.scene));
+  } else if (point === 'readback') {
+    trapped = await settled(remember(first.renderer.readFrame()), 5_000);
+  } else {
+    trapped = await settled(
+      remember(TilewrightRenderer.create(new OffscreenCanvas(8, 8), { backend: 'webgl2' })),
+      5_000,
+    );
+  }
+  if (message === '') {
     try {
       first.renderer.render();
     } catch (error) {
@@ -72,11 +78,13 @@ async function run() {
     await codeOf(() => second.renderer.readFrame()),
     await codeOf(() => TilewrightRenderer.create(new OffscreenCanvas(8, 8), { backend: 'webgl2' })),
   ];
+  const otherBundle = await codeOf(() => other.renderer.readFrame());
   const destroyed = await codeOf(() => {
     first.renderer.destroy();
     second.renderer.destroy();
+    other.renderer.destroy();
   });
-  return { hooks: true, trapped, message, after, destroyed };
+  return { hooks: true, trapped, message, after, otherBundle, destroyed };
 }
 
 window.trapResult = run().catch((error) => ({ error: String(error), stack: error?.stack }));

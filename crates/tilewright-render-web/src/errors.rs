@@ -75,7 +75,7 @@ impl From<TextureError> for CodedError {
         match error {
             TextureError::InvalidTexture => Self::new(
                 "invalid-texture",
-                "identity, revision, size or pixel length is invalid",
+                "identity, revision, empty size or pixel length is invalid",
             ),
             TextureError::LimitExceeded => Self::new(
                 "limit-exceeded",

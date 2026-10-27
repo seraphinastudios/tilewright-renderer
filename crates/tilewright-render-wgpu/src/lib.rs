@@ -173,16 +173,30 @@ struct OwnedCanvas {
 }
 
 #[cfg(target_arch = "wasm32")]
-impl OwnedCanvas {
-    fn new(element: CanvasElement) -> Self {
-        // The context wgpu created; a canvas holding a WebGPU context
-        // returns none.
-        let webgl2 = match &element {
-            CanvasElement::Html(canvas) => canvas.get_context("webgl2"),
-            CanvasElement::Offscreen(canvas) => canvas.get_context("webgl2"),
+impl CanvasElement {
+    /// The canvas's WebGL2 context. Call it only once wgpu has created the
+    /// surface: on a canvas without a context it would create one, and a
+    /// canvas holding a WebGPU context returns none.
+    fn webgl2(&self) -> Option<js_sys::Object> {
+        match self {
+            Self::Html(canvas) => canvas.get_context("webgl2"),
+            Self::Offscreen(canvas) => canvas.get_context("webgl2"),
         }
         .ok()
-        .flatten();
+        .flatten()
+    }
+}
+
+/// Whether a WebGL2 context reports itself lost.
+#[cfg(target_arch = "wasm32")]
+fn webgl2_lost(context: &js_sys::Object) -> bool {
+    call_method(context, "isContextLost").is_some_and(|lost| lost.is_truthy())
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OwnedCanvas {
+    fn new(element: CanvasElement) -> Self {
+        let webgl2 = element.webgl2();
         Self { element, webgl2 }
     }
 
@@ -194,62 +208,32 @@ impl OwnedCanvas {
     }
 
     fn context_lost(&self) -> bool {
-        self.webgl2.as_ref().is_some_and(|context| {
-            call_method(context, "isContextLost", None).is_some_and(|lost| lost.is_truthy())
-        })
-    }
-
-    /// Gives up the WebGL2 context at once rather than at garbage
-    /// collection, so it stops counting against the browser's limit of live
-    /// contexts, past which the oldest is lost.
-    fn release_context(&self) {
-        let Some(context) = &self.webgl2 else {
-            return;
-        };
-        let extension = wasm_bindgen::JsValue::from_str("WEBGL_lose_context");
-        if let Some(extension) = call_method(context, "getExtension", Some(&extension))
-            .filter(wasm_bindgen::JsValue::is_object)
-        {
-            let _ = call_method(&extension, "loseContext", None);
-        }
+        self.webgl2.as_ref().is_some_and(webgl2_lost)
     }
 }
 
-/// Calls `object[name](argument)`, or `None` if that throws or is not a
-/// function.
+/// Calls `object[name]()`, or `None` if that throws or is not a function.
 #[cfg(target_arch = "wasm32")]
-fn call_method(
-    object: &wasm_bindgen::JsValue,
-    name: &str,
-    argument: Option<&wasm_bindgen::JsValue>,
-) -> Option<wasm_bindgen::JsValue> {
+fn call_method(object: &wasm_bindgen::JsValue, name: &str) -> Option<wasm_bindgen::JsValue> {
     use wasm_bindgen::{JsCast, JsValue};
-    let function = js_sys::Reflect::get(object, &JsValue::from_str(name))
+    js_sys::Reflect::get(object, &JsValue::from_str(name))
         .ok()?
         .dyn_into::<js_sys::Function>()
-        .ok()?;
-    match argument {
-        Some(argument) => function.call1(object, argument),
-        None => function.call0(object),
-    }
-    .ok()
+        .ok()?
+        .call0(object)
+        .ok()
 }
 
-/// Browsers keep a device, its memory and a WebGL2 context until garbage
-/// collection: wgpu's browser objects free nothing when dropped. A dropped
-/// renderer destroys its device and gives up its context at once.
+/// Browsers keep a device and its memory until garbage collection: wgpu's
+/// browser objects free nothing when dropped. A dropped renderer destroys
+/// its device at once. Its canvas keeps its WebGL2 context, so a later
+/// renderer can draw on the same canvas; the browser frees the context
+/// with the canvas.
 #[cfg(target_arch = "wasm32")]
 impl Drop for WgpuRenderer {
     fn drop(&mut self) {
         self.health.mark_lost();
         self.device.destroy();
-        if let Some(canvas) = self
-            .owned_surface
-            .as_ref()
-            .and_then(|owned| owned.canvas.as_ref())
-        {
-            canvas.release_context();
-        }
     }
 }
 
@@ -329,7 +313,7 @@ impl WgpuRenderer {
     /// # Errors
     /// Returns a typed target, adapter, or device creation error.
     pub async fn new_async(target: TargetDescriptor) -> Result<Self, Error> {
-        Self::create(target, None).await
+        Self::create(target, None, &|| false).await
     }
 
     /// Creates a renderer that owns a surface on a browser canvas and
@@ -344,9 +328,12 @@ impl WgpuRenderer {
         target: TargetDescriptor,
         canvas: web_sys::HtmlCanvasElement,
     ) -> Result<Self, Error> {
-        let mut renderer =
-            Self::create(target, Some(wgpu::SurfaceTarget::Canvas(canvas.clone()))).await?;
-        renderer.watch_canvas(CanvasElement::Html(canvas))?;
+        let element = CanvasElement::Html(canvas.clone());
+        let mut renderer = Self::create(target, Some(wgpu::SurfaceTarget::Canvas(canvas)), &|| {
+            element.webgl2().as_ref().is_some_and(webgl2_lost)
+        })
+        .await?;
+        renderer.watch_canvas(element)?;
         Ok(renderer)
     }
 
@@ -360,12 +347,14 @@ impl WgpuRenderer {
         target: TargetDescriptor,
         canvas: web_sys::OffscreenCanvas,
     ) -> Result<Self, Error> {
+        let element = CanvasElement::Offscreen(canvas.clone());
         let mut renderer = Self::create(
             target,
-            Some(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone())),
+            Some(wgpu::SurfaceTarget::OffscreenCanvas(canvas)),
+            &|| element.webgl2().as_ref().is_some_and(webgl2_lost),
         )
         .await?;
-        renderer.watch_canvas(CanvasElement::Offscreen(canvas))?;
+        renderer.watch_canvas(element)?;
         Ok(renderer)
     }
 
@@ -376,9 +365,12 @@ impl WgpuRenderer {
         Ok(())
     }
 
+    /// `context_lost` reports, once the surface exists, whether its canvas's
+    /// WebGL2 context is lost.
     async fn create(
         target: TargetDescriptor,
         surface: Option<wgpu::SurfaceTarget<'static>>,
+        context_lost: &dyn Fn() -> bool,
     ) -> Result<Self, Error> {
         let startup = Stopwatch::start();
         let target = target.validate(TargetLimits::default())?;
@@ -386,7 +378,7 @@ impl WgpuRenderer {
             return Err(Error::InvalidTarget);
         }
         let (instance, surface, adapter_handle, device, queue, adapter) =
-            initialize_gpu(target.backend, surface, startup).await?;
+            initialize_gpu(target.backend, surface, context_lost, startup).await?;
         let health = Arc::new(DeviceHealth::default());
         let lost = Arc::clone(&health);
         device.set_device_lost_callback(move |_reason, _message| lost.mark_lost());
@@ -1334,6 +1326,7 @@ fn preferred_backends(preference: BackendPreference) -> wgpu::Backends {
 async fn initialize_gpu(
     preference: BackendPreference,
     surface: Option<wgpu::SurfaceTarget<'static>>,
+    context_lost: &dyn Fn() -> bool,
     startup: Stopwatch,
 ) -> Result<GpuInitialization, Error> {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
@@ -1358,6 +1351,11 @@ async fn initialize_gpu(
                 "no surface for requested {preference:?} backend policy: {error}"
             ))
         })?;
+    // wgpu's WebGL2 adapter panics on a canvas whose context is lost, as
+    // after the browser dropped it.
+    if context_lost() {
+        return Err(Error::DeviceLost);
+    }
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,

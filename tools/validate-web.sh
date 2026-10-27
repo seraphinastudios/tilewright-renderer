@@ -16,7 +16,16 @@ for features in "" "--no-default-features" "--features test-hooks"; do
     -- -D warnings
 done
 
-# The trap tests need the test hooks, and fail without them when this is set.
+# The trap tests need the test hooks, and fail without them when this is
+# set. The package directory must never keep that build, so the bundles are
+# rebuilt without the hooks on the way out, pass or fail.
+rebuild_without_hooks() {
+  if ! TILEWRIGHT_WEB_TEST_HOOKS=0 tools/build-web.sh >/dev/null; then
+    echo "could not rebuild the bundles without test hooks; run tools/build-web.sh" >&2
+    exit 1
+  fi
+}
+trap rebuild_without_hooks EXIT
 export TILEWRIGHT_WEB_TEST_HOOKS=1
 tools/build-web.sh
 (cd packages/tilewright-render && TILEWRIGHT_REQUIRE_WEBGPU="${TILEWRIGHT_REQUIRE_WEBGPU:-1}" npm test)

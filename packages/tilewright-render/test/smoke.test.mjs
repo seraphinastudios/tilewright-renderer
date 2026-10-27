@@ -108,7 +108,7 @@ for (const backend of ['webgl2', 'webgpu']) {
     assert.equal(result.forgedClear, 'invalid-argument');
     assert.deepEqual(result.removed, [false, true, false]);
     assert.deepEqual(result.oversized, [
-      'invalid-texture',
+      'limit-exceeded',
       'limit-exceeded',
       'limit-exceeded',
       'invalid-texture',
@@ -130,11 +130,13 @@ test('a lost WebGL2 context fails calls and readbacks with device-lost', TIMEOUT
   assert.deepEqual(result.beforeCodes, ['device-lost', 'device-lost']);
   assert.deepEqual(result.duringCodes, ['device-lost', 'device-lost']);
   assert.deepEqual(result.destroyedCodes, ['pending', 'destroyed']);
+  assert.deepEqual(result.lostCodes, ['device-lost', 'device-lost']);
+  assert.equal(result.reusedWhite, 20);
   assert.deepEqual(result.other, { width: 8, presented: true, white: 255 });
 });
 
-for (const point of ['submit', 'readback']) {
-  test(`a trap in ${point} stops every renderer with internal`, TIMEOUT, async (context) => {
+for (const point of ['submit', 'readback', 'create']) {
+  test(`a trap in ${point} stops its bundle's renderers with internal`, TIMEOUT, async (context) => {
     const { result, messages } = await visit(`trap.html?point=${point}`, 'trapResult');
     assert.equal(result.error, undefined, `${result.error}\n${result.stack}\n${messages.join('\n')}`);
     if (!result.hooks) {
@@ -146,5 +148,7 @@ for (const point of ['submit', 'readback']) {
     assert.match(result.message, new RegExp(`test panic at ${point}`));
     assert.deepEqual(result.after, ['internal', 'internal', 'internal']);
     assert.equal(result.destroyed, 'none');
+    // The webgpu bundle is another module and keeps working.
+    assert.equal(result.otherBundle, 'none');
   });
 }

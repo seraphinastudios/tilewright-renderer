@@ -92,15 +92,32 @@ async function run() {
     WebGL2RenderingContext.prototype.isContextLost = isContextLost;
   }
 
-  // Destroyed renderers give up their contexts at once, so creating and
-  // destroying more renderers than the browser keeps contexts for never
-  // loses a live one.
+  // A canvas whose context is lost is refused with a typed error rather
+  // than trapping the module.
+  const lostCodes = [
+    await codeOf(() => TilewrightRenderer.create(idle.canvas, { backend: 'webgl2' })),
+    await codeOf(() => TilewrightRenderer.create(during.canvas, { backend: 'webgl2' })),
+  ];
+
+  // A destroyed renderer leaves its canvas usable: re-creating on the same
+  // canvas, as a re-mounted view does, reuses its context, and another
+  // renderer keeps drawing throughout.
   const other = await renderer('other');
+  const reused = document.createElement('canvas');
+  reused.width = 8;
+  reused.height = 8;
+  let reusedWhite = 0;
   for (let index = 0; index < 20; index += 1) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 8;
-    canvas.height = 8;
-    (await TilewrightRenderer.create(canvas, { backend: 'webgl2' })).destroy();
+    const again = await TilewrightRenderer.create(reused, { backend: 'webgl2' });
+    const texture = again.uploadTexture({
+      id: 1,
+      width: 1,
+      height: 1,
+      rgba: new Uint8Array([255, 255, 255, 255]),
+    });
+    again.submit(again.scene().sprite({ id: 1, texture, x: 0, y: 0, width: 8, height: 8 }));
+    reusedWhite += (await again.readFrame()).rgba[0] === 255 ? 1 : 0;
+    again.destroy();
   }
   const frame = await other.renderer.readFrame();
   const otherPresented = other.renderer.render();
@@ -113,6 +130,8 @@ async function run() {
     beforeCodes,
     duringCodes,
     destroyedCodes,
+    lostCodes,
+    reusedWhite,
     other: { width: frame.width, presented: otherPresented, white: frame.rgba[0] },
   };
 }
