@@ -64,3 +64,60 @@ test('a synchronous trap in a binding call stops every renderer of its bundle', 
   assert.throws(() => sibling.render(), (error) => error instanceof TilewrightError && error.code === 'internal');
   assert.doesNotThrow(() => trapping.destroy());
 });
+
+test('a trap in a frame getter stops the bundle, though free then throws', async () => {
+  const frame = {
+    width: 8,
+    height: 8,
+    get rgba() {
+      throw new WebAssembly.RuntimeError('unreachable');
+    },
+    free() {
+      throw new Error('attempted to take ownership of Rust value while it was borrowed');
+    },
+  };
+  const subject = renderer(fakeBinding({ readFrame: async () => frame }), 'webgpu');
+  const sibling = renderer(fakeBinding(), 'webgpu');
+  await assert.rejects(subject.readFrame(), /webgpu bundle's WebAssembly module trapped/);
+  assert.throws(() => sibling.render(), (error) => error instanceof TilewrightError && error.code === 'internal');
+});
+
+test('a frame that arrives after a trap is never converted', async () => {
+  // Bundles are only keys here: a fresh one, untouched by the tests above.
+  const bundle = 'late';
+  let resolveLate;
+  const touched = [];
+  const late = new Proxy(
+    {},
+    {
+      get(_target, key) {
+        touched.push(String(key));
+        return key === 'free' ? () => {} : undefined;
+      },
+    },
+  );
+  const waiting = renderer(
+    fakeBinding({
+      readFrame: () =>
+        new Promise((resolve) => {
+          resolveLate = resolve;
+        }),
+    }),
+    bundle,
+  );
+  const trapping = renderer(
+    fakeBinding({
+      render() {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    }),
+    bundle,
+  );
+  const pending = waiting.readFrame();
+  assert.throws(() => trapping.render(), (error) => error instanceof TilewrightError && error.code === 'internal');
+  await assert.rejects(pending, /late bundle's WebAssembly module trapped/);
+  resolveLate(late);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  // Resolving a promise asks for `then`; nothing else may be read.
+  assert.deepEqual(touched.filter((key) => key !== 'then'), []);
+});

@@ -21,8 +21,8 @@ The package ships two WebAssembly bundles with the same API:
 
 | Bundle | Backends | `.wasm` | gzip −9 |
 | --- | --- | --- | --- |
-| `webgpu` | WebGPU | 649 KB | 157 KB |
-| `full` | WebGPU and WebGL2 | 4,133 KB | 1,090 KB |
+| `webgpu` | WebGPU | 654 KB | 157 KB |
+| `full` | WebGPU and WebGL2 | 4,139 KB | 1,090 KB |
 
 WebGL2 needs wgpu's portable core, its shader translator and a GL backend in
 the bundle; WebGPU uses the browser's own implementation. `create` loads only
@@ -150,8 +150,9 @@ requestAnimationFrame(frame);
   and any readback or `create` in flight fail with the same `internal`
   error. Reload the page. The other bundle is a separate module and keeps
   working. A trap that is not a Rust panic, such as WebAssembly running out
-  of memory, during `readFrame` or `create` is not reported: that promise
-  never settles.
+  of memory, is reported the same way when the call or the conversion of
+  its result throws it. Reporting one that happens while a readback or
+  `create` is in progress is best effort: that promise may never settle.
 
 Errors are `TilewrightError`s with a stable `code` (see `src/errors.ts`),
 such as `invalid-scene`, `unknown-texture`, `resource` (including a frame

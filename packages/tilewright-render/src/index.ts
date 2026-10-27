@@ -220,8 +220,9 @@ async function webgpuAdapterAvailable(): Promise<boolean> {
 }
 
 function frameFrom(frame: WebFrame): Frame {
+  let planes: Frame;
   try {
-    return {
+    planes = {
       width: frame.width,
       height: frame.height,
       rgba: frame.rgba,
@@ -229,9 +230,18 @@ function frameFrom(frame: WebFrame): Frame {
       depth: frame.depth,
       coverage: frame.coverage,
     };
-  } finally {
-    frame.free();
+  } catch (error) {
+    // A trapped getter leaves the frame borrowed, so `free` throws too; the
+    // getter's error is the one to report.
+    try {
+      frame.free();
+    } catch {
+      // Ignored: see above.
+    }
+    throw error;
   }
+  frame.free();
+  return planes;
 }
 
 /**
@@ -274,13 +284,18 @@ function failed(bundle: Bundle, error: unknown): TilewrightError {
 }
 
 /**
- * Runs `start`, a binding call and whatever converts its result, and awaits
- * it. Every error it throws, synchronously or not, is converted, a
+ * Runs `start`, a binding call, awaits it, then runs `convert` on its
+ * result. Every error either throws, synchronously or not, is converted, a
  * `WebAssembly.RuntimeError` recorded as a trap. A trap inside a binding
  * promise never settles it, so a trap in its bundle rejects the wait
- * instead.
+ * instead; a result that arrives after a trap is never converted, which
+ * would call into the trapped module.
  */
-async function untilTrapped<T>(bundle: Bundle, start: () => Promise<T>): Promise<T> {
+async function untilTrapped<T, R>(
+  bundle: Bundle,
+  start: () => Promise<T>,
+  convert: (result: T) => R,
+): Promise<R> {
   const before = traps.get(bundle);
   if (before !== undefined) {
     throw before;
@@ -292,13 +307,16 @@ async function untilTrapped<T>(bundle: Bundle, start: () => Promise<T>): Promise
     set.add(reject);
     stopWaiting = () => set.delete(reject);
   });
+  // Only the race below observes it, and a `start` that throws
+  // synchronously never reaches the race.
+  trapped.catch(() => {});
   try {
     const result = await Promise.race([start(), trapped]);
     const trap = traps.get(bundle);
     if (trap !== undefined) {
       throw trap;
     }
-    return result;
+    return convert(result);
   } catch (error) {
     throw failed(bundle, error);
   } finally {
@@ -374,13 +392,8 @@ export class TilewrightRenderer {
     }
     return untilTrapped(
       bundle,
-      async () =>
-        new TilewrightRenderer(
-          await bindings.WebRenderer.create(canvas, width, height, backend),
-          bundle,
-          width,
-          height,
-        ),
+      () => bindings.WebRenderer.create(canvas, width, height, backend),
+      (inner) => new TilewrightRenderer(inner, bundle, width, height),
     );
   }
 
@@ -595,8 +608,10 @@ export class TilewrightRenderer {
 
   /** Renders the submitted scene offscreen and reads every plane back. */
   async readFrame(): Promise<Frame> {
-    return untilTrapped(this.bundle, async () =>
-      frameFrom((await this.#renderer().readFrame()) as WebFrame),
+    return untilTrapped(
+      this.bundle,
+      () => this.#renderer().readFrame(),
+      (frame) => frameFrom(frame as WebFrame),
     );
   }
 
