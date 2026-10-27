@@ -224,21 +224,41 @@ so their evidence remains valid. Trusted Publishing cannot create crate names,
 so the publisher cannot publish the first versions anyway. Activate in this
 order:
 
-1. Merge the bootstrap tooling to `main`. Every merge to `main` starts a minor
-   source release. Until v1.14.0's 0.3.0 crates exist on crates.io, its prepare
-   job stops with "owned crate registry readiness unresolved". That job has
-   read-only repository permissions and stops before attestation, tagging and
-   release, so the failed run publishes nothing.
+1. Merge the bootstrap tooling and the exclusions below to `main`. Every merge
+   to `main` starts a minor source release. Until v1.14.0's 0.3.0 crates exist
+   on crates.io, its prepare job stops with "owned crate registry readiness
+   unresolved". That job has read-only repository permissions and stops
+   before attestation, tagging and release, so the failed run publishes
+   nothing.
 2. The owner runs the bootstrap for v1.14.0, as shown above, from a clean
    checkout of that `main`.
 3. The owner configures each crate's trusted publisher: this repository ID,
    `publish-crate.yml` and environment `crates-io-release`.
-4. The next merge releases normally. Preparation reuses v1.14.0's published
-   0.3.0 archives, so the new release owns no new coordinates and dispatches
-   nothing.
+4. The owner re-enables `publish-crate.yml` and `reconcile-crates.yml`. This
+   is a repository Actions setting that only the owner changes; no code or
+   agent re-enables them.
 
-Re-enable `publish-crate.yml` and `reconcile-crates.yml` only after step 3,
-before the next Cargo version bump needs automatic publication. Reconciliation
-dispatches every eligible release with absent crates, so it would then also
-try to publish v1.13.0's 0.2.1 and v1.12.0's 0.2.0 coordinates, which were
-never published. Decide whether that is wanted before re-enabling it.
+From then on, merges release normally. The next one reuses v1.14.0's published
+0.3.0 archives, owns no new coordinates and dispatches nothing. Later Cargo
+version bumps publish automatically.
+
+### Excluded source releases
+
+The owner decided that crates.io starts at 0.3.0. v1.12.0 (0.2.0) and v1.13.0
+(0.2.1) own crate versions that were never published and must never be. The
+`excluded` list in `policy/crate-release.json` records each such release by
+source tag, release ID and Cargo version, and changes only through review.
+
+- Reconciliation skips an excluded release and never dispatches it.
+- Release evidence, and therefore `verify`, `confirm`, `upload` and the owner
+  bootstrap, refuses an excluded release before reading anything else. It also
+  refuses any manifest that contains an excluded coordinate: a policy crate at
+  an excluded version.
+- Every intent reservation refuses an excluded coordinate, so neither the
+  publisher nor the bootstrap can reach a registry PUT for one.
+- Anything inconsistent fails closed. That covers a tag or release ID that
+  matches an entry only partly, an excluded release whose crates are at
+  another version, and an excluded coordinate owned by another release.
+
+Excluded releases stay in the source catalog, so their coordinates remain
+owned and no later release can claim them.

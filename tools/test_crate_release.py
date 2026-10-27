@@ -26,7 +26,8 @@ from tools import crate_prepare as P
 REVISION = 'a' * 40
 CONFIG = {'schema_version': 1, 'repository': 'seraphinastudios/example', 'repository_id': '123',
           'workflow': 'publish-crate.yml', 'environment': 'crates-io-release', 'toolchain': '1.97.1',
-          'required_checks': ['Example validation'], 'crates': [{'name': 'example', 'path': 'crates/example'}], 'historical': []}
+          'required_checks': ['Example validation'], 'crates': [{'name': 'example', 'path': 'crates/example'}], 'historical': [],
+          'excluded': []}
 
 
 def files():
@@ -956,6 +957,133 @@ class PutOnceTests(unittest.TestCase):
             outcome = self.put(response)
             self.assertEqual(outcome, R.PutOutcome(accepted))
             self.assertEqual(bool(outcome), accepted)
+
+
+class ExclusionTests(unittest.TestCase):
+    """Reviewed source releases whose crate versions must never reach the registry."""
+    EXCLUDED = {'source_tag': 'v1.1.0', 'release_id': '8', 'version': '0.1.1'}
+
+    def config(self, *rows):
+        return dict(CONFIG, excluded=[dict(row) for row in rows] or [dict(self.EXCLUDED)])
+
+    def write_policy(self, root, value):
+        (root / 'policy').mkdir(exist_ok=True)
+        (root / 'policy/crate-release.json').write_text(json.dumps(value))
+        return R.policy(root)
+
+    def entry(self, release_id, tag, version, name='example'):
+        release, crate = {'id': release_id, 'tag_name': tag}, {'name': name, 'version': version}
+        return (name, version), (release, {'crates': [crate], 'revision': REVISION}, crate, 'd' * 64)
+
+    def test_repository_policy_never_publishes_v1_12_0_or_v1_13_0(self):
+        config = R.policy()
+        self.assertEqual(config['excluded'], [
+            {'source_tag': 'v1.12.0', 'release_id': '416265557', 'version': '0.2.0'},
+            {'source_tag': 'v1.13.0', 'release_id': '416925017', 'version': '0.2.1'}])
+        for crate in config['crates']:
+            for version, excluded in (('0.2.0', True), ('0.2.1', True), ('0.3.0', False)):
+                self.assertEqual(R.excluded_coordinate(config, crate['name'], version), excluded)
+        # Once v1.14.0 is live, reconciliation dispatches neither earlier release.
+        entries = dict(self.entry(release, tag, version, name) for release, tag, version in (
+            (418808670, 'v1.14.0', '0.3.0'), (416925017, 'v1.13.0', '0.2.1'), (416265557, 'v1.12.0', '0.2.0'))
+            for name in [crate['name'] for crate in config['crates']])
+        with patch.object(R, 'catalog', return_value=entries), \
+             patch.object(R, 'registry_state', side_effect=lambda item: 'present' if item['version'] == '0.3.0'
+                          else 'absent') as registry, patch.object(R, 'dispatch') as dispatch:
+            R.reconcile(config)
+        dispatch.assert_not_called()
+        self.assertEqual({call.args[0]['version'] for call in registry.call_args_list}, {'0.3.0'})
+
+    def test_policy_rejects_malformed_or_ambiguous_exclusions(self):
+        good = dict(self.EXCLUDED)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(self.write_policy(root, dict(CONFIG, excluded=[good]))['excluded'], [good])
+            for row in (dict(good, source_tag='latest'), dict(good, release_id='08'), dict(good, release_id=8),
+                        dict(good, version='0.1'), dict(good, reason='never'), {'source_tag': 'v1.1.0', 'release_id': '8'},
+                        'v1.1.0'):
+                with self.subTest(row=row), self.assertRaisesRegex(ValueError, 'exclusion fields'):
+                    self.write_policy(root, dict(CONFIG, excluded=[row]))
+            for other in (dict(good, release_id='9', version='0.1.2'), dict(good, source_tag='v1.2.0', version='0.1.2'),
+                          dict(good, source_tag='v1.2.0', release_id='9')):
+                with self.subTest(other=other), self.assertRaisesRegex(ValueError, 'duplicate exclusion'):
+                    self.write_policy(root, dict(CONFIG, excluded=[good, other]))
+            with self.assertRaisesRegex(ValueError, 'exclusion bound'):
+                self.write_policy(root, dict(CONFIG, excluded={}))
+            history = [{'name': 'example', 'version': '0.1.1', 'source_tag': 'v0.1.0', 'revision': REVISION,
+                        'asset': 'example-0.1.1.crate', 'sha256': '0' * 64}]
+            with self.assertRaisesRegex(ValueError, 'historical coordinate excluded'):
+                self.write_policy(root, dict(CONFIG, excluded=[good], historical=history))
+            with self.assertRaisesRegex(ValueError, 'policy fields'):
+                self.write_policy(root, {key: value for key, value in CONFIG.items() if key != 'excluded'})
+
+    def test_evidence_refuses_an_excluded_release_before_any_other_read(self):
+        for release, message in [({'id': 8, 'tag_name': 'v1.1.0'}, 'excluded from registry publication'),
+                                 ({'id': 8, 'tag_name': 'v1.1.9'}, 'identity mismatch'),
+                                 ({'id': 9, 'tag_name': 'v1.1.0'}, 'identity mismatch')]:
+            with self.subTest(release=release), patch.object(R, 'api', return_value=release) as api, \
+                 patch.object(R, 'asset_bytes') as assets, self.assertRaisesRegex(ValueError, message):
+                R.release_evidence(self.config(), str(release['id']), REVISION, 'b' * 64)
+            self.assertEqual(api.call_count, 1)
+            assets.assert_not_called()
+
+    def test_evidence_refuses_an_excluded_coordinate_owned_by_any_release(self):
+        entry, _ = row()  # example 0.1.0, here in a release the policy does not name
+        manifest = {'schema_version': 1, 'repository': CONFIG['repository'], 'repository_id': '123',
+                    'revision': REVISION, 'source_tag': 'v1.0.0', 'crates': [entry]}
+        raw = R.canonical(manifest)
+        with patch.object(R, 'api', return_value={'id': 10, 'tag_name': 'v1.0.0'}) as api, \
+             patch.object(R, 'release_identity'), patch.object(R, 'asset_bytes', return_value=raw), \
+             self.assertRaisesRegex(ValueError, 'excluded crate coordinate'):
+            R.release_evidence(self.config(dict(self.EXCLUDED, version='0.1.0')), '10', REVISION, R.digest(raw))
+        self.assertEqual(api.call_count, 1)  # no tag, attestation, run or check reads
+
+    def test_no_intent_or_upload_for_an_excluded_coordinate(self):
+        entry, data = row()
+        config = self.config(dict(self.EXCLUDED, version='0.1.0'))
+        release = {'id': 10, '_verified_producer': {'run_id': 100, 'run_attempt': 2}}
+        with patch.object(R, 'get') as get, patch.object(R, 'api') as api, patch.object(R, 'github_write') as write, \
+             self.assertRaisesRegex(ValueError, 'excluded crate coordinate'):
+            R.reserve_upload(config, release, entry, REVISION, 'b' * 64, 'test-token')
+        get.assert_not_called(); api.assert_not_called(); write.assert_not_called()
+        # The automatic publisher stops at the same point, before any intent or PUT.
+        with patch.object(R, 'boundary'), patch.object(R, 'release_evidence', return_value=(
+                release, {'crates': [entry]}, {'example': data})), patch.object(R, 'registry_state', return_value='absent'), \
+             patch.object(R, 'api', return_value=release), patch.object(R, 'get') as get, \
+             patch.object(R, 'github_write') as write, patch.object(R, 'put_once') as put, \
+             patch.dict(os.environ, {'CARGO_REGISTRY_TOKEN': 'test-token', 'GH_INTENT_TOKEN': 'test-intent'}), \
+             self.assertRaisesRegex(ValueError, 'excluded crate coordinate'):
+            R.upload(config, 10, REVISION, 'b' * 64)
+        get.assert_not_called(); write.assert_not_called(); put.assert_not_called()
+
+    def test_reconcile_skips_excluded_releases_and_dispatches_the_next_eligible(self):
+        entries = dict([self.entry(9, 'v1.2.0', '0.1.2'), self.entry(8, 'v1.1.0', '0.1.1'), self.entry(7, 'v1.0.0', '0.1.0')])
+        state = {'0.1.2': 'present', '0.1.1': 'absent', '0.1.0': 'absent'}
+        with patch.object(R, 'catalog', return_value=entries), \
+             patch.object(R, 'registry_state', side_effect=lambda item: state[item['version']]) as registry, \
+             patch.object(R, 'dispatch') as dispatch:
+            R.reconcile(self.config())
+        dispatch.assert_called_once()
+        self.assertEqual(dispatch.call_args.args[1]['id'], 7)
+        self.assertNotIn('0.1.1', [call.args[0]['version'] for call in registry.call_args_list])
+
+    def test_reconcile_fails_closed_on_partial_or_inconsistent_exclusions(self):
+        for label, entries, message in [
+                ('tag reused by another release', [self.entry(9, 'v1.1.0', '0.1.1')], 'identity mismatch'),
+                ('release ID under another tag', [self.entry(8, 'v1.1.9', '0.1.1')], 'identity mismatch'),
+                ('excluded release at another version', [self.entry(8, 'v1.1.0', '0.1.2')], 'version mismatch'),
+                ('excluded coordinate in another release', [self.entry(9, 'v1.2.0', '0.1.1')], 'excluded crate coordinate')]:
+            with self.subTest(label=label), patch.object(R, 'catalog', return_value=dict(entries)), \
+                 patch.object(R, 'registry_state', return_value='absent'), patch.object(R, 'dispatch') as dispatch, \
+                 self.assertRaisesRegex(ValueError, message):
+                R.reconcile(self.config())
+            dispatch.assert_not_called()
+
+    def test_reconcile_command_uses_the_policy(self):
+        with patch.object(R, 'policy', return_value=CONFIG), patch.object(R, 'reconcile') as reconcile, \
+             patch.object(R.sys, 'argv', ['crate_release.py', 'reconcile']), redirect_stdout(io.StringIO()):
+            R.main()
+        reconcile.assert_called_once_with(CONFIG)
 
 
 class CatalogTests(unittest.TestCase):

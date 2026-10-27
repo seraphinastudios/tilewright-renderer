@@ -86,8 +86,8 @@ def safe_path(value):
 
 def policy(root=ROOT):
     value = json.loads((root / 'policy/crate-release.json').read_text())
-    require(set(value) == {'schema_version', 'repository', 'repository_id', 'workflow',
-                           'environment', 'toolchain', 'crates', 'historical', 'required_checks'}, 'policy fields')
+    require(set(value) == {'schema_version', 'repository', 'repository_id', 'workflow', 'environment',
+                           'toolchain', 'crates', 'historical', 'excluded', 'required_checks'}, 'policy fields')
     require(value['schema_version'] == 1 and re.fullmatch(r'seraphinastudios/[a-z0-9-]+', value['repository'])
             and re.fullmatch(r'[1-9][0-9]*', value['repository_id'])
             and value['workflow'] == 'publish-crate.yml' and value['environment'] == 'crates-io-release'
@@ -112,7 +112,43 @@ def policy(root=ROOT):
         coordinate = (row['name'], row['version'])
         require(coordinate not in seen, 'duplicate history')
         seen.add(coordinate)
+    # Source releases whose crate versions must never reach the registry.
+    require(isinstance(value['excluded'], list) and len(value['excluded']) <= 32, 'exclusion bound')
+    tags, ids, versions = set(), set(), set()
+    for row in value['excluded']:
+        require(isinstance(row, dict) and set(row) == {'source_tag', 'release_id', 'version'}
+                and all(isinstance(row[key], str) for key in row)
+                and re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', row['source_tag'])
+                and re.fullmatch(r'[1-9][0-9]*', row['release_id']) and VERSION.fullmatch(row['version']),
+                'exclusion fields')
+        require(row['source_tag'] not in tags and row['release_id'] not in ids and row['version'] not in versions,
+                'duplicate exclusion')
+        tags.add(row['source_tag']); ids.add(row['release_id']); versions.add(row['version'])
+    require(not any(row['version'] in versions for row in value['historical']), 'historical coordinate excluded')
     return value
+
+
+def excluded_coordinate(config, name, version):
+    """Family crates at an excluded release's version never reach the registry."""
+    return (any(row['version'] == version for row in config['excluded'])
+            and any(crate['name'] == name for crate in config['crates']))
+
+
+def excluded_release(config, release, manifest=None):
+    """Whether policy permanently excludes this source release from registry publication.
+
+    Its tag and release ID must both match one entry, and its crates must all be
+    at that entry's version. A partial match is a policy or identity error.
+    """
+    matches = [row for row in config['excluded']
+               if row['source_tag'] == release.get('tag_name') or row['release_id'] == str(release.get('id'))]
+    if not matches:
+        return False
+    require(len(matches) == 1 and matches[0]['source_tag'] == release.get('tag_name')
+            and matches[0]['release_id'] == str(release.get('id')), 'excluded release identity mismatch')
+    require(manifest is None or all(row['version'] == matches[0]['version'] for row in manifest['crates']),
+            'excluded release version mismatch')
+    return True
 
 
 def validate_coordinate(row):
@@ -372,6 +408,7 @@ def producing_run(config, producers, revision):
 def reserve_upload(config, release, row, revision, manifest_sha256, token):
     """Coordinate-global, atomic and persistent intent, before any registry PUT."""
     validate_coordinate(row)
+    require(not excluded_coordinate(config, row['name'], row['version']), 'excluded crate coordinate')
     ref = f"refs/tags/crate-upload-intent/{row['name']}/{row['version']}"
     suffix = ref.removeprefix('refs/')
     url = f"https://api.github.com/repos/{config['repository']}/git/ref/{suffix}"
@@ -633,11 +670,14 @@ def release_evidence(config, release_id, revision, manifest_sha256):
     require(str(release_id).isdigit() and SHA.fullmatch(revision) and DIGEST.fullmatch(manifest_sha256), 'release selectors')
     release = api(config, f'releases/{release_id}')
     require(str(release['id']) == str(release_id), 'release ID mismatch')
+    require(not excluded_release(config, release), 'source release excluded from registry publication')
     release_identity(config, release)
     raw = asset_bytes(config, release, MANIFEST, MAX_JSON)
     require(digest(raw) == manifest_sha256, 'manifest digest mismatch')
     manifest = validate_manifest(config, json.loads(raw))
     require(manifest['revision'] == revision and manifest['source_tag'] == release['tag_name'], 'manifest source mismatch')
+    require(not any(excluded_coordinate(config, row['name'], row['version']) for row in manifest['crates']),
+            'excluded crate coordinate')
     ref = api(config, 'git/ref/tags/' + release['tag_name'])['object']
     for _ in range(4):
         if ref['type'] != 'tag':
@@ -826,6 +866,24 @@ def catalog(config):
         if len(releases) < 100:
             return found
     raise ValueError('release inventory exceeds pagination bound')
+
+
+def reconcile(config):
+    """Dispatch the newest eligible release with absent crates; excluded releases never."""
+    seen = set()
+    for release, manifest, row, manifest_sha256 in catalog(config).values():
+        if release['id'] in seen:
+            continue
+        seen.add(release['id'])
+        if excluded_release(config, release, manifest):
+            continue
+        require(not any(excluded_coordinate(config, item['name'], item['version']) for item in manifest['crates']),
+                'excluded crate coordinate')
+        if any(registry_state(item) != 'present' for item in manifest['crates']):
+            # Each dispatch is an explicit side effect; no publication credential here.
+            dispatch(config, release, manifest, manifest_sha256)
+            # One release per run keeps failure/retry and concurrency bounded.
+            break
 
 
 def dispatch(config, release, manifest, manifest_sha256):
@@ -1064,16 +1122,7 @@ def main():
         if manifest['crates']:
             dispatch(config, release, manifest, digest(raw))
     else:
-        seen = set()
-        for release, manifest, row, manifest_sha256 in catalog(config).values():
-            if release['id'] in seen:
-                continue
-            seen.add(release['id'])
-            if any(registry_state(item) != 'present' for item in manifest['crates']):
-                # Each dispatch is an explicit side effect; no publication credential here.
-                dispatch(config, release, manifest, manifest_sha256)
-                # One release per run keeps failure/retry and concurrency bounded.
-                break
+        reconcile(config)
     print(json.dumps({'operation': args.operation, 'status': 'complete'}))
 
 
