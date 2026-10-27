@@ -13,13 +13,15 @@
  * - `invalid-target`: no scene, or a scene not matching the canvas size.
  * - `backend-unavailable`: the browser offers no adapter for the backend.
  * - `surface-unavailable`: the browser skipped presenting this frame.
- * - `surface-lost`, `device-lost`: recreate the renderer.
+ * - `surface-lost`, `device-lost`: recreate the renderer; after a lost
+ *   WebGL2 context, on a new canvas.
  * - `resource`: a texture failed to load or a frame lies outside its texture.
  * - `busy`: a readback is still in flight.
  * - `destroyed`: the renderer was destroyed.
  * - `unsupported`: the host cannot run the package.
  * - `internal`: an unexpected renderer failure, an uncaptured GPU error, or
- *   a WebAssembly trap, after which every renderer stops (reload the page).
+ *   a WebAssembly trap, after which every renderer of the same bundle stops
+ *   (reload the page).
  */
 export type TilewrightErrorCode =
   | 'invalid-argument'

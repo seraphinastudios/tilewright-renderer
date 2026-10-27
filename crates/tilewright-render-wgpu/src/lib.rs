@@ -313,7 +313,7 @@ impl WgpuRenderer {
     /// # Errors
     /// Returns a typed target, adapter, or device creation error.
     pub async fn new_async(target: TargetDescriptor) -> Result<Self, Error> {
-        Self::create(target, None, &|| false).await
+        Self::create(target, None, || false).await
     }
 
     /// Creates a renderer that owns a surface on a browser canvas and
@@ -322,14 +322,15 @@ impl WgpuRenderer {
     /// size.
     ///
     /// # Errors
-    /// Returns a typed target, surface, adapter, or device creation error.
+    /// Returns a typed target, surface, adapter, or device creation error, and
+    /// [`Error::DeviceLost`] for a canvas whose WebGL2 context is lost.
     #[cfg(target_arch = "wasm32")]
     pub async fn with_canvas(
         target: TargetDescriptor,
         canvas: web_sys::HtmlCanvasElement,
     ) -> Result<Self, Error> {
         let element = CanvasElement::Html(canvas.clone());
-        let mut renderer = Self::create(target, Some(wgpu::SurfaceTarget::Canvas(canvas)), &|| {
+        let mut renderer = Self::create(target, Some(wgpu::SurfaceTarget::Canvas(canvas)), || {
             element.webgl2().as_ref().is_some_and(webgl2_lost)
         })
         .await?;
@@ -341,7 +342,8 @@ impl WgpuRenderer {
     /// a worker. See [`WgpuRenderer::with_canvas`].
     ///
     /// # Errors
-    /// Returns a typed target, surface, adapter, or device creation error.
+    /// Returns a typed target, surface, adapter, or device creation error, and
+    /// [`Error::DeviceLost`] for a canvas whose WebGL2 context is lost.
     #[cfg(target_arch = "wasm32")]
     pub async fn with_offscreen_canvas(
         target: TargetDescriptor,
@@ -351,7 +353,7 @@ impl WgpuRenderer {
         let mut renderer = Self::create(
             target,
             Some(wgpu::SurfaceTarget::OffscreenCanvas(canvas)),
-            &|| element.webgl2().as_ref().is_some_and(webgl2_lost),
+            || element.webgl2().as_ref().is_some_and(webgl2_lost),
         )
         .await?;
         renderer.watch_canvas(element)?;
@@ -366,11 +368,12 @@ impl WgpuRenderer {
     }
 
     /// `context_lost` reports, once the surface exists, whether its canvas's
-    /// WebGL2 context is lost.
+    /// WebGL2 context is lost. It is generic so that natively, where it is
+    /// `|| false`, the future stays `Send`.
     async fn create(
         target: TargetDescriptor,
         surface: Option<wgpu::SurfaceTarget<'static>>,
-        context_lost: &dyn Fn() -> bool,
+        context_lost: impl Fn() -> bool,
     ) -> Result<Self, Error> {
         let startup = Stopwatch::start();
         let target = target.validate(TargetLimits::default())?;
@@ -1326,7 +1329,7 @@ fn preferred_backends(preference: BackendPreference) -> wgpu::Backends {
 async fn initialize_gpu(
     preference: BackendPreference,
     surface: Option<wgpu::SurfaceTarget<'static>>,
-    context_lost: &dyn Fn() -> bool,
+    context_lost: impl Fn() -> bool,
     startup: Stopwatch,
 ) -> Result<GpuInitialization, Error> {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
@@ -3108,6 +3111,12 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(frame.semantic_ids, reference.semantic_ids);
+    }
+
+    #[test]
+    fn native_creation_futures_are_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&WgpuRenderer::new_async(offscreen_target(1, 1)));
     }
 
     #[test]

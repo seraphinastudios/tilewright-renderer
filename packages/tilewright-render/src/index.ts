@@ -274,10 +274,17 @@ function failed(bundle: Bundle, error: unknown): TilewrightError {
 }
 
 /**
- * Awaits a binding promise. A trap inside it never settles it, so a trap in
- * its bundle rejects the wait instead.
+ * Runs `start`, a binding call and whatever converts its result, and awaits
+ * it. Every error it throws, synchronously or not, is converted, a
+ * `WebAssembly.RuntimeError` recorded as a trap. A trap inside a binding
+ * promise never settles it, so a trap in its bundle rejects the wait
+ * instead.
  */
-async function untilTrapped<T>(bundle: Bundle, pending: Promise<T>): Promise<T> {
+async function untilTrapped<T>(bundle: Bundle, start: () => Promise<T>): Promise<T> {
+  const before = traps.get(bundle);
+  if (before !== undefined) {
+    throw before;
+  }
   let stopWaiting = (): void => {};
   const trapped = new Promise<never>((_resolve, reject) => {
     const set = waiting.get(bundle) ?? new Set();
@@ -286,7 +293,7 @@ async function untilTrapped<T>(bundle: Bundle, pending: Promise<T>): Promise<T> 
     stopWaiting = () => set.delete(reject);
   });
   try {
-    const result = await Promise.race([pending, trapped]);
+    const result = await Promise.race([start(), trapped]);
     const trap = traps.get(bundle);
     if (trap !== undefined) {
       throw trap;
@@ -365,11 +372,16 @@ export class TilewrightRenderer {
     } catch (error) {
       throw failed(bundle, error);
     }
-    const inner = await untilTrapped(
+    return untilTrapped(
       bundle,
-      bindings.WebRenderer.create(canvas, width, height, backend),
+      async () =>
+        new TilewrightRenderer(
+          await bindings.WebRenderer.create(canvas, width, height, backend),
+          bundle,
+          width,
+          height,
+        ),
     );
-    return new TilewrightRenderer(inner, bundle, width, height);
   }
 
   /** The drawing-buffer width in pixels. */
@@ -583,8 +595,9 @@ export class TilewrightRenderer {
 
   /** Renders the submitted scene offscreen and reads every plane back. */
   async readFrame(): Promise<Frame> {
-    const frame = await untilTrapped(this.bundle, this.#renderer().readFrame());
-    return frameFrom(frame as WebFrame);
+    return untilTrapped(this.bundle, async () =>
+      frameFrom((await this.#renderer().readFrame()) as WebFrame),
+    );
   }
 
   /**
@@ -592,7 +605,7 @@ export class TilewrightRenderer {
    * every backend matches within one 8-bit step, with exact picking planes.
    */
   renderReference(): Frame {
-    return frameFrom(this.#call((inner) => inner.renderReference()));
+    return this.#call((inner) => frameFrom(inner.renderReference()));
   }
 
   /** Work counts from the most recent frame. */

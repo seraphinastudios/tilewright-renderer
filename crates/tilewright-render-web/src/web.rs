@@ -37,8 +37,8 @@ thread_local! {
 /// just before the panic traps the module. A trap aborts mid-call: a
 /// readback in progress never settles, and the module, which every renderer
 /// of the bundle shares, is left in an undefined state. The TypeScript
-/// wrapper uses the handler to stop every renderer and reject waiting
-/// readbacks.
+/// wrapper uses the handler to stop every renderer of this bundle and reject
+/// its waiting readbacks and creates.
 #[wasm_bindgen(js_name = setTrapHandler)]
 pub fn set_trap_handler(handler: js_sys::Function) {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
@@ -188,8 +188,9 @@ impl WebRenderer {
     /// `"webgpu"` or `"webgl2"`; explicit choices never fall back.
     ///
     /// # Errors
-    /// Rejects with `invalid-argument`, `invalid-target` or
-    /// `backend-unavailable`.
+    /// Rejects with `invalid-argument`, `invalid-target`,
+    /// `backend-unavailable`, or `device-lost` for a canvas whose WebGL2
+    /// context is lost: create the renderer on a new canvas.
     pub async fn create(
         canvas: JsValue,
         width: u32,

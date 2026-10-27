@@ -148,7 +148,12 @@ for (const point of ['submit', 'readback', 'create']) {
     assert.match(result.message, new RegExp(`test panic at ${point}`));
     assert.deepEqual(result.after, ['internal', 'internal', 'internal']);
     assert.equal(result.destroyed, 'none');
-    // The webgpu bundle is another module and keeps working.
-    assert.equal(result.otherBundle, 'none');
+    // The webgpu bundle is another module and keeps working, where the
+    // browser offers WebGPU.
+    if (result.otherBundle === 'unavailable') {
+      assert.equal(process.env.TILEWRIGHT_REQUIRE_WEBGPU, '0', 'no WebGPU adapter');
+    } else {
+      assert.equal(result.otherBundle, 'none');
+    }
   });
 }

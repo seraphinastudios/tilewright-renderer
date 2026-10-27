@@ -42,11 +42,19 @@ async function renderer(canvas, backend) {
 
 async function run() {
   const point = new URLSearchParams(location.search).get('point');
-  const first = await renderer(document.getElementById('first'), 'webgl2');
-  const second = await renderer(document.getElementById('second'), 'webgl2');
-  const other = await renderer(new OffscreenCanvas(8, 8), 'webgpu');
   if (typeof bindings.panicForTest !== 'function') {
     return { hooks: false };
+  }
+  const first = await renderer(document.getElementById('first'), 'webgl2');
+  const second = await renderer(document.getElementById('second'), 'webgl2');
+  // A renderer of the other bundle, where the browser offers WebGPU.
+  let other;
+  try {
+    other = await renderer(new OffscreenCanvas(8, 8), 'webgpu');
+  } catch (error) {
+    if (!(error instanceof TilewrightError && error.code === 'backend-unavailable')) {
+      throw error;
+    }
   }
   bindings.panicForTest(point);
   let message = '';
@@ -78,11 +86,12 @@ async function run() {
     await codeOf(() => second.renderer.readFrame()),
     await codeOf(() => TilewrightRenderer.create(new OffscreenCanvas(8, 8), { backend: 'webgl2' })),
   ];
-  const otherBundle = await codeOf(() => other.renderer.readFrame());
+  const otherBundle =
+    other === undefined ? 'unavailable' : await codeOf(() => other.renderer.readFrame());
   const destroyed = await codeOf(() => {
     first.renderer.destroy();
     second.renderer.destroy();
-    other.renderer.destroy();
+    other?.renderer.destroy();
   });
   return { hooks: true, trapped, message, after, otherBundle, destroyed };
 }

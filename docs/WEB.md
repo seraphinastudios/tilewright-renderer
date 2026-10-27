@@ -156,7 +156,8 @@ requestAnimationFrame(frame);
 Errors are `TilewrightError`s with a stable `code` (see `src/errors.ts`),
 such as `invalid-scene`, `unknown-texture`, `resource` (including a frame
 outside its texture), `limit-exceeded`, `backend-unavailable`,
-`surface-lost`, `device-lost` (recreate the renderer), `busy` and
+`surface-lost`, `device-lost` (recreate the renderer; after a lost WebGL2
+context, on a new canvas), `busy` and
 `destroyed`. Arguments are checked before they reach WebAssembly, so a
 fractional or out-of-range size never wraps.
 
