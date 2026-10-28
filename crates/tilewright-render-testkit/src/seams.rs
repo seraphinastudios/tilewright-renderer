@@ -21,8 +21,15 @@ fn zooms() -> impl Iterator<Item = f32> {
 /// Odd and even view sizes.
 const SIZES: [(u32, u32); 2] = [(61, 47), (64, 48)];
 
-/// A tile corner at the view centre, and panned centres between tiles.
-const CENTRES: [[f64; 2]; 4] = [[0.0, 0.0], [3.37, 7.81], [-5.5, 2.25], [10.123, -4.987]];
+/// A tile corner at the view centre, panned centres between tiles, and a
+/// centre whose edges round to within a hair of half a pixel.
+const CENTRES: [[f64; 2]; 5] = [
+    [0.0, 0.0],
+    [3.37, 7.81],
+    [-5.5, 2.25],
+    [10.123, -4.987],
+    [-0.749_999_999_999_999_9, -0.5],
+];
 
 const TOP_DOWN: Projection = Projection::TopDown { tile_size: 32 };
 const ISO_48: Projection = Projection::Isometric {
@@ -36,12 +43,22 @@ const ISO_64: Projection = Projection::Isometric {
 
 /// Runs `check` for every camera of the sweep and fails listing the cameras
 /// it rejects, with the number of bad pixels each.
-fn sweep(projection: Projection, mut check: impl FnMut(Camera) -> usize) {
+fn sweep(projection: Projection, check: impl FnMut(Camera) -> usize) {
+    sweep_over(projection, zooms(), &SIZES, &CENTRES, check);
+}
+
+fn sweep_over(
+    projection: Projection,
+    zooms: impl Iterator<Item = f32>,
+    sizes: &[(u32, u32)],
+    centres: &[[f64; 2]],
+    mut check: impl FnMut(Camera) -> usize,
+) {
     let mut failures = Vec::new();
     let mut cameras = 0_usize;
-    for zoom in zooms() {
-        for (width, height) in SIZES {
-            for center in CENTRES {
+    for zoom in zooms {
+        for &(width, height) in sizes {
+            for &center in centres {
                 let camera = Camera {
                     projection,
                     center,
@@ -86,6 +103,32 @@ fn uncovered(camera: Camera, art: GroundArt) -> usize {
 fn tiled_ground_covers_every_pixel_at_every_zoom() {
     for projection in [TOP_DOWN, ISO_48, ISO_64] {
         sweep(projection, |camera| uncovered(camera, GroundArt::Full));
+    }
+}
+
+#[test]
+fn whole_zooms_tile_without_seams_wherever_edges_round() {
+    // Every quad shifts onto the pixel grid by one amount, so edges that
+    // round to within a hair of half a pixel still meet.
+    let centres = [
+        [-0.749_999_999_999_999_9, -0.5],
+        [-4.3, 8.896_340_546_624_945],
+        [0.300_000_000_000_000_04, 0.1],
+        [2.5, -1.25],
+    ];
+    let sizes = [(61, 47), (78, 103)];
+    let zooms = || (1_u8..=8).map(f32::from);
+    for projection in [Projection::TopDown { tile_size: 3 }, TOP_DOWN] {
+        sweep_over(projection, zooms(), &sizes, &centres, |camera| {
+            uncovered(camera, GroundArt::Full)
+        });
+    }
+    for projection in [ISO_48, ISO_64] {
+        for art in [GroundArt::Full, GroundArt::Diamond] {
+            sweep_over(projection, zooms(), &sizes, &centres, |camera| {
+                uncovered(camera, art)
+            });
+        }
     }
 }
 
