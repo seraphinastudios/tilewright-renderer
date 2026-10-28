@@ -243,9 +243,16 @@ order:
    is a repository Actions setting that only the owner changes; no code or
    agent re-enables them.
 
-From then on, merges release normally. The next one reuses v1.14.0's published
-0.3.0 archives, owns no new coordinates and dispatches nothing. Later Cargo
-version bumps publish automatically.
+From then on, merges release normally. A release that changes no packaged
+crate content reuses the published archives, owns no new coordinates and
+dispatches nothing. A release that changes packaged content bumps the Cargo
+version and owns new coordinates; v1.15.0's 0.4.0 is the first after v1.14.0.
+While the publisher is disabled, such a release's dispatch fails after the
+release is published, and once it is active, reconciliation publishes those
+releases, one per run. Later Cargo version bumps publish automatically.
+crates.io's first version, 0.3.0, and 0.4.0 keep wgpu's default Direct3D 12
+shader compiler, which prefers `dxcompiler.dll`; the renderer selects FXC from
+0.4.1 (see the [security policy](../SECURITY.md#native-libraries-on-windows)).
 
 ### Excluded source releases
 

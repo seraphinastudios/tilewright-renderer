@@ -23,9 +23,7 @@ presents twice through one renderer and window to exercise reuse; offscreen
 tests repeatedly create, render, resize, reuse, and destroy renderer instances.
 
 Linux runtime proof uses Vulkan (including Mesa software Vulkan in CI) and
-launches the actual SDL window path under Xvfb. Native Windows uses D3D12,
-which compiles shaders with the FXC compiler that ships with Windows (see the
-[security policy](../SECURITY.md#native-libraries-on-windows)). CI
+launches the actual SDL window path under Xvfb. Native Windows uses D3D12. CI
 cross-checks the non-SDL renderer crates and default portable CLI for the
 Windows GNU target; native D3D12 presentation remains a documented manual test
 because the GNU cross toolchain is not a Windows runtime.
@@ -37,6 +35,16 @@ headless CI; diagnostics record that device type, driver, backend, startup
 time, maximum 2D texture dimension, and buffer limit. Explicit Vulkan/D3D12
 requests never cross-fallback to the other backend. Adapter and surface
 capability failures include the requested policy and missing capability.
+
+On Windows, Vulkan is enabled only when its loader, `vulkan-1.dll`, is
+installed in the system directory. Without it `Automatic` enables D3D12 alone,
+and an explicit Vulkan request fails with `BackendUnavailable`. Whenever D3D12
+is enabled, the instance loads the FXC shader compiler that ships with Windows
+as it is created, whichever adapter is then selected, and D3D12 pipelines
+compile with FXC. `WGPU_DX12_COMPILER` selects another compiler; an
+application that enables wgpu's `static-dxc` feature must set it to
+`staticdxc` to use that compiler. The [security
+policy](../SECURITY.md#native-libraries-on-windows) explains both rules.
 
 The sole unsafe assertion is private to `raw_handle_bridge`: an ephemeral
 wrapper is declared `Send + Sync` only to synchronously copy immutable raw SDL
