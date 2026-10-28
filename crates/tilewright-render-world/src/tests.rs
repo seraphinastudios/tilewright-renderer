@@ -1138,10 +1138,20 @@ fn ground_texels_keep_their_world_positions_at_fractional_zoom() {
                 "zoom {zoom} axis {axis}: {shift}"
             );
         }
-        // Every pixel centre the art covers samples inside it.
+        // Every pixel centre the art covers samples strictly inside it,
+        // interpolated in `f32` as the reference rasteriser does.
         for id in [1, 2] {
-            let (_, uvs) = edges(&quads_of(&view, id)[0]);
-            assert!(uvs.iter().all(|uv| uv.abs() < 1.5), "{uvs:?}");
+            let (edges, uvs) = edges(&quads_of(&view, id)[0]);
+            for axis in 0..2 {
+                let (low, high) = (edges[axis], edges[axis + 2]);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                for pixel in low as u32..high as u32 {
+                    #[allow(clippy::cast_precision_loss)]
+                    let along = (pixel as f32 + 0.5 - low) / (high - low);
+                    let uv = uvs[axis] + along * (uvs[axis + 2] - uvs[axis]);
+                    assert!(uv > 0.0 && uv < 1.0, "zoom {zoom} axis {axis}: {uv}");
+                }
+            }
         }
     }
 }

@@ -10,8 +10,10 @@ use crate::{
 };
 use tilewright_render_api::{RenderRequest, Renderer};
 use tilewright_render_resources::for_each_quad_pixel;
-use tilewright_render_world::{Camera, Projection, compile};
-use tilewright_scene::{Sampling, SceneLimits};
+use tilewright_render_world::{
+    Anchor, Camera, HeightField, Projection, WorldObject, WorldView, compile,
+};
+use tilewright_scene::{Sampling, SceneBundle, SceneLimits, SemanticId};
 
 /// Every zoom from 0.25 to 3 in steps of 0.01.
 fn zooms() -> impl Iterator<Item = f32> {
@@ -89,10 +91,16 @@ fn sweep_over(
 fn uncovered(camera: Camera, art: GroundArt) -> usize {
     let view = ground_grid_view(camera, art).unwrap();
     let scene = compile(&view, SceneLimits::default()).unwrap();
+    semantic_holes(&scene, camera, art)
+}
+
+/// Pixels of a ground grid scene the reference renderer leaves without a
+/// semantic identity.
+fn semantic_holes(scene: &SceneBundle, camera: Camera, art: GroundArt) -> usize {
     let frame = ReferenceRenderer::new(offscreen_target(camera.width, camera.height))
         .unwrap()
         .render(RenderRequest {
-            scene: &scene,
+            scene,
             resources: ground_grid_provider(camera.projection, art).unwrap(),
         })
         .unwrap();
@@ -290,6 +298,101 @@ fn ground_texels_break_ties_one_way_across_every_tile() {
                     wrong
                 },
             );
+        }
+    }
+}
+
+/// Every third zoom of the sweep, for the slower variations.
+fn some_zooms() -> impl Iterator<Item = f32> {
+    zooms().step_by(3)
+}
+
+/// The ground grid raised to one height across a field covering it.
+fn raised(mut view: WorldView, height: i32, pixels_per_unit: f32) -> WorldView {
+    let along = |axis: usize| view.objects.iter().map(move |object| object.tile[axis]);
+    let origin = [0, 1].map(|axis| along(axis).min().unwrap());
+    let size = [0, 1].map(|axis| along(axis).max().unwrap() - origin[axis] + 1);
+    let [width, rows] = size.map(|side| u32::try_from(side).unwrap());
+    view.heights = HeightField {
+        origin,
+        width,
+        height: rows,
+        heights: vec![Some(height); (width * rows) as usize],
+    };
+    view.stretch.pixels_per_unit = pixels_per_unit;
+    view
+}
+
+#[test]
+fn raised_ground_covers_every_pixel() {
+    // Raised flat ground subtracts its rise from every edge once, so
+    // fractional pixels per unit still leave shared edges equal.
+    for (height, pixels_per_unit) in [(7, 0.37), (-3, 1.7)] {
+        for projection in [TOP_DOWN, ISO_48] {
+            for art in [GroundArt::Full, GroundArt::Diamond] {
+                sweep_over(projection, some_zooms(), &SIZES, &CENTRES, |camera| {
+                    let view = raised(
+                        ground_grid_view(camera, art).unwrap(),
+                        height,
+                        pixels_per_unit,
+                    );
+                    let scene = compile(&view, SceneLimits::default()).unwrap();
+                    semantic_holes(&scene, camera, art)
+                });
+            }
+        }
+    }
+}
+
+#[test]
+fn top_down_footprints_tile_without_gaps_or_overlaps() {
+    // Two-tile-wide ground on every third row, and two-tile-tall ground on
+    // the next two, cover each tile exactly once.
+    sweep_over(TOP_DOWN, some_zooms(), &SIZES, &CENTRES, |camera| {
+        let mut view = ground_grid_view(camera, GroundArt::Full).unwrap();
+        let texture = view.objects[0].animation.frames[0];
+        let tiles: Vec<[i64; 2]> = view.objects.iter().map(|object| object.tile).collect();
+        view.objects = tiles
+            .iter()
+            .filter_map(|&[x, y]| match y.rem_euclid(3) {
+                0 if x.rem_euclid(2) == 0 => Some(([x, y], [2, 1])),
+                1 => Some(([x, y], [1, 2])),
+                _ => None,
+            })
+            .zip(1..)
+            .map(|((tile, footprint), id)| {
+                let mut object = WorldObject::new(SemanticId(id), tile, 0, Anchor::Ground, texture);
+                object.footprint = footprint;
+                object
+            })
+            .collect();
+        let scene = compile(&view, SceneLimits::default()).unwrap();
+        let mut counts = vec![0_u8; (camera.width * camera.height) as usize];
+        for quad in scene.quads() {
+            for_each_quad_pixel(quad, camera.width, camera.height, |_, _, index, _, _| {
+                counts[index] = counts[index].saturating_add(1);
+            });
+        }
+        counts.iter().filter(|count| **count != 1).count()
+    });
+}
+
+#[test]
+fn far_ground_covers_every_pixel() {
+    // Near the coordinate bound the camera's world position keeps only
+    // about 1/128 px, but shared edges stay exact.
+    #[allow(clippy::cast_precision_loss)]
+    let far = (tilewright_render_world::MAXIMUM_TILE_COORDINATE - 50) as f64;
+    let centres = [
+        [far - 0.37, -far + 0.81],
+        [far + 0.5, far - 0.25],
+        [-far, -far],
+    ];
+    for projection in [TOP_DOWN, ISO_48] {
+        for art in [GroundArt::Full, GroundArt::Diamond] {
+            sweep_over(projection, some_zooms(), &SIZES, &centres, |camera| {
+                uncovered(camera, art)
+            });
         }
     }
 }
