@@ -337,9 +337,13 @@ pub enum GroundArt {
     Checker,
 }
 
-/// The ground grid's texture: its size and `ATX1` envelope with digest.
-#[allow(clippy::cast_possible_truncation)]
-fn ground_grid_texture(projection: Projection, art: GroundArt) -> (u32, u32, Vec<u8>, Digest256) {
+/// Largest tile side the world compiler accepts, which bounds the ground
+/// grid's texture before any of it is built.
+const MAXIMUM_TILE_SIDE: u32 = 1_024;
+
+/// The ground grid texture's size, or `None` for a tile side of 0 or over
+/// [`MAXIMUM_TILE_SIDE`].
+fn ground_grid_size(projection: Projection, art: GroundArt) -> Option<(u32, u32, bool)> {
     let (width, height, diamond) = match projection {
         Projection::TopDown { tile_size } => (tile_size, tile_size, false),
         Projection::Isometric {
@@ -350,6 +354,16 @@ fn ground_grid_texture(projection: Projection, art: GroundArt) -> (u32, u32, Vec
             GroundArt::Diamond => (tile_width, tile_height.saturating_sub(1).max(1), true),
         },
     };
+    ((1..=MAXIMUM_TILE_SIDE).contains(&width) && (1..=MAXIMUM_TILE_SIDE).contains(&height))
+        .then_some((width, height, diamond))
+}
+
+/// The ground grid's texture: its size and `ATX1` envelope with digest. At
+/// most 1,024 texels on a side, so at most 4 MiB.
+fn ground_grid_texture(
+    (width, height, diamond): (u32, u32, bool),
+    art: GroundArt,
+) -> (Vec<u8>, Digest256) {
     let (columns, rows) = (width as usize, height as usize);
     let mut pixels = vec![[0_u8; 4]; columns * rows];
     for row in 0..rows {
@@ -369,21 +383,23 @@ fn ground_grid_texture(projection: Projection, art: GroundArt) -> (u32, u32, Vec
             }
         }
     }
-    let (bytes, digest) = texture_envelope(width, height, &pixels);
-    (width, height, bytes, digest)
+    texture_envelope(width, height, &pixels)
 }
 
 /// A provider holding the texture [`ground_grid_view`] draws for this
 /// projection and art.
 ///
 /// # Errors
-/// Returns a provider availability error if its internal lock is poisoned.
+/// Returns [`ResourceError::LimitExceeded`], before building the texture,
+/// for a tile side of 0 or over 1,024 px, which the world compiler rejects,
+/// or a provider availability error if its internal lock is poisoned.
 pub fn ground_grid_provider(
     projection: Projection,
     art: GroundArt,
 ) -> Result<Arc<FakeResourceProvider>, ResourceError> {
+    let size = ground_grid_size(projection, art).ok_or(ResourceError::LimitExceeded)?;
     let provider = Arc::new(FakeResourceProvider::default());
-    let (_, _, bytes, _) = ground_grid_texture(projection, art);
+    let (bytes, _) = ground_grid_texture(size, art);
     provider.insert(ResourceId(GROUND_GRID), 1, bytes)?;
     Ok(provider)
 }
@@ -395,7 +411,8 @@ pub fn ground_grid_provider(
 ///
 /// # Errors
 /// Returns [`tilewright_scene::Error::LimitExceeded`], before allocating
-/// anything, when the view needs more tiles than the default scene quad
+/// anything, for a tile side of 0 or over 1,024 px, which the world compiler
+/// rejects, when the view needs more tiles than the default scene quad
 /// budget, or for a zoom at which the view has no finite extent.
 #[allow(
     clippy::cast_possible_truncation,
@@ -406,14 +423,8 @@ pub fn ground_grid_view(
     camera: Camera,
     art: GroundArt,
 ) -> Result<WorldView, tilewright_scene::Error> {
-    let (width, height, _, digest) = ground_grid_texture(camera.projection, art);
-    let texture = TextureRef {
-        id: ResourceId(GROUND_GRID),
-        revision: 1,
-        digest,
-        width,
-        height,
-    };
+    let size =
+        ground_grid_size(camera.projection, art).ok_or(tilewright_scene::Error::LimitExceeded)?;
     // The view's corners in tile coordinates bound the tiles in view.
     let zoom = f64::from(camera.zoom);
     let tile = |x: u32, y: u32| -> [f64; 2] {
@@ -451,6 +462,14 @@ pub fn ground_grid_view(
     if !(tiles.is_finite() && tiles <= SceneLimits::default().maximum_quads as f64) {
         return Err(tilewright_scene::Error::LimitExceeded);
     }
+    let (_, digest) = ground_grid_texture(size, art);
+    let texture = TextureRef {
+        id: ResourceId(GROUND_GRID),
+        revision: 1,
+        digest,
+        width: size.0,
+        height: size.1,
+    };
     let mut objects = Vec::with_capacity(tiles as usize);
     for y in top as i64..=bottom as i64 {
         for x in left as i64..=right as i64 {

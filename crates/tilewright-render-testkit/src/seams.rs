@@ -185,6 +185,22 @@ fn ground_grids_are_bounded_before_allocating() {
             "zoom {zoom}"
         );
     }
+    // Tile sides the compiler rejects never build a texture: 30,000 px
+    // tiles would need 3.6 GB.
+    let huge = Projection::TopDown { tile_size: 30_000 };
+    let mut wide = camera(1.0);
+    wide.projection = huge;
+    assert_eq!(
+        ground_grid_view(wide, GroundArt::Full).err(),
+        Some(tilewright_scene::Error::LimitExceeded)
+    );
+    assert!(matches!(
+        ground_grid_provider(huge, GroundArt::Full),
+        Err(tilewright_render_resources::Error::LimitExceeded)
+    ));
+    assert!(
+        ground_grid_provider(Projection::TopDown { tile_size: 1_024 }, GroundArt::Full).is_ok()
+    );
 }
 
 /// Twice a tile's unsnapped art left and top edges in world pixels, and the
