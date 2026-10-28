@@ -104,9 +104,36 @@ knows nothing about any game or content format.
   inside double-drawn art still composite twice by design.
 - **Effects.** Offset, scale, rotation, alpha, tint, greyscale, a pulsing glow,
   and clocked animation frames are compiled into the quad fields.
-- **Pixel grid.** Axis-aligned art snaps its top-left corner to whole pixels,
-  rounding halves up, so pixel centres sample texel centres and every backend
-  picks the same texels. Quads entirely outside the viewport are culled.
+- **Pixel grid.** Flat ground (top-down tiles and flat isometric tiles)
+  snaps each of its four edges to whole pixels on its own. Neighbouring
+  ground computes a shared world edge from the same value, so tiles that meet
+  in the world meet at the same pixel edge at every zoom, view size and camera
+  centre: tiled ground leaves no gap or overlap between quads, and a quad
+  covers exactly the pixels whose centres lie inside its art. Its texture
+  coordinates keep every texel where the unsnapped art puts it, so one world
+  point samples the same texel of whichever tile draws it, and isometric
+  diamonds interlock along their diagonals at fractional zoom as they do at
+  zoom 1. A texture-coordinate margin of 1/65,536 keeps every sampled centre
+  inside the art on every backend; a pixel centre on the boundary between
+  neighbouring art, to within that margin, is drawn by both and painter order
+  picks the one that shows. At whole-number zooms ground art first moves by at
+  most half a pixel onto the grid, rounding halves up, so pixel centres sample
+  texel centres and every backend picks the same texels, as before. Standing
+  art snaps its top-left corner the same way and keeps its exact scaled size,
+  so a sprite never gains or loses a pixel of width as it or the camera moves.
+  Bent ground keeps its unsnapped mesh and overlap. Quads entirely outside the
+  viewport are culled.
+- **What content provides.** Geometry closes every seam between ground quads
+  and keeps texels consistent between tiles, but whether art covers the
+  boundary between its own texels and a neighbour's is the art's job. Ground
+  that tiles exactly at zoom 1 with nearest sampling, such as opaque 2:1
+  diamonds one pixel shorter than the tile, leaves no gap at fractional zooms
+  either (the tests sweep 0.25× to 3× in steps of 0.01). Diamond art with soft
+  or translucent edges, art that does not tile exactly, and linearly sampled
+  art, whose edge texels blend with the transparent texels beside them, need
+  about a texel of opaque bleed past the diamond's edge to stay closed. So
+  does standing art meant to abut its neighbours, such as walls built from
+  segments.
 - **Validation.** Every quad the objects and their double-draw repeats will
   emit (16 for a bent isometric tile, 2 for a glowing object) is counted
   against the scene's quad budget before anything is ordered or culled,

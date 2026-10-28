@@ -1050,3 +1050,172 @@ fn raster_work_is_charged_before_culling() {
         );
     }
 }
+
+/// Edges and texture-coordinate ranges of an axis-aligned quad.
+fn edges(quad: &Quad) -> ([f32; 4], [f32; 4]) {
+    let rect = quad.aligned_rect().expect("ground is a rectangle");
+    (
+        [rect.left, rect.top, rect.right, rect.bottom],
+        [
+            rect.uv_min[0],
+            rect.uv_min[1],
+            rect.uv_max[0],
+            rect.uv_max[1],
+        ],
+    )
+}
+
+#[test]
+fn neighbouring_ground_shares_pixel_edges_at_fractional_zoom() {
+    let top_down = |zoom| {
+        let mut view = iso_view(Vec::new(), HeightField::empty());
+        view.camera.projection = Projection::TopDown { tile_size: 32 };
+        view.camera.center = [1.37, 0.81];
+        (view.camera.width, view.camera.height) = (197, 129);
+        view.camera.zoom = zoom;
+        view.objects = [[0, 0], [1, 0], [0, 1]]
+            .iter()
+            .zip(1..)
+            .map(|(tile, id)| {
+                WorldObject::new(SemanticId(id), *tile, 0, Anchor::Ground, texture(1, 32, 32))
+            })
+            .collect();
+        view
+    };
+    // Full-size isometric art abuts its neighbours across the row and down
+    // the column.
+    let isometric = |zoom| {
+        let mut view = iso_view(
+            [[0, 0], [1, -1], [1, 1]]
+                .iter()
+                .zip(1..)
+                .map(|(tile, id)| {
+                    WorldObject::new(SemanticId(id), *tile, 1, Anchor::Ground, texture(1, 48, 24))
+                })
+                .collect(),
+            HeightField::empty(),
+        );
+        view.camera.center = [0.63, 0.29];
+        (view.camera.width, view.camera.height) = (197, 129);
+        view.camera.zoom = zoom;
+        view
+    };
+    for zoom in [0.3, 0.7, 1.1, 1.3, 2.6] {
+        for view in [top_down(zoom), isometric(zoom)] {
+            let (first, _) = edges(&quads_of(&view, 1)[0]);
+            let (across, _) = edges(&quads_of(&view, 2)[0]);
+            let (down, _) = edges(&quads_of(&view, 3)[0]);
+            assert_eq!(first[2], across[0], "zoom {zoom}: right edge");
+            assert_eq!(first[3], down[1], "zoom {zoom}: bottom edge");
+            assert!(first.iter().all(|edge| edge.fract() == 0.0), "{first:?}");
+        }
+    }
+}
+
+#[test]
+fn ground_texels_keep_their_world_positions_at_fractional_zoom() {
+    // Diagonal neighbours overlap by half a tile, so one screen point lies
+    // in both: it must fall 24 texels further right and 12 further down in
+    // the western tile's art than in the eastern's, as it does unsnapped.
+    for zoom in [0.3_f32, 0.7, 1.1, 1.3, 2.6] {
+        let mut view = iso_view(
+            vec![ground(1, [0, 0]), ground(2, [1, 0])],
+            HeightField::empty(),
+        );
+        view.camera.center = [0.63, 0.29];
+        view.camera.zoom = zoom;
+        let texel = |id, axis: usize, at: f32| {
+            let (edges, uvs) = edges(&quads_of(&view, id)[0]);
+            let size = [48.0, 23.0][axis];
+            let along = (at - edges[axis]) / (edges[axis + 2] - edges[axis]);
+            (uvs[axis] + along * (uvs[axis + 2] - uvs[axis])) * size
+        };
+        let point = [52.5, 38.5];
+        for (axis, offset) in [(0, 24.0), (1, 12.0)] {
+            let shift = texel(1, axis, point[axis]) - texel(2, axis, point[axis]);
+            assert!(
+                (shift - offset).abs() < 0.01,
+                "zoom {zoom} axis {axis}: {shift}"
+            );
+        }
+        // Every pixel centre the art covers samples inside it.
+        for id in [1, 2] {
+            let (_, uvs) = edges(&quads_of(&view, id)[0]);
+            assert!(uvs.iter().all(|uv| uv.abs() < 1.5), "{uvs:?}");
+        }
+    }
+}
+
+#[test]
+fn whole_zooms_keep_ground_art_on_the_pixel_grid() {
+    // The art moves onto the pixel grid as one piece and keeps its whole
+    // texture, so pixel centres sample texel centres.
+    for zoom in [1.0_f32, 2.0, 3.0] {
+        let mut view = iso_view(
+            vec![ground(1, [0, 0]), ground(2, [1, 0])],
+            HeightField::empty(),
+        );
+        view.camera.center = [0.63, 0.29];
+        view.camera.zoom = zoom;
+        for id in [1, 2] {
+            let (edges, uvs) = edges(&quads_of(&view, id)[0]);
+            assert_eq!(uvs, [0.0, 0.0, 1.0, 1.0]);
+            assert!(edges.iter().all(|edge| edge.fract() == 0.0), "{edges:?}");
+            assert_eq!(
+                [edges[2] - edges[0], edges[3] - edges[1]],
+                [48.0 * zoom, 23.0 * zoom]
+            );
+        }
+    }
+}
+
+#[test]
+fn standing_art_keeps_its_exact_size_at_fractional_zoom() {
+    // Standing art moves freely rather than tiling, so it keeps its scaled
+    // size wherever it lies instead of gaining or losing a pixel.
+    for center in [[0.5, 0.5], [0.61, 0.47], [0.83, 0.12]] {
+        let mut view = iso_view(
+            vec![WorldObject::new(
+                SemanticId(1),
+                [0, 0],
+                3,
+                Anchor::Standing,
+                texture(2, 40, 60),
+            )],
+            HeightField::empty(),
+        );
+        view.camera.center = center;
+        view.camera.zoom = 0.7;
+        let (edges, uvs) = edges(&quads_of(&view, 1)[0]);
+        assert_eq!(uvs, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!([edges[0].fract(), edges[1].fract()], [0.0, 0.0]);
+        assert!((edges[2] - edges[0] - 28.0).abs() < 1e-4, "{edges:?}");
+        assert!((edges[3] - edges[1] - 42.0).abs() < 1e-4, "{edges:?}");
+    }
+}
+
+#[test]
+fn ground_under_a_pixel_keeps_texture_coordinates_in_bounds() {
+    // Tiles a tenth of a pixel across either cover one pixel or none.
+    let mut view = iso_view(Vec::new(), HeightField::empty());
+    view.camera.projection = Projection::TopDown { tile_size: 2 };
+    view.camera.zoom = 0.05;
+    view.objects = (0..400)
+        .map(|index| {
+            WorldObject::new(
+                SemanticId(index + 1),
+                [i64::from(index % 20) - 10, i64::from(index / 20) - 10],
+                0,
+                Anchor::Ground,
+                texture(1, 2, 2),
+            )
+        })
+        .collect();
+    let scene = compile(&view, SceneLimits::default()).unwrap();
+    assert!(!scene.quads().is_empty());
+    for quad in scene.quads() {
+        let (edges, uvs) = edges(quad);
+        assert_eq!(uvs, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!([edges[2] - edges[0], edges[3] - edges[1]], [1.0, 1.0]);
+    }
+}
