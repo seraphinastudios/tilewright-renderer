@@ -45,10 +45,11 @@ SDL_VIDEO_DRIVER=x11 xvfb-run -a -s '-screen 0 1024x768x24' \
 tools/validate.sh
 ```
 
-`tools/validate.sh` runs formatting, strict Clippy, unit/doc tests, shader
+`tools/validate.sh` runs formatting, strict Clippy (native and wasm32), unit/doc tests, shader
 validation, dependency/architecture/provenance policy, deterministic corpus
 comparison, Linux Vulkan offscreen proof, Windows/D3D12 cross-check, release
-build, SBOM creation, and a release dry run. The SDL bridge is an explicit
+build, SBOM creation, a release dry run, and the browser package's build and
+headless Chromium WebGPU/WebGL2 tests. The SDL bridge is an explicit
 `sdl3` feature so the default proof CLI remains portable to the native Windows
 toolchain while Linux validation exercises a real window under Xvfb.
 
@@ -76,6 +77,18 @@ cargo run --locked --package tilewright-render -- world view.json /tmp/ref.png -
 ```
 
 `--reference` renders with the CPU reference instead of the GPU.
+
+## Browsers
+
+The same renderer runs in browsers, compiled to WebAssembly and drawing with
+WebGPU or WebGL2, behind the TypeScript package in `packages/tilewright-render`.
+See the [browser package](docs/WEB.md) for its API, bundle sizes, build and
+tests:
+
+```sh
+tools/build-web.sh
+tools/validate-web.sh
+```
 
 Scenes are lists of textured quads; a quad can draw one frame of an atlas or
 sprite sheet, so layered character sheets share one texture. See the

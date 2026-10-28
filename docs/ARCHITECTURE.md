@@ -10,6 +10,7 @@ scene <- resources <- render-api <- testkit
   +-----------------------+------ render-sdl3
   +------------------------------ render-ui
   +------------------------------ render-world (used by testkit and the CLI)
+  +------------------------------ render-web (wasm32 bindings; uses wgpu and testkit)
 ```
 
 `tilewright-scene` owns immutable, versioned, sorted render inputs: textured
@@ -190,7 +191,7 @@ crate edges from Cargo metadata and rejects forbidden sibling sources.
 
 ## Compatibility and cross-repository checklist
 
-All nine crates are one compatibility set: they share one SemVer version and
+All ten crates are one compatibility set: they share one SemVer version and
 are packaged/released from one tag. Consumers pin the same exact version of
 every renderer crate. `SceneBundle::version` is the serialized logical-scene
 contract (version 3; see [scene contract](SCENE.md)); the embedded shader ships
