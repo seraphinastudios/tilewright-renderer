@@ -26,7 +26,8 @@ holds 5,040 quads.
   character's layers then share a texture, and the whole crowd draws in a
   handful of batches.
 - `layers` keeps one 832 × 1,344 sheet per layer, as layered sheets
-  usually ship. Each character then switches texture three times.
+  usually ship. Characters draw whole, layer by layer, so each character
+  switches texture three times: about 3,000 draws for 1,000 characters.
 
 All texels are generated from constants.
 
@@ -50,9 +51,10 @@ excluded.
 
 The browser harness's `raf` mode instead drives frames from
 `requestAnimationFrame` without waiting for the GPU, as a game does, and
-reports the interval between callbacks: what a player sees. A frame is on
-time at 60 FPS unless it arrives half an interval late (25 ms), that is,
-unless it missed a refresh; likewise 50 ms at 30 FPS.
+reports the interval between callbacks: what a player sees. Intervals
+jitter around whole 60 Hz refreshes, so a frame is on time unless it
+arrives at least half a refresh late, that is, unless it missed a refresh:
+under 1.5 refreshes (25 ms) at 60 FPS and under 2.5 (41.7 ms) at 30 FPS.
 
 ## Run it
 
@@ -87,32 +89,41 @@ TILEWRIGHT_CHROMIUM=…/chrome-headless-shell npm run bench -- --gpu --backend w
   --chrome-flag=--enable-features=Vulkan --chrome-flag=--use-angle=vulkan
 ```
 
-`--headed` runs a visible browser, which uses the GPU as a desktop browser
-does. `--json` prints the samples' summaries as JSON.
+`--headed` runs a visible browser; it still draws on SwiftShader unless
+`--gpu` is given too. `--json` prints the samples' summaries as JSON.
 
 ## Results
 
-Measured on 2026-10-20 on one host: a Ryzen 9 9950X3D with its integrated
-GPU and an RTX 3090, Linux 7.0, Mesa 26.0.8 (LLVM 21.1.8), NVIDIA 595.91.07,
-release builds with Rust 1.97.1, and wgpu 30.0.1. Scene at 1,920 × 1,080
-with 1,000 characters, 300 frames after 30 warm-up frames.
+All on one host: a Ryzen 9 9950X3D with its integrated GPU and an RTX 3090,
+Linux 7.0, Mesa 26.0.8 (LLVM 21.1.8), NVIDIA 595.91.07, release builds with
+Rust 1.97.1, and wgpu 30.0.1. Scene at 1,920 × 1,080 with 1,000 characters,
+300 frames after 30 warm-up frames.
 
 ### Native (Vulkan)
 
+Measured on 2026-10-28, with characters drawn whole, while the host also
+ran other builds (load average about 5–7). That mainly slows lavapipe,
+which renders on the CPU.
+
 | Device | Sheets | p50 | p95 | p99 | CPU p50 | ≤ 16.7 ms |
 | --- | --- | --- | --- | --- | --- | --- |
-| RTX 3090 | atlas | 1.7 ms | 1.7 ms | 1.7 ms | 1.5 ms | 100% |
-| RTX 3090 | layers | 2.0 ms | 2.5 ms | 2.9 ms | 1.9 ms | 100% |
-| RADV, Ryzen iGPU | atlas | 5.1 ms | 6.1 ms | 6.7 ms | 1.4 ms | 100% |
-| RADV, Ryzen iGPU | layers | 5.3 ms | 6.2 ms | 6.8 ms | 1.7 ms | 100% |
-| lavapipe (CPU) | atlas | 12.8 ms | 14.8 ms | 15.6 ms | 1.6 ms | 99.7% |
-| lavapipe (CPU) | layers | 13.2 ms | 15.5 ms | 16.9 ms | 2.0 ms | 98.3% |
+| RTX 3090 | atlas | 1.7 ms | 2.1 ms | 2.7 ms | 1.5 ms | 100% |
+| RTX 3090 | layers | 1.9 ms | 1.9 ms | 2.4 ms | 1.7 ms | 100% |
+| RADV, Ryzen iGPU | atlas | 5.5 ms | 6.2 ms | 6.9 ms | 1.6 ms | 100% |
+| RADV, Ryzen iGPU | layers | 6.0 ms | 8.0 ms | 8.2 ms | 2.0 ms | 100% |
+| lavapipe (CPU) | atlas | 13.8 ms | 15.7 ms | 16.8 ms | 1.6 ms | 98.7% |
+| lavapipe (CPU) | layers | 15.3 ms | 19.4 ms | 21.2 ms | 2.2 ms | 75.7% |
 
-At 1,280 × 720 the integrated GPU's p95 falls to 5.2 ms and lavapipe's to
-11.8 ms (atlas). The CPU part is scene building (about 0.5 ms) plus drawing
-and submission (about 1 ms), the same on every device.
+On 2026-10-20, on an idle host, lavapipe's atlas p95 was 14.8 ms, and at
+1,280 × 720 the integrated GPU's p95 was 5.2 ms and lavapipe's 11.8 ms
+(atlas). The CPU part is scene building (about 0.5 ms) plus drawing and
+submission (1 to 1.5 ms), the same on every device; per-layer sheets add
+about 0.5 ms for their extra draws.
 
 ### Chrome 154 (WebAssembly)
+
+Measured on 2026-10-20 with atlas sheets, whose single texture batches the
+same whatever the order the characters draw in.
 
 | Backend and device | Mode | p50 | p95 | p99 | CPU p50 | 60 FPS | 30 FPS |
 | --- | --- | --- | --- | --- | --- | --- | --- |

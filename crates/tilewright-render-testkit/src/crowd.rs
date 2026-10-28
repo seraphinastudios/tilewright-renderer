@@ -221,8 +221,8 @@ fn walker(crowd: Crowd, character: u32, frame: u64) -> (i64, i64, u32, u32) {
         2 => (0, 1),
         _ => (1, 0),
     };
-    let span_x = i64::from(crowd.width + CROWD_FRAME);
-    let span_y = i64::from(crowd.height + CROWD_FRAME);
+    let span_x = i64::from(crowd.width) + i64::from(CROWD_FRAME);
+    let span_y = i64::from(crowd.height) + i64::from(CROWD_FRAME);
     let travel = i64::try_from(frame % 1_000_000).unwrap_or(0);
     let start_x = i64::try_from((seed >> 8) & 0xffff).unwrap_or(0);
     let start_y = i64::try_from((seed >> 24) & 0xffff).unwrap_or(0);
@@ -235,21 +235,35 @@ fn walker(crowd: Crowd, character: u32, frame: u64) -> (i64, i64, u32, u32) {
 /// The crowd at `frame`: the ground fills the viewport, and each character
 /// walks one pixel per frame in its direction, wrapping at the edges, with
 /// its walk cycle advancing every four frames. Characters are drawn in rows
-/// from the top down, each as body, tunic and hair. The texture identities
-/// match [`crowd_provider`] for the same `sheets`.
+/// from the top down, each whole as body, tunic and hair, so characters on
+/// one row never interleave their layers. The texture identities match
+/// [`crowd_provider`] for the same `sheets`.
 ///
 /// # Errors
 /// Returns a scene validation error, for example for a viewport outside the
-/// scene limits or more quads than they allow.
+/// scene limits, more quads than they allow, or a `frame` too large for a
+/// scene revision.
 #[allow(clippy::cast_precision_loss)]
 pub fn crowd_scene(crowd: Crowd, frame: u64) -> Result<SceneBundle, tilewright_scene::Error> {
+    let limits = SceneLimits::default();
+    // Checked before any position arithmetic.
+    if crowd.width == 0
+        || crowd.height == 0
+        || crowd.width > limits.maximum_dimension
+        || crowd.height > limits.maximum_dimension
+    {
+        return Err(tilewright_scene::Error::LimitExceeded);
+    }
+    let revision = frame
+        .checked_add(1)
+        .ok_or(tilewright_scene::Error::LimitExceeded)?;
     let textures = crowd_textures_identities(crowd.sheets);
     let columns = crowd.width.div_ceil(CROWD_TILE);
     let rows = crowd.height.div_ceil(CROWD_TILE);
     let tiles = columns.saturating_mul(rows);
     let capacity = usize::try_from(u64::from(tiles) + u64::from(crowd.characters) * 3)
         .map_err(|_| tilewright_scene::Error::LimitExceeded)?;
-    if capacity > SceneLimits::default().maximum_quads {
+    if capacity > limits.maximum_quads {
         return Err(tilewright_scene::Error::LimitExceeded);
     }
     let mut quads = Vec::with_capacity(capacity);
@@ -258,8 +272,15 @@ pub fn crowd_scene(crowd: Crowd, frame: u64) -> Result<SceneBundle, tilewright_s
         let (x, y, column, row) = walker(crowd, character, frame);
         let size = i64::from(CROWD_FRAME);
         let bounds = [x as f32, y as f32, (x + size) as f32, (y + size) as f32];
-        // Lower characters are drawn later; layers keep their order.
-        let order = u32::try_from(y + size).unwrap_or(0) * 4;
+        // Lower characters are drawn later, each character whole: within a
+        // row, by index, and its layers in order. It fits in 32 bits within
+        // the scene limits.
+        let order = u32::try_from(y + size)
+            .ok()
+            .and_then(|row| row.checked_mul(crowd.characters))
+            .and_then(|row| row.checked_add(character))
+            .and_then(|order| order.checked_mul(3))
+            .ok_or(tilewright_scene::Error::LimitExceeded)?;
         for layer in 0..3_u16 {
             let (sheet, texture) = match crowd.sheets {
                 CrowdSheets::PerLayer => (CROWD_SHEET, textures[1 + usize::from(layer)]),
@@ -281,7 +302,7 @@ pub fn crowd_scene(crowd: Crowd, frame: u64) -> Result<SceneBundle, tilewright_s
         }
     }
     SceneBundle::from_quads(
-        frame + 1,
+        revision,
         frame.saturating_mul(16),
         Viewport {
             width: crowd.width,
@@ -290,7 +311,7 @@ pub fn crowd_scene(crowd: Crowd, frame: u64) -> Result<SceneBundle, tilewright_s
         },
         [0.05, 0.05, 0.08, 1.0],
         quads,
-        SceneLimits::default(),
+        limits,
     )
 }
 
@@ -393,5 +414,65 @@ mod tests {
             .collect();
         assert_eq!(character.len(), 9);
         assert!(CROWD_LAYER_IDS.iter().all(|id| character.contains(id)));
+    }
+
+    #[test]
+    fn characters_draw_whole_so_per_layer_sheets_switch_texture_per_quad() {
+        let scene = crowd_scene(
+            Crowd {
+                width: 1_920,
+                height: 1_080,
+                characters: 1_000,
+                sheets: CrowdSheets::PerLayer,
+            },
+            100,
+        )
+        .unwrap();
+        // Drawn order: ground first, then every character's three layers in
+        // a row. Painter orders are unique, so nothing interleaves.
+        let mut characters: Vec<_> = scene
+            .quads()
+            .iter()
+            .filter(|quad| quad.resource_id != CROWD_TILES_ID)
+            .collect();
+        characters.sort_by_key(|quad| quad.painter_order);
+        assert!(
+            characters
+                .windows(2)
+                .all(|pair| pair[0].painter_order < pair[1].painter_order)
+        );
+        assert!(characters.chunks(3).all(|layers| {
+            layers
+                .iter()
+                .all(|quad| quad.semantic_id == layers[0].semantic_id)
+                && layers.iter().map(|quad| quad.part).eq(0..3)
+        }));
+        // So each layer quad binds another sheet than the one before it.
+        let switches = characters
+            .windows(2)
+            .filter(|pair| pair[0].resource_id != pair[1].resource_id)
+            .count();
+        assert_eq!(switches, 3_000 - 1);
+    }
+
+    #[test]
+    fn extreme_crowds_are_refused_rather_than_overflowing() {
+        let crowd = |width, height| Crowd {
+            width,
+            height,
+            characters: 1,
+            sheets: CrowdSheets::Atlas,
+        };
+        for (width, height) in [(u32::MAX, 0), (0, u32::MAX - 10), (8_193, 64), (64, 0)] {
+            assert_eq!(
+                crowd_scene(crowd(width, height), 0).err(),
+                Some(tilewright_scene::Error::LimitExceeded),
+                "{width} × {height}"
+            );
+        }
+        assert_eq!(
+            crowd_scene(crowd(64, 64), u64::MAX).err(),
+            Some(tilewright_scene::Error::LimitExceeded)
+        );
     }
 }

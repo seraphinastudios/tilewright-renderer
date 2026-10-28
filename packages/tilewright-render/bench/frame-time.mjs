@@ -18,8 +18,20 @@ import { parseArgs } from 'node:util';
 import { GPU_FLAGS, SOFTWARE_FLAGS, launch } from '../test/browser.mjs';
 import { serve } from '../test/server.mjs';
 
-const { values } = parseArgs({
-  options: {
+const USAGE = `usage: npm run bench -- [--backend webgpu|webgl2|all] [--width N] [--height N]
+  [--characters N] [--sheets atlas|layers] [--frames N] [--warmup N] [--mode serial|raf]
+  [--gpu] [--headed] [--chrome-flag FLAG]... [--json]`;
+
+/** Reports a bad option with the usage and exits non-zero, as the native harness does. */
+function refuse(message) {
+  console.error(`${message}\n${USAGE}`);
+  process.exit(2);
+}
+
+let parsed;
+try {
+  parsed = parseArgs({
+    options: {
     backend: { type: 'string', default: 'all' },
     width: { type: 'string', default: '1920' },
     height: { type: 'string', default: '1080' },
@@ -32,15 +44,48 @@ const { values } = parseArgs({
     headed: { type: 'boolean', default: false },
     'chrome-flag': { type: 'string', multiple: true, default: [] },
     json: { type: 'boolean', default: false },
-  },
-});
+    },
+  });
+} catch (error) {
+  refuse(error.message);
+}
+const { values } = parsed;
+for (const [name, allowed] of [
+  ['backend', ['webgpu', 'webgl2', 'all']],
+  ['sheets', ['atlas', 'layers']],
+  ['mode', ['serial', 'raf']],
+]) {
+  if (!allowed.includes(values[name])) {
+    refuse(`--${name} must be one of ${allowed.join(', ')}`);
+  }
+}
+for (const [name, minimum] of [
+  ['width', 1],
+  ['height', 1],
+  ['characters', 0],
+  ['frames', 1],
+  ['warmup', 0],
+]) {
+  const text = values[name];
+  if (!/^[0-9]+$/.test(text) || Number(text) < minimum || Number(text) > 0xffff_ffff) {
+    refuse(`--${name} must be an integer from ${minimum} to ${0xffff_ffff}`);
+  }
+}
 
-const BUDGET_60 = 1000 / 60;
-const BUDGET_30 = 1000 / 30;
-// Callback intervals jitter around the display's refresh interval, so in
-// 'raf' mode a frame meets a budget unless it arrives a half interval late,
-// that is, unless it missed a refresh.
-const RAF_SLACK = 1.5;
+const REFRESH = 1000 / 60;
+/**
+ * Whether a sample meets a budget of `refreshes` 60 Hz refreshes. A serial
+ * frame time must fit the budget. A 'raf' interval jitters around whole
+ * refreshes, so it is on time unless it arrives at least half a refresh
+ * late, that is, unless it missed a refresh: under 1.5 refreshes (25 ms) at
+ * 60 FPS and under 2.5 (41.7 ms) at 30 FPS. Counting in refreshes keeps a
+ * coarsened 50.0 ms interval, three refreshes, from passing at 30 FPS.
+ */
+function onTime(mode, refreshes) {
+  return mode === 'raf'
+    ? (sample) => sample < (refreshes + 0.5) * REFRESH
+    : (sample) => sample <= refreshes * REFRESH;
+}
 
 function summarise(samples) {
   const sorted = [...samples].sort((left, right) => left - right);
@@ -49,8 +94,8 @@ function summarise(samples) {
   return { p50: at(50), p95: at(95), p99: at(99), max: sorted[sorted.length - 1] };
 }
 
-function within(samples, budget) {
-  return (samples.filter((sample) => sample <= budget).length * 100) / samples.length;
+function within(samples, test) {
+  return (samples.filter(test).length * 100) / samples.length;
 }
 
 const backends = values.backend === 'all' ? ['webgpu', 'webgl2'] : [values.backend];
@@ -105,14 +150,8 @@ try {
       build_ms: summarise(result.samples.build),
       submit_ms: summarise(result.samples.submit),
       ...(result.mode === 'raf' ? {} : { gpu_wait_ms: summarise(result.samples.gpu) }),
-      within_60fps_percent: within(
-        result.samples[key],
-        BUDGET_60 * (result.mode === 'raf' ? RAF_SLACK : 1),
-      ),
-      within_30fps_percent: within(
-        result.samples[key],
-        BUDGET_30 * (result.mode === 'raf' ? RAF_SLACK : 1),
-      ),
+      within_60fps_percent: within(result.samples[key], onTime(result.mode, 1)),
+      within_30fps_percent: within(result.samples[key], onTime(result.mode, 2)),
     };
     reports.push(report);
     if (!values.json) {
@@ -139,7 +178,7 @@ try {
       }
       console.log(
         report.mode === 'raf'
-          ? `frames on time at 60 FPS (interval ≤ 25 ms): ${report.within_60fps_percent.toFixed(1)}%; at 30 FPS (≤ 50 ms): ${report.within_30fps_percent.toFixed(1)}%\n`
+          ? `frames on time at 60 FPS (interval < 25 ms): ${report.within_60fps_percent.toFixed(1)}%; at 30 FPS (< 41.7 ms): ${report.within_30fps_percent.toFixed(1)}%\n`
           : `frames within 16.7 ms (60 FPS): ${report.within_60fps_percent.toFixed(1)}%; within 33.3 ms (30 FPS): ${report.within_30fps_percent.toFixed(1)}%\n`,
       );
     }

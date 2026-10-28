@@ -72,7 +72,10 @@ async function run() {
       samples.build.push(built - started);
       samples.submit.push(drawn - built);
       if (options.mode === 'raf') {
-        samples.interval.push(callback - previous);
+        // The first callback has no interval before it.
+        if (previous !== undefined) {
+          samples.interval.push(callback - previous);
+        }
       } else {
         samples.gpu.push(finished - drawn);
         samples.frame.push(finished - started);

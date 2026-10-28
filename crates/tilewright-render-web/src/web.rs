@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 //! The `wasm-bindgen` surface. Browsers are single-threaded here: the
-//! renderer lives in an `Rc<RefCell<…>>` so an asynchronous readback can
-//! own it while it waits. A shared state marks the renderer busy from the
-//! moment `readFrame` is called until it settles, so every call made in the
-//! meantime fails with the `busy` code instead of racing the frame, and
-//! marks it destroyed once `destroy` is called. Destroying also signals the
-//! renderer lost, so a readback still waiting ends at its next poll.
+//! renderer lives in an `Rc<RefCell<…>>` so an asynchronous readback or
+//! `finish` can own it while it waits. A shared state marks the renderer
+//! busy from the moment `readFrame` or `finish` is called until it settles,
+//! so every call made in the meantime fails with the `busy` code instead of
+//! racing the frame, and marks it destroyed once `destroy` is called.
+//! Destroying also signals the renderer lost, so a wait still in progress
+//! ends at its next poll.
 
 use crate::{
     errors::{CodedError, parse_digest, safe_integer},
@@ -114,7 +115,7 @@ fn render_error(error: &tilewright_render_api::Error) -> JsError {
 fn busy() -> JsError {
     js_error(CodedError::new(
         "busy",
-        "the renderer is reading a frame back; wait for readFrame to settle",
+        "the renderer is waiting for the GPU; wait for readFrame or finish to settle",
     ))
 }
 

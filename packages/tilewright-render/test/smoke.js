@@ -184,6 +184,17 @@ async function run() {
   ];
   await pending;
 
+  // finish() makes the renderer busy until it settles, as a readback does.
+  // The calls are made before its first poll, which may already settle it.
+  renderer.render();
+  const finishing = renderer.finish();
+  const finishBusy = await Promise.all([
+    codeOf(() => renderer.submit(scene(renderer, texture))),
+    codeOf(() => renderer.readFrame()),
+    codeOf(() => renderer.finish()),
+  ]);
+  const finished = await codeOf(() => finishing);
+
   // Oversized textures are refused before their pixels are read or copied.
   const tooWide = await codeOf(() =>
     renderer.uploadTexture({ id: 50, width: 8_193, height: 1, rgba: new Uint8Array(4) }),
@@ -259,10 +270,16 @@ async function run() {
   const spare = await TilewrightRenderer.create(new OffscreenCanvas(8, 8), { backend });
   const early = spare.readFrame();
   spare.destroy();
+  // A finish destroyed before it starts waiting rejects too.
+  const lateSpare = await TilewrightRenderer.create(new OffscreenCanvas(8, 8), { backend });
+  const earlyFinish = lateSpare.finish();
+  lateSpare.destroy();
   const destroyedCodes = [
     await codeOf(() => inFlight),
     await codeOf(() => renderer.readFrame()),
     await codeOf(() => early),
+    await codeOf(() => earlyFinish),
+    await codeOf(() => renderer.finish()),
   ];
 
   return {
@@ -299,6 +316,8 @@ async function run() {
     transparent,
     removed,
     busyCodes,
+    finishBusy,
+    finished,
     destroyedCodes,
     resized: {
       presented: resizedPresented,

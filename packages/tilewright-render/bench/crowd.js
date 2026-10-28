@@ -146,7 +146,9 @@ export function crowdScene(scene, { width, height, sheets }, walkers, textures, 
     const y = mod(walker.startY + stepY * travel, spanY) - FRAME;
     const column = (Math.floor(frame / 4) + walker.phase) % WALK_FRAMES;
     const row = WALK_ROW + walker.direction;
-    const order = (y + FRAME) * 4;
+    // Lower characters are drawn later, each character whole: within a row,
+    // by index, and its layers in order, as testkit's crowd_scene does.
+    const order = ((y + FRAME) * walkers.length + character) * 3;
     for (let layer = 0; layer < 3; layer += 1) {
       const frameRect = SHEET.frameAt(column, row);
       const texture = sheets === 'layers' ? textures.get(LAYER_IDS[layer]) : atlas;

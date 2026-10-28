@@ -3102,6 +3102,14 @@ mod tests {
         };
         renderer.draw(&request).unwrap();
         pollster::block_on(renderer.finish()).unwrap();
+        // Finishing waited for the submitted frame: nothing is in flight.
+        assert!(
+            renderer
+                .device
+                .poll(wgpu::PollType::Poll)
+                .unwrap()
+                .is_queue_empty()
+        );
         let metrics = renderer.metrics();
         assert_eq!(metrics.frames_submitted, 1);
         assert_eq!(metrics.resource_requests, 1);

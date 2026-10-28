@@ -3,7 +3,8 @@
 # the test hooks, the package build, the headless Chromium tests for WebGL2
 # and WebGPU, context loss and traps, and a short run of the frame-time
 # harness. Set TILEWRIGHT_REQUIRE_WEBGPU=0 to skip, rather than fail, the
-# WebGPU test where the browser offers no WebGPU adapter.
+# WebGPU test and the WebGPU harness run where the browser offers no WebGPU
+# adapter.
 set -euo pipefail
 
 repository=$(git rev-parse --show-toplevel)
@@ -31,5 +32,12 @@ tools/build-web.sh
 (cd packages/tilewright-render && TILEWRIGHT_REQUIRE_WEBGPU="${TILEWRIGHT_REQUIRE_WEBGPU:-1}" npm test)
 
 # Keep the browser frame-time harness working; its numbers are not checked.
+# Without a WebGPU requirement it runs on WebGL2 only, so a browser without
+# WebGPU passes here too.
+bench_backend=all
+if [ "${TILEWRIGHT_REQUIRE_WEBGPU:-1}" = 0 ]; then
+  bench_backend=webgl2
+fi
 (cd packages/tilewright-render \
-  && npm run bench -- --width 320 --height 180 --characters 50 --frames 5 --warmup 1)
+  && npm run bench -- --backend "${bench_backend}" --width 320 --height 180 --characters 50 \
+    --frames 5 --warmup 1)

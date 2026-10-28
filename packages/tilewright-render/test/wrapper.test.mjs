@@ -216,3 +216,17 @@ test('a trap between the readback settling and its conversion is caught', async 
   // Resolving a promise asks for `then`; nothing else may be read.
   assert.deepEqual(touched.filter((key) => key !== 'then'), []);
 });
+
+test('a trap in finish stops the bundle', async () => {
+  const subject = renderer(
+    fakeBinding({
+      finish() {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    }),
+    'finish',
+  );
+  const sibling = renderer(fakeBinding(), 'finish');
+  await assert.rejects(subject.finish(), /finish bundle's WebAssembly module trapped/);
+  assert.throws(() => sibling.render(), (error) => error instanceof TilewrightError && error.code === 'internal');
+});
