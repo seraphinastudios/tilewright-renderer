@@ -1326,13 +1326,25 @@ fn preferred_backends(preference: BackendPreference) -> wgpu::Backends {
     }
 }
 
+/// The instance options: wgpu's own defaults and `WGPU_*` environment
+/// variables, except that Direct3D 12 compiles shaders with FXC
+/// (`d3dcompiler_47.dll`, part of Windows) unless `WGPU_DX12_COMPILER`
+/// names another compiler. wgpu's default would load `dxcompiler.dll` by
+/// bare name, and Windows' search order can then find it in the current
+/// directory.
+fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::Fxc;
+    descriptor.with_env()
+}
+
 async fn initialize_gpu(
     preference: BackendPreference,
     surface: Option<wgpu::SurfaceTarget<'static>>,
     context_lost: impl Fn() -> bool,
     startup: Stopwatch,
 ) -> Result<GpuInitialization, Error> {
-    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+    let mut descriptor = instance_descriptor();
     descriptor.backends &= preferred_backends(preference);
     if descriptor.backends.is_empty() {
         return Err(Error::BackendUnavailable(format!(
@@ -3148,6 +3160,38 @@ mod tests {
         let mut state = SurfaceState::Invalidated;
         assert!(state.take_matching(8, 4).is_none());
         assert!(matches!(state, SurfaceState::Invalidated));
+    }
+
+    #[test]
+    fn dx12_shader_compiler_is_fxc_unless_the_environment_names_one() {
+        let selected = super::instance_descriptor()
+            .backend_options
+            .dx12
+            .shader_compiler;
+        let expected = wgpu::Dx12Compiler::from_env().unwrap_or(wgpu::Dx12Compiler::Fxc);
+        assert_eq!(format!("{selected:?}"), format!("{expected:?}"));
+    }
+
+    /// Changing the environment is unsafe, so the test above reruns in child
+    /// processes with `WGPU_DX12_COMPILER` unset, invalid, and set.
+    #[test]
+    fn an_explicit_dx12_compiler_variable_overrides_the_fxc_default() {
+        const CHILD: &str = "tests::dx12_shader_compiler_is_fxc_unless_the_environment_names_one";
+        for value in [None, Some("unknown"), Some("auto"), Some("dxc")] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([CHILD, "--exact", "--test-threads=1"]);
+            match value {
+                Some(value) => child.env("WGPU_DX12_COMPILER", value),
+                None => child.env_remove("WGPU_DX12_COMPILER"),
+            };
+            let output = child.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains(" 1 passed;"),
+                "WGPU_DX12_COMPILER={value:?}: {stdout}{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
     }
 
     #[test]

@@ -23,7 +23,9 @@ presents twice through one renderer and window to exercise reuse; offscreen
 tests repeatedly create, render, resize, reuse, and destroy renderer instances.
 
 Linux runtime proof uses Vulkan (including Mesa software Vulkan in CI) and
-launches the actual SDL window path under Xvfb. Native Windows uses D3D12. CI
+launches the actual SDL window path under Xvfb. Native Windows uses D3D12,
+which compiles shaders with the FXC compiler that ships with Windows (see the
+[security policy](../SECURITY.md#native-libraries-on-windows)). CI
 cross-checks the non-SDL renderer crates and default portable CLI for the
 Windows GNU target; native D3D12 presentation remains a documented manual test
 because the GNU cross toolchain is not a Windows runtime.
