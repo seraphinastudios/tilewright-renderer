@@ -55,6 +55,11 @@ reports the interval between callbacks: what a player sees. Intervals
 jitter around whole 60 Hz refreshes, so a frame is on time unless it
 arrives at least half a refresh late, that is, unless it missed a refresh:
 under 1.5 refreshes (25 ms) at 60 FPS and under 2.5 (41.7 ms) at 30 FPS.
+These thresholds assume a 60 Hz `requestAnimationFrame` clock, as headless
+Chromium has; the harness warns when the median warm-up interval is not
+about 16.7 ms, as on a 120 or 144 Hz display with `--headed`. `raf` mode needs
+at least one warm-up frame, so that the first measured frame has an
+interval.
 
 ## Run it
 

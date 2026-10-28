@@ -52,7 +52,7 @@ async function run() {
   }
   const walkers = crowdWalkers(options.characters);
   const scene = renderer.scene({ clearColor: [0.05, 0.05, 0.08, 1] });
-  const samples = { frame: [], build: [], submit: [], gpu: [], interval: [] };
+  const samples = { frame: [], build: [], submit: [], gpu: [], interval: [], warmupInterval: [] };
   let previous;
   let quads = 0;
   for (let index = 0; index < options.warmup + options.frames; index += 1) {
@@ -80,6 +80,9 @@ async function run() {
         samples.gpu.push(finished - drawn);
         samples.frame.push(finished - started);
       }
+    }
+    if (index < options.warmup && options.mode === 'raf' && previous !== undefined) {
+      samples.warmupInterval.push(callback - previous);
     }
     previous = callback;
     quads = scene.length;

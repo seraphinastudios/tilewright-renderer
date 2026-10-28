@@ -64,7 +64,8 @@ for (const [name, minimum] of [
   ['height', 1],
   ['characters', 0],
   ['frames', 1],
-  ['warmup', 0],
+  // An interval needs a callback before it.
+  ['warmup', values.mode === 'raf' ? 1 : 0],
 ]) {
   const text = values[name];
   if (!/^[0-9]+$/.test(text) || Number(text) < minimum || Number(text) > 0xffff_ffff) {
@@ -88,6 +89,9 @@ function onTime(mode, refreshes) {
 }
 
 function summarise(samples) {
+  if (samples.length === 0) {
+    return { p50: NaN, p95: NaN, p99: NaN, max: NaN };
+  }
   const sorted = [...samples].sort((left, right) => left - right);
   const at = (percent) =>
     sorted[Math.min(sorted.length, Math.max(1, Math.ceil((percent / 100) * sorted.length))) - 1];
@@ -95,7 +99,12 @@ function summarise(samples) {
 }
 
 function within(samples, test) {
-  return (samples.filter(test).length * 100) / samples.length;
+  return samples.length === 0 ? NaN : (samples.filter(test).length * 100) / samples.length;
+}
+
+/** The middle sample, or NaN for none. */
+function median(samples) {
+  return summarise(samples).p50;
 }
 
 const backends = values.backend === 'all' ? ['webgpu', 'webgl2'] : [values.backend];
@@ -132,6 +141,18 @@ try {
       continue;
     }
     const key = result.mode === 'raf' ? 'interval' : 'frame';
+    if (result.samples[key].length === 0) {
+      console.error(`${backend}: no ${key} samples were recorded`);
+      failed = true;
+      continue;
+    }
+    // The raf thresholds count 60 Hz refreshes, the headless default.
+    const warmupInterval = median(result.samples.warmupInterval ?? []);
+    if (result.mode === 'raf' && !(warmupInterval >= 15 && warmupInterval <= 18.5)) {
+      console.error(
+        `warning: the median warm-up interval was ${warmupInterval.toFixed(1)} ms, not about 16.7 ms; the on-time percentages assume a 60 Hz requestAnimationFrame clock`,
+      );
+    }
     const cpu = result.samples.build.map((build, index) => build + result.samples.submit[index]);
     const report = {
       backend: result.backend,

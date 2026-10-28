@@ -79,6 +79,9 @@ pub struct WgpuRenderer {
     /// Device loss and uncaptured GPU errors; every later frame fails once
     /// either is reported.
     health: Arc<DeviceHealth>,
+    /// Command buffers submitted, so tests can tell a frame was submitted.
+    #[cfg(test)]
+    submissions: std::sync::atomic::AtomicU64,
 }
 
 /// What is known about the device's health. wgpu's device-lost callback, a
@@ -430,6 +433,8 @@ impl WgpuRenderer {
                 canvas: None,
             }),
             health,
+            #[cfg(test)]
+            submissions: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -448,6 +453,13 @@ impl WgpuRenderer {
     #[must_use]
     pub const fn maximum_texture_dimension(&self) -> u32 {
         self.limits.maximum_dimension
+    }
+
+    /// Submits one frame's commands.
+    fn submit(&self, encoder: wgpu::CommandEncoder) {
+        self.queue.submit(Some(encoder.finish()));
+        #[cfg(test)]
+        self.submissions.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A handle that marks this renderer lost from outside it; see
@@ -617,7 +629,7 @@ impl WgpuRenderer {
             &prepared,
             [red, green, blue, 1.0],
         )?;
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         self.queue.present(frame);
         // WebGL2 reports errors while the frame is encoded and submitted.
         self.check_device()?;
@@ -898,7 +910,7 @@ impl WgpuRenderer {
             },
             target.size,
         );
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         let slice = target.readback.slice(..);
         // If this future is dropped while the mapping is pending, the guard
         // unmaps the shared readback buffer, which cancels the mapping, so
@@ -948,7 +960,7 @@ impl WgpuRenderer {
         let started = Stopwatch::start();
         let (encoder, _prepared, work) =
             self.encode_offscreen(request.scene, request.resources.as_ref())?;
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         // WebGL2 reports errors while the frame is encoded and submitted.
         self.check_device()?;
         self.record(work, started);
@@ -3101,6 +3113,13 @@ mod tests {
             resources: atlas_provider().unwrap(),
         };
         renderer.draw(&request).unwrap();
+        // The frame was submitted, not only encoded.
+        assert_eq!(
+            renderer
+                .submissions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
         pollster::block_on(renderer.finish()).unwrap();
         // Finishing waited for the submitted frame: nothing is in flight.
         assert!(

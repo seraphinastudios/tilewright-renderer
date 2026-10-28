@@ -135,22 +135,22 @@ requestAnimationFrame(frame);
   awaiting it after `render()` measures a frame's GPU time. It keeps the
   renderer busy until it settles, as `readFrame()` does.
 - `metrics()` reports work counts. `destroy()` destroys the device at once,
-  rather than at garbage collection, and drops the textures. A readback in
-  flight then stops waiting and rejects with `destroyed`, and so does every
-  later call. The canvas keeps its context, so a later renderer can draw on
-  the same canvas, as a re-mounted view does. The browser frees a WebGL2
-  context with its canvas, and past about 16 live contexts it loses the
+  rather than at garbage collection, and drops the textures. A `readFrame()`
+  or `finish()` in flight then stops waiting and rejects with `destroyed`, and
+  so does every later call. The canvas keeps its context, so a later renderer
+  can draw on the same canvas, as a re-mounted view does. The browser frees a
+  WebGL2 context with its canvas, and past about 16 live contexts it loses the
   oldest, so reuse canvases rather than creating many.
 - A lost WebGL2 context, for example when the browser drops the oldest of
-  too many contexts, fails every later frame and readback (`render`,
-  `readFrame`), and any readback waiting, with `device-lost`. Other calls
-  keep working, but the renderer never draws again, and `create` on that
+  too many contexts, fails every later frame, readback and wait (`render`,
+  `readFrame`, `finish`), and any of them waiting, with `device-lost`. Other
+  calls keep working, but the renderer never draws again, and `create` on that
   canvas fails with `device-lost` too: create one on a new canvas. Do not
   restore a renderer's context by preventing the default action of
   `webglcontextlost`. If a context is lost and restored between calls, the
   renderer cannot tell: `render()` returns true and draws nothing, and
-  `readFrame()` never settles, so every later call fails with `busy` until
-  `destroy()`, which rejects that readback with `destroyed`. An uncaptured
+  `readFrame()` or `finish()` never settles, so every later call fails with
+  `busy` until `destroy()`, which rejects it with `destroyed`. An uncaptured
   GPU error fails every later frame with `internal`.
 - A WebAssembly trap, which would be a renderer bug, aborts mid-call and
   leaves the bundle's module, which all its renderers share, in an
@@ -270,6 +270,7 @@ Chromium.
 
 Both backends are required, by `npm test` as by `tools/validate-web.sh`.
 `TILEWRIGHT_REQUIRE_WEBGPU=0` skips WebGPU, rather than failing, on a browser
-that offers no WebGPU adapter. The tests check correctness, not speed, so
-they do not need a GPU; the [frame-time harness](FRAME-TIME.md) measures
+that offers no WebGPU adapter, and runs the frame-time bench in
+`tools/validate-web.sh` on WebGL2 only. The tests check correctness, not speed,
+so they do not need a GPU; the [frame-time harness](FRAME-TIME.md) measures
 speed.
