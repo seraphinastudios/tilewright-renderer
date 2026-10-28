@@ -253,7 +253,7 @@ releases, one per run. Later Cargo version bumps publish automatically.
 crates.io's first version, 0.3.0, and 0.4.0 keep wgpu's default Direct3D 12
 shader compiler, which prefers `dxcompiler.dll`, and request Vulkan on Windows
 without checking for a system loader. From 0.4.1 the renderer selects FXC and
-requires that loader (see the [security
+requests Vulkan only when that loader is present (see the [security
 policy](../SECURITY.md#native-libraries-on-windows)).
 
 ### Excluded source releases
