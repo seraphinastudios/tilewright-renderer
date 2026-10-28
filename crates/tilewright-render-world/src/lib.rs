@@ -761,8 +761,8 @@ impl Projector {
     /// edges lie a whole number of art pixels apart at the same rise, which
     /// includes every neighbour sharing an edge, shares that point and so
     /// moves by exactly the same amount. No shift can put every texel
-    /// boundary on a pixel edge at other zooms, so there the art stays where
-    /// it is.
+    /// boundary on a pixel edge at other zooms, so there all ground moves by
+    /// the same [`GROUND_TIE_OFFSET_PX`] instead.
     fn ground_quad(
         &self,
         top_left: [f64; 2],
@@ -781,7 +781,7 @@ impl Projector {
             let (shift, margin) = if whole {
                 (snap(reference[index]) - reference[index], 0.0)
             } else {
-                (0.0, GROUND_UV_MARGIN)
+                (-GROUND_TIE_OFFSET_PX, GROUND_UV_MARGIN)
             };
             let (start, end) = (start[index] + shift, end[index] + shift);
             let edges = [start, end].map(centre_edge);
@@ -1275,6 +1275,21 @@ fn rect(left: f64, top: f64, width: f64, height: f64) -> [[f64; 2]; 4] {
 /// that much, is drawn by both rather than by neither; painter order picks
 /// the one that shows.
 const GROUND_UV_MARGIN: f64 = 1.0 / 65_536.0;
+
+/// How far all ground moves up and left, in pixels, at zooms that are not
+/// whole numbers.
+///
+/// With the camera at a round position, such as on a tile corner at zoom
+/// 0.5, 0.75, 1.25 or 1.5, texel boundaries land exactly on pixel centres.
+/// Nearest sampling gives such a centre the later texel, as whole-zoom art
+/// always does, but the [`GROUND_UV_MARGIN`] moves boundaries by up to
+/// 1/65,536 of the art's size about its centre, which would give it the
+/// earlier texel in the right or lower half of each tile and stripe periodic
+/// art. Moving the art by 1/128 px puts those centres just inside the later
+/// texel across the whole tile. Ties remain only for cameras exactly 1/128 px
+/// off a round position, and within art more than 512 px across, where the
+/// margin outgrows the offset near the art's edges.
+const GROUND_TIE_OFFSET_PX: f64 = 1.0 / 128.0;
 
 /// Rows and columns of the mesh a bent isometric tile becomes.
 const MESH_STEPS: u16 = 4;

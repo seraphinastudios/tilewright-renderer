@@ -118,7 +118,14 @@ knows nothing about any game or content format.
   neighbouring art, to within that margin, is drawn by both and painter order
   picks the one that shows. At whole-number zooms ground art first moves by at
   most half a pixel onto the grid, rounding halves up, so pixel centres sample
-  texel centres and every backend picks the same texels, as before. Standing
+  texel centres and every backend picks the same texels, as before. At other
+  zooms all ground moves 1/128 px up and left instead, so where the unsnapped
+  art puts a pixel centre exactly on a texel boundary, as cameras on tile
+  corners do at zooms such as 0.5, 0.75, 1.25 and 1.5, the centre takes the
+  later texel across the whole tile, as nearest sampling does. Such ties can
+  still split a tile between the two texels when the camera sits exactly
+  1/128 px off a round position, and near the edges of art more than 512 px
+  across, where the margin outgrows the offset. Standing
   art snaps its top-left corner the same way and keeps its exact scaled size,
   so a sprite never gains or loses a pixel of width as it or the camera moves.
   Bent ground keeps its unsnapped mesh and overlap. Quads entirely outside the

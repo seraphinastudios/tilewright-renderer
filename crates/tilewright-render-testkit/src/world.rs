@@ -332,6 +332,9 @@ pub enum GroundArt {
     /// as wide as they are tall interlock exactly. Top-down tiles draw
     /// [`GroundArt::Full`] instead.
     Diamond,
+    /// [`GroundArt::Full`] in a checkerboard of single texels in two
+    /// colours, so the texel every pixel samples shows in the picture.
+    Checker,
 }
 
 /// The ground grid's texture: its size and `ATX1` envelope with digest.
@@ -343,7 +346,7 @@ fn ground_grid_texture(projection: Projection, art: GroundArt) -> (u32, u32, Vec
             tile_width,
             tile_height,
         } => match art {
-            GroundArt::Full => (tile_width, tile_height, false),
+            GroundArt::Full | GroundArt::Checker => (tile_width, tile_height, false),
             GroundArt::Diamond => (tile_width, tile_height.saturating_sub(1).max(1), true),
         },
     };
@@ -357,7 +360,12 @@ fn ground_grid_texture(projection: Projection, art: GroundArt) -> (u32, u32, Vec
         };
         for column in 0..columns {
             if column + half >= columns / 2 && column < columns / 2 + half {
-                pixels[row * columns + column] = [170, 140, 90, 255];
+                pixels[row * columns + column] =
+                    if art == GroundArt::Checker && (row + column) % 2 != 0 {
+                        [40, 70, 200, 255]
+                    } else {
+                        [170, 140, 90, 255]
+                    };
             }
         }
     }

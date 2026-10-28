@@ -186,3 +186,94 @@ fn ground_grids_are_bounded_before_allocating() {
         );
     }
 }
+
+/// Twice a tile's unsnapped art left and top edges in world pixels, and the
+/// art's size in texels, for the ground grid's full-size art.
+fn doubled_art_origin(projection: Projection, tile: [i64; 2]) -> ([i128; 2], [u32; 2]) {
+    let [x, y] = tile.map(i128::from);
+    match projection {
+        Projection::TopDown { tile_size } => {
+            let size = i128::from(tile_size);
+            ([2 * x * size, 2 * y * size], [tile_size, tile_size])
+        }
+        Projection::Isometric {
+            tile_width,
+            tile_height,
+        } => {
+            let (width, height) = (i128::from(tile_width), i128::from(tile_height));
+            // The art's centre sits half a pixel below the diamond's.
+            let left = (x - y) * width - width;
+            let top = (x + y + 1) * height - height - 1;
+            ([left, top], [tile_width, tile_height])
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn ground_texels_break_ties_one_way_across_every_tile() {
+    // With the camera on a tile corner or half way along a tile, texel
+    // boundaries land exactly on pixel centres at these zooms, or a hair
+    // from them just off zoom 1. Every pixel centre a ground quad covers must
+    // sample the texel its unsnapped art puts there once all ground moves
+    // 1/128 px up and left: the later texel at an exact tie, as nearest
+    // sampling chooses, in both halves of every tile. In even-sized top-down
+    // views, where main never moves the art, this is exactly main's choice.
+    // Every `f32` zoom is a whole number of 2^-32, so the expected texel is
+    // exact.
+    const SCALE: i128 = 1 << 32;
+    let near_one = [
+        f32::from_bits(1.0_f32.to_bits() - 1),
+        f32::from_bits(1.0_f32.to_bits() + 1),
+    ];
+    for projection in [TOP_DOWN, ISO_48, ISO_64] {
+        for zoom in [0.5, 0.75, 1.25, 1.5, near_one[0], near_one[1]] {
+            let ratio = (f64::from(zoom) * SCALE as f64) as i128;
+            sweep_over(
+                projection,
+                [zoom].into_iter(),
+                &SIZES,
+                &[[0.0, 0.0], [0.5, 0.5], [1.0, 2.0]],
+                |camera| {
+                    let view = ground_grid_view(camera, GroundArt::Checker).unwrap();
+                    let scene = compile(&view, SceneLimits::default()).unwrap();
+                    // Twice the camera's world position: whole numbers here.
+                    let [u, v] = camera.center;
+                    let camera_world = match projection {
+                        Projection::TopDown { tile_size } => {
+                            [u, v].map(|axis| (2.0 * axis * f64::from(tile_size)) as i128)
+                        }
+                        Projection::Isometric {
+                            tile_width,
+                            tile_height,
+                        } => [
+                            ((u - v) * f64::from(tile_width)) as i128,
+                            ((u + v) * f64::from(tile_height)) as i128,
+                        ],
+                    };
+                    let view_size = [camera.width, camera.height].map(i128::from);
+                    let mut wrong = 0;
+                    for quad in scene.quads() {
+                        let object = &view.objects[quad.semantic_id.0 as usize - 1];
+                        let (origin, art) = doubled_art_origin(projection, object.tile);
+                        let texel = |axis: usize, pixel: u32, sampled: f32| {
+                            let numerator = (2 * i128::from(pixel) + 1 - view_size[axis]) * SCALE
+                                + ratio * (camera_world[axis] - origin[axis])
+                                + SCALE / 64;
+                            let sampled = (sampled.clamp(0.0, 1.0 - f32::EPSILON)
+                                * art[axis] as f32)
+                                .floor() as i128;
+                            sampled == numerator.div_euclid(2 * ratio)
+                        };
+                        for_each_quad_pixel(quad, camera.width, camera.height, |x, y, _, u, v| {
+                            if !(texel(0, x, u) && texel(1, y, v)) {
+                                wrong += 1;
+                            }
+                        });
+                    }
+                    wrong
+                },
+            );
+        }
+    }
+}

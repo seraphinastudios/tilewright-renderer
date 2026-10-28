@@ -830,16 +830,36 @@ mod tests {
             eprintln!("skipping GPU ground comparison: no supported adapter");
             return;
         };
+        // Checker art shows every texel choice. Tile-aligned cameras at the
+        // first four zooms, and just off zoom 1, put texel boundaries on or a
+        // hair from pixel centres, where the backends must still agree.
+        let near_one = [
+            f32::from_bits(1.0_f32.to_bits() - 1),
+            f32::from_bits(1.0_f32.to_bits() + 1),
+        ];
+        let zooms = [
+            0.5,
+            0.75,
+            1.25,
+            1.5,
+            0.7,
+            1.1,
+            1.3,
+            near_one[0],
+            near_one[1],
+        ];
         for (projection, art) in [
-            (Projection::TopDown { tile_size: 32 }, GroundArt::Full),
-            (isometric(48, 24), GroundArt::Full),
+            (Projection::TopDown { tile_size: 32 }, GroundArt::Checker),
+            (isometric(48, 24), GroundArt::Checker),
             (isometric(48, 24), GroundArt::Diamond),
             (isometric(64, 32), GroundArt::Diamond),
         ] {
-            for zoom in [0.7, 1.1, 1.3] {
+            for (zoom, center) in zooms.iter().flat_map(|zoom| {
+                [[0.0, 0.0], [0.5, 0.5], [3.37, 7.81]].map(|center| (*zoom, center))
+            }) {
                 let camera = Camera {
                     projection,
-                    center: [3.37, 7.81],
+                    center,
                     zoom,
                     width,
                     height,
@@ -871,7 +891,7 @@ mod tests {
                     .max();
                 assert!(
                     difference <= Some(1),
-                    "{projection:?} {art:?} zoom {zoom}: {difference:?}"
+                    "{projection:?} {art:?} zoom {zoom} centre {center:?}: {difference:?}"
                 );
             }
         }
