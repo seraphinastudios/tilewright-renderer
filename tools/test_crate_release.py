@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import copy
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
+import email.message
 import gzip
 import io
 import json
@@ -16,6 +17,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 import unittest
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 from tools import crate_release as R
@@ -24,7 +26,8 @@ from tools import crate_prepare as P
 REVISION = 'a' * 40
 CONFIG = {'schema_version': 1, 'repository': 'seraphinastudios/example', 'repository_id': '123',
           'workflow': 'publish-crate.yml', 'environment': 'crates-io-release', 'toolchain': '1.97.1',
-          'required_checks': ['Example validation'], 'crates': [{'name': 'example', 'path': 'crates/example'}], 'historical': []}
+          'required_checks': ['Example validation'], 'crates': [{'name': 'example', 'path': 'crates/example'}], 'historical': [],
+          'excluded': []}
 
 
 def files():
@@ -79,6 +82,12 @@ def row():
             'asset': 'example-0.1.0.crate', 'sha256': R.digest(data),
             'content_sha256': R.content_digest(contents), 'inventory': sorted(contents),
             'metadata': R.metadata(contents, 'example', '0.1.0')}, data
+
+
+class Terminal(io.StringIO):
+    """Captured stderr that still passes the bootstrap's interactive check."""
+    def isatty(self):
+        return True
 
 
 class ApiEndpointTests(unittest.TestCase):
@@ -292,16 +301,82 @@ class AttestationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'subject mismatch'):
             R.attestation_identity(CONFIG, statement, REVISION, 'c' * 64)
 
-    def test_only_attested_run_attempt_success_is_accepted(self):
-        producer = {'run_id': 100, 'run_attempt': 2}
-        run = dict(producer, id=100, workflow_id=9, head_sha=REVISION, head_branch='main', event='push',
-                   repository={'id': 123}, head_repository={'id': 123}, status='completed', conclusion='success')
-        with patch.object(R, 'api', side_effect=[{'id': 9}, run]):
-            self.assertEqual(R.producing_run(CONFIG, [producer], REVISION), producer)
+    PRODUCER = {'run_id': 100, 'run_attempt': 2}
+
+    def producing_run_record(self, **change):
+        return dict(dict(self.PRODUCER, id=100, workflow_id=9, head_sha=REVISION, head_branch='main', event='push',
+                         repository={'id': 123}, head_repository={'id': 123}, status='completed',
+                         conclusion='success'), **change)
+
+    def evidence_jobs(self, *jobs, release='success'):
+        """The producing attempt's job inventory: prepare, attest and the publishing release job."""
+        rows = list(jobs) if jobs else [self.job(name) for name in R.EVIDENCE_JOBS]
+        rows.append(self.job('Release renderer', conclusion=release))
+        return {'total_count': len(rows), 'jobs': rows}
+
+    def job(self, name, **change):
+        return dict({'name': name, 'run_id': 100, 'run_attempt': 2, 'head_sha': REVISION,
+                     'status': 'completed', 'conclusion': 'success'}, **change)
+
+    def test_only_attested_run_attempt_with_successful_evidence_is_accepted(self):
+        with patch.object(R, 'api', side_effect=[{'id': 9}, self.producing_run_record(), self.evidence_jobs()]) as api:
+            self.assertEqual(R.producing_run(CONFIG, [self.PRODUCER], REVISION), self.PRODUCER)
+        self.assertEqual(api.call_args_list[-1].args[1], 'actions/runs/100/attempts/2/jobs?per_page=100')
         for change in [{'id': 101}, {'run_attempt': 1}, {'head_sha': 'c' * 40}, {'head_branch': '1.0.x'},
-                       {'workflow_id': 8}, {'conclusion': 'failure'}]:
-            with patch.object(R, 'api', side_effect=[{'id': 9}, dict(run, **change)]), self.assertRaises(ValueError):
-                R.producing_run(CONFIG, [producer], REVISION)
+                       {'workflow_id': 8}, {'event': 'pull_request'}, {'repository': {'id': 456}},
+                       {'head_repository': {'id': 456}}]:
+            with self.subTest(change=change), self.assertRaises(ValueError), patch.object(R, 'api', side_effect=[
+                    {'id': 9}, self.producing_run_record(**change), self.evidence_jobs()]):
+                R.producing_run(CONFIG, [self.PRODUCER], REVISION)
+
+    def test_failed_release_job_after_successful_evidence_is_accepted(self):
+        # v1.14.0's shape: prepare and attest succeeded; the later dispatch step failed the run.
+        for conclusion in ('failure', 'cancelled'):
+            with self.subTest(conclusion=conclusion), patch.object(R, 'api', side_effect=[
+                    {'id': 9}, self.producing_run_record(conclusion=conclusion), self.evidence_jobs(release=conclusion)]):
+                self.assertEqual(R.producing_run(CONFIG, [self.PRODUCER], REVISION), self.PRODUCER)
+
+    def test_failed_missing_or_foreign_evidence_job_is_refused(self):
+        prepare, attest = R.EVIDENCE_JOBS
+        cases = {
+            'prepare failed': [self.job(prepare, conclusion='failure'), self.job(attest)],
+            'attest failed': [self.job(prepare), self.job(attest, conclusion='failure')],
+            'attest skipped': [self.job(prepare), self.job(attest, conclusion='skipped')],
+            'attest unfinished': [self.job(prepare), self.job(attest, status='in_progress', conclusion=None)],
+            'attest missing': [self.job(prepare)],
+            'attest duplicated': [self.job(prepare), self.job(attest), self.job(attest)],
+            'other attempt': [self.job(prepare), self.job(attest, run_attempt=1)],
+            'other run': [self.job(prepare, run_id=99), self.job(attest)],
+            'other revision': [self.job(prepare), self.job(attest, head_sha='c' * 40)],
+        }
+        for label, jobs in cases.items():
+            with self.subTest(label=label), self.assertRaises(ValueError), patch.object(R, 'api', side_effect=[
+                    {'id': 9}, self.producing_run_record(conclusion='failure'), self.evidence_jobs(*jobs)]):
+                R.producing_run(CONFIG, [self.PRODUCER], REVISION)
+        incomplete = dict(self.evidence_jobs(), total_count=101)
+        with self.assertRaisesRegex(ValueError, 'job inventory'), patch.object(R, 'api', side_effect=[
+                {'id': 9}, self.producing_run_record(), incomplete]):
+            R.producing_run(CONFIG, [self.PRODUCER], REVISION)
+
+    def test_running_attempt_waits_for_completion(self):
+        running = self.producing_run_record(status='in_progress', conclusion=None)
+        with patch.object(R, 'api', side_effect=[{'id': 9}, running, running,
+                self.producing_run_record(conclusion='failure'), self.evidence_jobs(release='failure')]) as api, \
+             patch.object(R.time, 'sleep') as sleep:
+            self.assertEqual(R.producing_run(CONFIG, [self.PRODUCER], REVISION), self.PRODUCER)
+        self.assertEqual(sleep.call_count, 2)
+        # The jobs of an unfinished attempt are not consulted.
+        self.assertEqual(sum('/jobs' in call.args[1] for call in api.call_args_list), 1)
+        with patch.object(R, 'api', side_effect=lambda config, suffix: {'id': 9} if suffix.endswith('release.yml')
+                          else running), patch.object(R.time, 'sleep') as sleep, \
+             self.assertRaisesRegex(ValueError, 'completion timed out'):
+            R.producing_run(CONFIG, [self.PRODUCER], REVISION)
+        self.assertEqual(sleep.call_count, 23)
+
+    def test_evidence_job_names_match_the_release_workflow(self):
+        workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/release.yml').read_text()
+        for name in R.EVIDENCE_JOBS:
+            self.assertIn(f'\n    name: {name}\n', workflow)
 
     def test_verifier_child_has_no_credentials_or_host_auth_config(self):
         payload = b'candidate'
@@ -490,7 +565,7 @@ class BoundaryTests(unittest.TestCase):
             with self.subTest(existing=existing), ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ, {}, clear=True))
                 stack.enter_context(patch.object(R.sys.stdin, 'isatty', return_value=True))
-                stack.enter_context(patch.object(R.sys.stderr, 'isatty', return_value=True))
+                stderr = stack.enter_context(patch.object(R.sys, 'stderr', Terminal()))
                 stack.enter_context(patch.object(R.subprocess, 'check_output', side_effect=[b'', REVISION]))
                 stack.enter_context(patch.object(R, 'api', side_effect=[{'status': 'identical'}, release]))
                 stack.enter_context(patch.object(R, 'release_evidence', return_value=(release, {'crates': [entry]}, {'example': data})))
@@ -502,10 +577,19 @@ class BoundaryTests(unittest.TestCase):
                 stack.enter_context(patch.object(R, 'host_write_authority', return_value='test-github-token'))
                 stack.enter_context(patch.object(R, 'reserve_upload'))
                 stack.enter_context(patch.object(R, 'confirm', side_effect=ValueError('unresolved')))
-                put = stack.enter_context(patch.object(R, 'put_once', return_value=False))
+                put = stack.enter_context(patch.object(R, 'put_once', return_value=R.PutOutcome(False)))
                 with self.assertRaisesRegex(ValueError, 'name already exists' if existing else 'unresolved'):
                     R.bootstrap(CONFIG, 10, REVISION, 'b' * 64, 'owner', '123')
                 self.assertEqual(put.call_count, 0 if existing else 1)
+                output = stderr.getvalue()
+                if uncertain:
+                    # Ambiguous results keep the intent until authoritative owner confirmation.
+                    self.assertIn('no definite result', output)
+                    self.assertIn('intent refs/tags/crate-upload-intent/example/0.1.0 stays reserved', output)
+                    self.assertIn('Only after authoritative confirmation', output)
+                    self.assertNotIn('429', output)
+                else:
+                    self.assertNotIn('intent', output)
 
     def test_maintenance_preparation_cannot_claim_coordinates(self):
         entry, data = row()
@@ -597,6 +681,409 @@ class BoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'inventory coverage'):
                     R.finalize(CONFIG, 'v1.0.0', directory)
 
+
+class BootstrapPacingTests(unittest.TestCase):
+    """crates.io allows a burst of new names, then one per refill period."""
+
+    def run_bootstrap(self, count, burst=R.NEW_CRATE_BURST, outcomes=(), confirm=None, present=(), interrupt=False):
+        """`present` holds crates.io created_at values for the first crates, already published."""
+        rows = [{'name': f'crate{index}', 'version': '0.1.0', 'sha256': 'c' * 64, 'metadata': {'deps': []}}
+                for index in range(count)]
+        published = {f'crate{index}': created for index, created in enumerate(present)}
+        release, events, outcomes = {'id': 10}, [], list(outcomes)
+        def get(url, absent=False, **_):
+            if url.endswith('/api/v1/users/owner'):
+                return R.canonical({'user': {'id': 123, 'login': 'owner'}})
+            if url.endswith('/owners'):
+                return R.canonical({'users': [{'kind': 'user', 'id': 123, 'login': 'owner'}]})
+            name = url.removeprefix(R.REGISTRY + '/api/v1/crates/')
+            if not absent and name in published:
+                return R.canonical({'crate': {'name': name, 'created_at': published[name]}})
+            self.assertTrue(absent)
+            return None
+        def sleep(seconds):
+            events.append(('sleep', seconds))
+            if interrupt:
+                raise KeyboardInterrupt
+        def prompt(text):
+            events.append(('prompt',))
+            return 'PUBLISH AS owner'
+        def put(data, metadata_value, token):
+            events.append(('put', data))
+            return outcomes.pop(0) if outcomes else R.PutOutcome(True)
+        def confirmed(items):
+            events.append(('confirm', items[0]['name']))
+            if confirm:
+                raise confirm
+        stderr, error = Terminal(), None
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {}, clear=True))
+            stack.enter_context(patch.object(R.sys.stdin, 'isatty', return_value=True))
+            stack.enter_context(patch.object(R.sys, 'stderr', stderr))
+            stack.enter_context(patch.object(R.subprocess, 'check_output',
+                side_effect=lambda argv, **_: b'' if 'status' in argv else REVISION))
+            stack.enter_context(patch.object(R, 'api', side_effect=lambda config, suffix:
+                {'status': 'identical'} if suffix.startswith('compare/') else release))
+            stack.enter_context(patch.object(R, 'release_evidence', return_value=(
+                release, {'crates': rows}, {item['name']: item['name'] for item in rows})))
+            stack.enter_context(patch.object(R, 'registry_state', side_effect=lambda item:
+                events.append(('check', item['name'])) or ('present' if item['name'] in published else 'absent')))
+            stack.enter_context(patch.object(R, 'get', side_effect=get))
+            stack.enter_context(patch('builtins.input', side_effect=prompt))
+            stack.enter_context(patch.object(R.getpass, 'getpass', return_value='test-only-token'))
+            stack.enter_context(patch.object(R, 'host_write_authority', return_value='test-github-token'))
+            stack.enter_context(patch.object(R, 'reserve_upload',
+                side_effect=lambda config, value, item, *args: events.append(('reserve', item['name']))))
+            stack.enter_context(patch.object(R, 'put_once', side_effect=put))
+            stack.enter_context(patch.object(R, 'confirm', side_effect=confirmed))
+            stack.enter_context(patch.object(R.time, 'sleep', side_effect=sleep))
+            try:
+                R.bootstrap(CONFIG, 10, REVISION, 'b' * 64, 'owner', '123', burst=burst)
+            except (ValueError, KeyboardInterrupt) as raised:
+                error = raised
+        return events, stderr.getvalue(), error
+
+    def segments(self, events):
+        """What happens between the previous upload (or the confirmation) and each reservation."""
+        result, segment = [], []
+        for event in events:
+            if event[0] == 'reserve':
+                result.append((event[1], segment))
+            if event[0] in ('reserve', 'prompt', 'put', 'confirm'):
+                segment = []
+            else:
+                segment.append(event)
+        return result
+
+    def test_first_burst_then_one_full_wait_before_each_further_intent(self):
+        for count, burst in [(8, 5), (8, 0), (5, 5), (3, 2), (2, 5)]:
+            with self.subTest(count=count, burst=burst):
+                events, output, error = self.run_bootstrap(count, burst)
+                self.assertIsNone(error)
+                names = [f'crate{index}' for index in range(count)]
+                self.assertEqual([event[1] for event in events if event[0] == 'put'], names)
+                segments = self.segments(events)
+                self.assertEqual([name for name, _ in segments], names)
+                for position, (name, segment) in enumerate(segments, 1):
+                    sleeps = [event for event in segment if event[0] == 'sleep']
+                    # The wait finishes before the absence re-check, which precedes the intent.
+                    self.assertEqual(segment, sleeps + [('check', name)])
+                    if position > burst:
+                        self.assertEqual(sum(value for _, value in sleeps),
+                                         R.NEW_CRATE_RATE_SECONDS + R.NEW_CRATE_MARGIN_SECONDS)
+                        self.assertTrue(all(0 < value <= R.PROGRESS_SECONDS for _, value in sleeps))
+                    else:
+                        self.assertEqual(sleeps, [])
+                paced = max(0, count - burst)
+                waits = sum(1 for event in events if event[0] == 'sleep')
+                self.assertEqual(waits, paced * 11)
+                self.assertEqual(output.count(' until reserving crate'), waits)
+                if paced:
+                    self.assertIn(f'rate limit: {count - paced} at once, then {paced} after a 610 s wait each', output)
+                    self.assertIn(f'10m10s until reserving crate{burst}@0.1.0 ({burst + 1} of {count})', output)
+                else:
+                    self.assertNotIn('wait', output)
+
+    def created(self, minutes):
+        moment = R.datetime.datetime.now(R.datetime.timezone.utc) - R.datetime.timedelta(minutes=minutes)
+        return moment.isoformat().replace('+00:00', 'Z')  # crates.io's created_at form
+
+    def paced_names(self, events):
+        return [name for name, segment in self.segments(events) if any(event[0] == 'sleep' for event in segment)]
+
+    def test_resumed_run_lowers_burst_for_names_this_release_just_created(self):
+        cases = [  # (created_at of the already published crates, effective burst)
+            ([self.created(5)] * 5, 0),                                       # all 5 tokens just spent
+            ([self.created(12), self.created(40), self.created(120)], 3),     # 2 inside the window
+            ([self.created(51)] * 5, 5),                                      # all outside the window
+            (['not a time', None, '2026-10-26T12:00:00'], 2),                 # unreadable counts as recent
+            ([self.created(-3)], 4),                                          # clock skew counts as recent
+        ]
+        for present, burst in cases:
+            with self.subTest(present=present):
+                events, output, error = self.run_bootstrap(8, present=present)
+                self.assertIsNone(error)
+                remaining = [f'crate{index}' for index in range(len(present), 8)]
+                self.assertEqual([event[1] for event in events if event[0] == 'put'], remaining)
+                self.assertEqual(self.paced_names(events), remaining[burst:])
+                lowered = [line for line in output.splitlines() if 'lowering --burst' in line]
+                self.assertEqual(lowered, [] if burst == 5 else [
+                    f'{5 - burst} of these crates were first published within the last 50 minutes;'
+                    f' lowering --burst from 5 to {burst}.'])
+
+    def test_resumed_run_reports_how_far_it_lowered_the_burst(self):
+        _, output, _ = self.run_bootstrap(8, present=[self.created(5)] * 2, burst=4)
+        self.assertIn('2 of these crates were first published within the last 50 minutes;'
+                      ' lowering --burst from 4 to 2.', output)
+        _, output, _ = self.run_bootstrap(8, present=[self.created(5)] * 5, burst=3)
+        self.assertIn('lowering --burst from 3 to 0.', output)
+
+    def test_every_abort_after_an_upload_advises_burst_zero(self):
+        advice = 'If you re-run within the next hour, pass --burst 0.'
+        # Ctrl-C during the wait after the burst.
+        events, output, error = self.run_bootstrap(6, interrupt=True)
+        self.assertIsInstance(error, KeyboardInterrupt)
+        self.assertNotIn(('reserve', 'crate5'), events)
+        self.assertIn(f'This run sent 5 new crate upload(s) to crates.io. {advice}', output)
+        # An unresolved upload, and a refused one.
+        for outcomes, confirm in [((R.PutOutcome(False),), ValueError('registry readiness unresolved')),
+                                  ((R.PutOutcome(True), R.PutOutcome(False, True, None)), None)]:
+            with self.subTest(outcomes=outcomes):
+                _, output, error = self.run_bootstrap(3, outcomes=outcomes, confirm=confirm)
+                self.assertIsInstance(error, ValueError)
+                self.assertIn(advice, output)
+        # Nothing sent yet: an interrupted first wait needs no advice.
+        events, output, error = self.run_bootstrap(2, burst=0, interrupt=True)
+        self.assertIsInstance(error, KeyboardInterrupt)
+        self.assertNotIn('put', [event[0] for event in events])
+        self.assertNotIn(advice, output)
+        # A complete run warns about other bootstraps with the same account.
+        _, output, error = self.run_bootstrap(2)
+        self.assertIsNone(error)
+        self.assertNotIn(advice, output)
+        self.assertIn('crates.io counts these 2 new names for the next hour; pass --burst 0', output)
+
+    def test_out_of_range_burst_is_refused_before_any_read(self):
+        for burst in (-1, 6, True, '3', 2.0):
+            with self.subTest(burst=burst), patch.dict(os.environ, {}, clear=True), \
+                 patch.object(R.sys.stdin, 'isatty', return_value=True), patch.object(R.sys, 'stderr', Terminal()), \
+                 patch.object(R.subprocess, 'check_output') as git, patch.object(R, 'api') as api, \
+                 self.assertRaisesRegex(ValueError, 'burst out of range'):
+                R.bootstrap(CONFIG, 10, REVISION, 'b' * 64, 'owner', '123', burst=burst)
+            git.assert_not_called(); api.assert_not_called()
+
+    def test_command_line_burst_bounds_and_default(self):
+        for value, expected in [('0', 0), ('3', 3), ('5', 5)]:
+            self.assertEqual(R.new_crate_burst(value), expected)
+        for value in ('-1', '6', '10', '1.5', 'five', '', ' 3', '٣'):
+            with self.subTest(value=value), self.assertRaises(R.argparse.ArgumentTypeError):
+                R.new_crate_burst(value)
+        for extra, expected in [([], R.NEW_CRATE_BURST), (['--burst', '2'], 2), (['--burst', '0'], 0)]:
+            with self.subTest(extra=extra), patch.object(R, 'policy', return_value=CONFIG), \
+                 patch.object(R, 'bootstrap') as bootstrap, redirect_stdout(io.StringIO()), \
+                 patch.object(R.sys, 'argv', ['crate_release.py', 'bootstrap', *extra]):
+                R.main()
+                self.assertEqual(bootstrap.call_args.args[-1], expected)
+        for value in ('6', '-1'):
+            with self.subTest(value=value), patch.object(R, 'bootstrap') as bootstrap, \
+                 patch.object(R.sys, 'stderr', io.StringIO()) as stderr, self.assertRaises(SystemExit), \
+                 patch.object(R.sys, 'argv', ['crate_release.py', 'bootstrap', '--burst', value]):
+                R.main()
+            bootstrap.assert_not_called()
+            self.assertIn('from 0 to 5', stderr.getvalue())
+
+    def test_rate_limit_refusal_stops_with_owner_recovery_and_keeps_intent(self):
+        for retry_after, when in [('2026-10-26 12:34:56 UTC', 'after 2026-10-26 12:34:56 UTC'),
+                                  (None, 'gave no retry time; wait at least 10 minutes')]:
+            with self.subTest(retry_after=retry_after), patch.object(R, 'github_write') as writer:
+                events, output, error = self.run_bootstrap(
+                    3, outcomes=[R.PutOutcome(True), R.PutOutcome(False, True, retry_after)])
+                self.assertRegex(str(error), 'rate limit refused the upload; intent retained')
+                # No read-only confirmation wait, no later intent, and no intent removal.
+                self.assertEqual([event for event in events if event[0] in ('reserve', 'put', 'confirm')],
+                                 [('reserve', 'crate0'), ('put', 'crate0'), ('confirm', 'crate0'),
+                                  ('reserve', 'crate1'), ('put', 'crate1')])
+                writer.assert_not_called()
+                for text in ['crates.io refused crate1@0.1.0 with HTTP 429 (rate limit) before accepting it.', when,
+                             'intent refs/tags/crate-upload-intent/crate1/0.1.0 is still reserved',
+                             'https://crates.io/api/v1/crates/crate1 returns 404',
+                             'gh api --method DELETE repos/seraphinastudios/example/git/refs/tags/crate-upload-intent/crate1/0.1.0',
+                             '3. Re-run this bootstrap with --burst 0']:
+                    self.assertIn(text, output)
+
+    def test_acknowledged_but_unconfirmed_upload_keeps_its_intent(self):
+        events, output, error = self.run_bootstrap(1, confirm=ValueError('registry readiness unresolved'))
+        self.assertRegex(str(error), 'readiness unresolved')
+        self.assertIn('crates.io acknowledged crate0@0.1.0', output)
+        self.assertIn('a published coordinate keeps its reservation permanently', output)
+        self.assertNotIn('DELETE', output)
+
+
+class PutOnceTests(unittest.TestCase):
+    def put(self, outcome):
+        opener = MagicMock()
+        if isinstance(outcome, BaseException):
+            opener.open.side_effect = outcome
+        else:
+            opener.open.return_value = outcome
+        with patch.object(R.urllib.request, 'build_opener', return_value=opener):
+            result = R.put_once(b'archive', {'name': 'example'}, 'test-token')
+        self.assertEqual(opener.open.call_count, 1)
+        return result
+
+    def refusal(self, code, retry_after=None, body=b''):
+        headers = email.message.Message()
+        if retry_after is not None:
+            headers['Retry-After'] = retry_after
+        return urllib.error.HTTPError(R.REGISTRY + '/api/v1/crates/new', code, 'refused', headers, io.BytesIO(body))
+
+    def test_rate_limit_is_definite_and_reports_only_a_parsed_retry_time(self):
+        # The body crates.io sends with its Retry-After header (src/util/errors/json.rs).
+        detail = R.canonical({'errors': [{'detail': 'You have published too many new crates in a short period'
+            ' of time. Please try again after Tue, 27 Oct 2026 01:02:03 GMT and see'
+            ' https://crates.io/docs/rate-limits for more details.'}]})
+        for retry_after, body, expected in [
+                ('Mon, 26 Oct 2026 12:34:56 GMT', detail, '2026-10-26 12:34:56 UTC'),
+                (None, detail, '2026-10-27 01:02:03 UTC'),
+                ('\x1b]8;;https://attacker.invalid\x07', detail, '2026-10-27 01:02:03 UTC'),
+                ('Mon, 26 Oct 2026 12:34:56 GMT\x1b[2J', b'try again after \x1b[2J', None),
+                ('Mon, 31 Feb 2026 12:34:56 GMT', b'', None),
+                (None, b'not json', None)]:
+            with self.subTest(retry_after=retry_after, body=body):
+                outcome = self.put(self.refusal(429, retry_after, body))
+                self.assertEqual(outcome, R.PutOutcome(False, True, expected))
+                self.assertFalse(outcome)
+        self.assertRegex(self.put(self.refusal(429, '120')).retry_after,
+                         r'[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC')
+
+    def test_unreadable_rate_limit_details_are_still_a_refusal(self):
+        error = self.refusal(429, 'Mon, 26 Oct 2026 12:34:56 GMT')
+        with patch.object(error, 'read', side_effect=ConnectionResetError('reset')):
+            self.assertEqual(self.put(error), R.PutOutcome(False, True, None))
+
+    def test_other_failures_stay_ambiguous(self):
+        for failure in (self.refusal(500, 'Mon, 26 Oct 2026 12:34:56 GMT'), self.refusal(403),
+                        TimeoutError('lost'), urllib.error.URLError('reset'), ValueError('redirect refused')):
+            with self.subTest(failure=failure):
+                self.assertEqual(self.put(failure), R.PutOutcome(False))
+
+    def test_only_acknowledged_success_is_accepted(self):
+        for body, accepted in [(b'{"warnings":{}}', True), (b'{"errors":[{"detail":"refused"}]}', False)]:
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.status = 200
+            response.read.return_value = body
+            response.geturl.return_value = R.REGISTRY + '/api/v1/crates/new'
+            outcome = self.put(response)
+            self.assertEqual(outcome, R.PutOutcome(accepted))
+            self.assertEqual(bool(outcome), accepted)
+
+
+class ExclusionTests(unittest.TestCase):
+    """Reviewed source releases whose crate versions must never reach the registry."""
+    EXCLUDED = {'source_tag': 'v1.1.0', 'release_id': '8', 'version': '0.1.1'}
+
+    def config(self, *rows):
+        return dict(CONFIG, excluded=[dict(row) for row in rows] or [dict(self.EXCLUDED)])
+
+    def write_policy(self, root, value):
+        (root / 'policy').mkdir(exist_ok=True)
+        (root / 'policy/crate-release.json').write_text(json.dumps(value))
+        return R.policy(root)
+
+    def entry(self, release_id, tag, version, name='example'):
+        release, crate = {'id': release_id, 'tag_name': tag}, {'name': name, 'version': version}
+        return (name, version), (release, {'crates': [crate], 'revision': REVISION}, crate, 'd' * 64)
+
+    def test_repository_policy_never_publishes_v1_12_0_or_v1_13_0(self):
+        config = R.policy()
+        self.assertEqual(config['excluded'], [
+            {'source_tag': 'v1.12.0', 'release_id': '416265557', 'version': '0.2.0'},
+            {'source_tag': 'v1.13.0', 'release_id': '416925017', 'version': '0.2.1'}])
+        for crate in config['crates']:
+            for version, excluded in (('0.2.0', True), ('0.2.1', True), ('0.3.0', False)):
+                self.assertEqual(R.excluded_coordinate(config, crate['name'], version), excluded)
+        # Once v1.14.0 is live, reconciliation dispatches neither earlier release.
+        entries = dict(self.entry(release, tag, version, name) for release, tag, version in (
+            (418808670, 'v1.14.0', '0.3.0'), (416925017, 'v1.13.0', '0.2.1'), (416265557, 'v1.12.0', '0.2.0'))
+            for name in [crate['name'] for crate in config['crates']])
+        with patch.object(R, 'catalog', return_value=entries), \
+             patch.object(R, 'registry_state', side_effect=lambda item: 'present' if item['version'] == '0.3.0'
+                          else 'absent') as registry, patch.object(R, 'dispatch') as dispatch:
+            R.reconcile(config)
+        dispatch.assert_not_called()
+        self.assertEqual({call.args[0]['version'] for call in registry.call_args_list}, {'0.3.0'})
+
+    def test_policy_rejects_malformed_or_ambiguous_exclusions(self):
+        good = dict(self.EXCLUDED)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(self.write_policy(root, dict(CONFIG, excluded=[good]))['excluded'], [good])
+            for row in (dict(good, source_tag='latest'), dict(good, release_id='08'), dict(good, release_id=8),
+                        dict(good, version='0.1'), dict(good, reason='never'), {'source_tag': 'v1.1.0', 'release_id': '8'},
+                        'v1.1.0'):
+                with self.subTest(row=row), self.assertRaisesRegex(ValueError, 'exclusion fields'):
+                    self.write_policy(root, dict(CONFIG, excluded=[row]))
+            for other in (dict(good, release_id='9', version='0.1.2'), dict(good, source_tag='v1.2.0', version='0.1.2'),
+                          dict(good, source_tag='v1.2.0', release_id='9')):
+                with self.subTest(other=other), self.assertRaisesRegex(ValueError, 'duplicate exclusion'):
+                    self.write_policy(root, dict(CONFIG, excluded=[good, other]))
+            with self.assertRaisesRegex(ValueError, 'exclusion bound'):
+                self.write_policy(root, dict(CONFIG, excluded={}))
+            history = [{'name': 'example', 'version': '0.1.1', 'source_tag': 'v0.1.0', 'revision': REVISION,
+                        'asset': 'example-0.1.1.crate', 'sha256': '0' * 64}]
+            with self.assertRaisesRegex(ValueError, 'historical coordinate excluded'):
+                self.write_policy(root, dict(CONFIG, excluded=[good], historical=history))
+            with self.assertRaisesRegex(ValueError, 'policy fields'):
+                self.write_policy(root, {key: value for key, value in CONFIG.items() if key != 'excluded'})
+
+    def test_evidence_refuses_an_excluded_release_before_any_other_read(self):
+        for release, message in [({'id': 8, 'tag_name': 'v1.1.0'}, 'excluded from registry publication'),
+                                 ({'id': 8, 'tag_name': 'v1.1.9'}, 'identity mismatch'),
+                                 ({'id': 9, 'tag_name': 'v1.1.0'}, 'identity mismatch')]:
+            with self.subTest(release=release), patch.object(R, 'api', return_value=release) as api, \
+                 patch.object(R, 'asset_bytes') as assets, self.assertRaisesRegex(ValueError, message):
+                R.release_evidence(self.config(), str(release['id']), REVISION, 'b' * 64)
+            self.assertEqual(api.call_count, 1)
+            assets.assert_not_called()
+
+    def test_evidence_refuses_an_excluded_coordinate_owned_by_any_release(self):
+        entry, _ = row()  # example 0.1.0, here in a release the policy does not name
+        manifest = {'schema_version': 1, 'repository': CONFIG['repository'], 'repository_id': '123',
+                    'revision': REVISION, 'source_tag': 'v1.0.0', 'crates': [entry]}
+        raw = R.canonical(manifest)
+        with patch.object(R, 'api', return_value={'id': 10, 'tag_name': 'v1.0.0'}) as api, \
+             patch.object(R, 'release_identity'), patch.object(R, 'asset_bytes', return_value=raw), \
+             self.assertRaisesRegex(ValueError, 'excluded crate coordinate'):
+            R.release_evidence(self.config(dict(self.EXCLUDED, version='0.1.0')), '10', REVISION, R.digest(raw))
+        self.assertEqual(api.call_count, 1)  # no tag, attestation, run or check reads
+
+    def test_no_intent_or_upload_for_an_excluded_coordinate(self):
+        entry, data = row()
+        config = self.config(dict(self.EXCLUDED, version='0.1.0'))
+        release = {'id': 10, '_verified_producer': {'run_id': 100, 'run_attempt': 2}}
+        with patch.object(R, 'get') as get, patch.object(R, 'api') as api, patch.object(R, 'github_write') as write, \
+             self.assertRaisesRegex(ValueError, 'excluded crate coordinate'):
+            R.reserve_upload(config, release, entry, REVISION, 'b' * 64, 'test-token')
+        get.assert_not_called(); api.assert_not_called(); write.assert_not_called()
+        # The automatic publisher stops at the same point, before any intent or PUT.
+        with patch.object(R, 'boundary'), patch.object(R, 'release_evidence', return_value=(
+                release, {'crates': [entry]}, {'example': data})), patch.object(R, 'registry_state', return_value='absent'), \
+             patch.object(R, 'api', return_value=release), patch.object(R, 'get') as get, \
+             patch.object(R, 'github_write') as write, patch.object(R, 'put_once') as put, \
+             patch.dict(os.environ, {'CARGO_REGISTRY_TOKEN': 'test-token', 'GH_INTENT_TOKEN': 'test-intent'}), \
+             self.assertRaisesRegex(ValueError, 'excluded crate coordinate'):
+            R.upload(config, 10, REVISION, 'b' * 64)
+        get.assert_not_called(); write.assert_not_called(); put.assert_not_called()
+
+    def test_reconcile_skips_excluded_releases_and_dispatches_the_next_eligible(self):
+        entries = dict([self.entry(9, 'v1.2.0', '0.1.2'), self.entry(8, 'v1.1.0', '0.1.1'), self.entry(7, 'v1.0.0', '0.1.0')])
+        state = {'0.1.2': 'present', '0.1.1': 'absent', '0.1.0': 'absent'}
+        with patch.object(R, 'catalog', return_value=entries), \
+             patch.object(R, 'registry_state', side_effect=lambda item: state[item['version']]) as registry, \
+             patch.object(R, 'dispatch') as dispatch:
+            R.reconcile(self.config())
+        dispatch.assert_called_once()
+        self.assertEqual(dispatch.call_args.args[1]['id'], 7)
+        self.assertNotIn('0.1.1', [call.args[0]['version'] for call in registry.call_args_list])
+
+    def test_reconcile_fails_closed_on_partial_or_inconsistent_exclusions(self):
+        for label, entries, message in [
+                ('tag reused by another release', [self.entry(9, 'v1.1.0', '0.1.1')], 'identity mismatch'),
+                ('release ID under another tag', [self.entry(8, 'v1.1.9', '0.1.1')], 'identity mismatch'),
+                ('excluded release at another version', [self.entry(8, 'v1.1.0', '0.1.2')], 'version mismatch'),
+                ('excluded coordinate in another release', [self.entry(9, 'v1.2.0', '0.1.1')], 'excluded crate coordinate')]:
+            with self.subTest(label=label), patch.object(R, 'catalog', return_value=dict(entries)), \
+                 patch.object(R, 'registry_state', return_value='absent'), patch.object(R, 'dispatch') as dispatch, \
+                 self.assertRaisesRegex(ValueError, message):
+                R.reconcile(self.config())
+            dispatch.assert_not_called()
+
+    def test_reconcile_command_uses_the_policy(self):
+        with patch.object(R, 'policy', return_value=CONFIG), patch.object(R, 'reconcile') as reconcile, \
+             patch.object(R.sys, 'argv', ['crate_release.py', 'reconcile']), redirect_stdout(io.StringIO()):
+            R.main()
+        reconcile.assert_called_once_with(CONFIG)
 
 
 class CatalogTests(unittest.TestCase):

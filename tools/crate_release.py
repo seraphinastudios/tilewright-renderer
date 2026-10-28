@@ -7,6 +7,8 @@ here. The same schema is copied into each physical producer repository.
 from __future__ import annotations
 
 import argparse
+import datetime
+import email.utils
 import hashlib
 import gzip
 import getpass
@@ -22,6 +24,7 @@ import tarfile
 import tempfile
 import time
 import tomllib
+import typing
 import secrets
 import resource
 import urllib.error
@@ -40,6 +43,22 @@ NAME = re.compile(r'[a-z][a-z0-9_-]{0,63}')
 VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
 SHA = re.compile(r'[0-9a-f]{40}')
 DIGEST = re.compile(r'[0-9a-f]{64}')
+# crates.io gives each account a token bucket for new crate names: a burst of
+# 5, then one more every 600 s (LimitedAction::PublishNew in rust-lang/crates.io
+# src/rate_limiter.rs). Versions of existing crates use a separate bucket.
+NEW_CRATE_BURST = 5
+NEW_CRATE_RATE_SECONDS = 600
+# Covers request latency and clock differences between this terminal and crates.io.
+NEW_CRATE_MARGIN_SECONDS = 10
+PROGRESS_SECONDS = 60
+# Window in which earlier new names may still hold tokens: 5 refill periods, plus margin.
+NEW_CRATE_WINDOW_SECONDS = NEW_CRATE_BURST * NEW_CRATE_RATE_SECONDS + NEW_CRATE_MARGIN_SECONDS
+# Job names in .github/workflows/release.yml that build and attest the evidence.
+EVIDENCE_JOBS = ('Prepare renderer release without publication credentials',
+                 'Attest verified renderer source release manifest')
+# The Retry-After format crates.io writes (TooManyRequests in src/util/errors/json.rs).
+HTTP_DATE = (r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+             r' [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT')
 
 
 def require(ok, message):
@@ -67,8 +86,8 @@ def safe_path(value):
 
 def policy(root=ROOT):
     value = json.loads((root / 'policy/crate-release.json').read_text())
-    require(set(value) == {'schema_version', 'repository', 'repository_id', 'workflow',
-                           'environment', 'toolchain', 'crates', 'historical', 'required_checks'}, 'policy fields')
+    require(set(value) == {'schema_version', 'repository', 'repository_id', 'workflow', 'environment',
+                           'toolchain', 'crates', 'historical', 'excluded', 'required_checks'}, 'policy fields')
     require(value['schema_version'] == 1 and re.fullmatch(r'seraphinastudios/[a-z0-9-]+', value['repository'])
             and re.fullmatch(r'[1-9][0-9]*', value['repository_id'])
             and value['workflow'] == 'publish-crate.yml' and value['environment'] == 'crates-io-release'
@@ -93,7 +112,43 @@ def policy(root=ROOT):
         coordinate = (row['name'], row['version'])
         require(coordinate not in seen, 'duplicate history')
         seen.add(coordinate)
+    # Source releases whose crate versions must never reach the registry.
+    require(isinstance(value['excluded'], list) and len(value['excluded']) <= 32, 'exclusion bound')
+    tags, ids, versions = set(), set(), set()
+    for row in value['excluded']:
+        require(isinstance(row, dict) and set(row) == {'source_tag', 'release_id', 'version'}
+                and all(isinstance(row[key], str) for key in row)
+                and re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', row['source_tag'])
+                and re.fullmatch(r'[1-9][0-9]*', row['release_id']) and VERSION.fullmatch(row['version']),
+                'exclusion fields')
+        require(row['source_tag'] not in tags and row['release_id'] not in ids and row['version'] not in versions,
+                'duplicate exclusion')
+        tags.add(row['source_tag']); ids.add(row['release_id']); versions.add(row['version'])
+    require(not any(row['version'] in versions for row in value['historical']), 'historical coordinate excluded')
     return value
+
+
+def excluded_coordinate(config, name, version):
+    """Family crates at an excluded release's version never reach the registry."""
+    return (any(row['version'] == version for row in config['excluded'])
+            and any(crate['name'] == name for crate in config['crates']))
+
+
+def excluded_release(config, release, manifest=None):
+    """Whether policy permanently excludes this source release from registry publication.
+
+    Its tag and release ID must both match one entry, and its crates must all be
+    at that entry's version. A partial match is a policy or identity error.
+    """
+    matches = [row for row in config['excluded']
+               if row['source_tag'] == release.get('tag_name') or row['release_id'] == str(release.get('id'))]
+    if not matches:
+        return False
+    require(len(matches) == 1 and matches[0]['source_tag'] == release.get('tag_name')
+            and matches[0]['release_id'] == str(release.get('id')), 'excluded release identity mismatch')
+    require(manifest is None or all(row['version'] == matches[0]['version'] for row in manifest['crates']),
+            'excluded release version mismatch')
+    return True
 
 
 def validate_coordinate(row):
@@ -307,6 +362,28 @@ def attestation_identity(config, verified, revision, manifest_sha256):
     return [{'run_id': run_id, 'run_attempt': attempt} for run_id, attempt in sorted(producers, reverse=True)]
 
 
+def evidence_jobs_succeeded(config, producer, revision):
+    """The attempt's prepare and attest jobs, which built and signed the evidence.
+
+    The later release job only publishes the release and dispatches the
+    publisher, so its failure (for example while the publisher workflow is
+    disabled) leaves the attested evidence intact.
+    """
+    suffix = f"actions/runs/{producer['run_id']}/attempts/{producer['run_attempt']}/jobs?per_page=100"
+    inventory = api(config, suffix)
+    jobs = inventory.get('jobs')
+    require(isinstance(jobs, list) and inventory.get('total_count') == len(jobs) <= 100, 'producing job inventory')
+    for name in EVIDENCE_JOBS:
+        matching = [job for job in jobs if job.get('name') == name]
+        require(len(matching) == 1, 'attested evidence job missing or duplicated')
+        job = matching[0]
+        require(job.get('run_id') == producer['run_id'] and job.get('run_attempt') == producer['run_attempt']
+                and job.get('head_sha') == revision, 'attested evidence job identity mismatch')
+        if job.get('status') != 'completed' or job.get('conclusion') != 'success':
+            return False
+    return True
+
+
 def producing_run(config, producers, revision):
     workflow_id = api(config, 'actions/workflows/release.yml')['id']
     for count in range(24):
@@ -319,7 +396,8 @@ def producing_run(config, producers, revision):
                 and run['head_branch'] == 'main' and run['event'] in ('push', 'workflow_dispatch')
                 and str(run['repository']['id']) == config['repository_id']
                 and str(run['head_repository']['id']) == config['repository_id'], 'attested producing run identity mismatch')
-            if run['status'] == 'completed' and run['conclusion'] == 'success':
+            # A finished attempt counts when its evidence jobs succeeded, whatever its later jobs did.
+            if run['status'] == 'completed' and evidence_jobs_succeeded(config, producer, revision):
                 return producer
             active = active or run['status'] != 'completed'
         require(active, 'no successful attested producing run')
@@ -330,6 +408,7 @@ def producing_run(config, producers, revision):
 def reserve_upload(config, release, row, revision, manifest_sha256, token):
     """Coordinate-global, atomic and persistent intent, before any registry PUT."""
     validate_coordinate(row)
+    require(not excluded_coordinate(config, row['name'], row['version']), 'excluded crate coordinate')
     ref = f"refs/tags/crate-upload-intent/{row['name']}/{row['version']}"
     suffix = ref.removeprefix('refs/')
     url = f"https://api.github.com/repos/{config['repository']}/git/ref/{suffix}"
@@ -591,11 +670,14 @@ def release_evidence(config, release_id, revision, manifest_sha256):
     require(str(release_id).isdigit() and SHA.fullmatch(revision) and DIGEST.fullmatch(manifest_sha256), 'release selectors')
     release = api(config, f'releases/{release_id}')
     require(str(release['id']) == str(release_id), 'release ID mismatch')
+    require(not excluded_release(config, release), 'source release excluded from registry publication')
     release_identity(config, release)
     raw = asset_bytes(config, release, MANIFEST, MAX_JSON)
     require(digest(raw) == manifest_sha256, 'manifest digest mismatch')
     manifest = validate_manifest(config, json.loads(raw))
     require(manifest['revision'] == revision and manifest['source_tag'] == release['tag_name'], 'manifest source mismatch')
+    require(not any(excluded_coordinate(config, row['name'], row['version']) for row in manifest['crates']),
+            'excluded crate coordinate')
     ref = api(config, 'git/ref/tags/' + release['tag_name'])['object']
     for _ in range(4):
         if ref['type'] != 'tag':
@@ -630,6 +712,41 @@ def release_evidence(config, release_id, revision, manifest_sha256):
     return release, manifest, snapshots
 
 
+class PutOutcome(typing.NamedTuple):
+    """One registry PUT. Only HTTP 429 is a definite refusal: crates.io checks its
+    rate limits before it reads the archive, and commits nothing for a 429."""
+    accepted: bool
+    rate_limited: bool = False
+    retry_after: str | None = None  # normalized UTC time, never registry text
+
+    def __bool__(self):
+        # Keeps the former boolean meaning: true only for an acknowledged upload.
+        return self.accepted
+
+
+def http_date(value):
+    if not re.fullmatch(HTTP_DATE, value):
+        return None
+    try:
+        return email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def retry_time(headers, body):
+    """crates.io's retry time from Retry-After or the error detail's "try again
+    after" text. Only a strictly parsed time is reformatted for the terminal."""
+    value = (headers.get('Retry-After') or '').strip() if headers is not None else ''
+    if re.fullmatch(r'[0-9]{1,6}', value):
+        moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(value))
+    else:
+        moment = http_date(value)
+        if moment is None:
+            found = re.search('try again after (' + HTTP_DATE + ')', body.decode('utf-8', 'replace'))
+            moment = found and http_date(found[1])
+    return moment.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC') if moment else None
+
+
 def put_once(data, metadata_value, token):
     encoded = canonical(metadata_value)
     payload = struct.pack('<I', len(encoded)) + encoded + struct.pack('<I', len(data)) + data
@@ -640,12 +757,20 @@ def put_once(data, metadata_value, token):
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=30) as response:
             raw = response.read(65537)
-            return response.geturl() == endpoint and 200 <= response.status < 300 and len(raw) <= 65536 and 'errors' not in json.loads(raw)
+            return PutOutcome(response.geturl() == endpoint and 200 <= response.status < 300 and len(raw) <= 65536
+                              and 'errors' not in json.loads(raw))
     except urllib.error.HTTPError as error:
+        retry_after = None
+        if error.code == 429:
+            try:
+                retry_after = retry_time(error.headers, error.read(65536))
+            except Exception:
+                pass  # The status alone is definite; its retry time is optional.
         error.close()
+        return PutOutcome(False, error.code == 429, retry_after)
     except Exception:
         pass
-    return False
+    return PutOutcome(False)
 
 
 def release_snapshot(release):
@@ -743,6 +868,24 @@ def catalog(config):
     raise ValueError('release inventory exceeds pagination bound')
 
 
+def reconcile(config):
+    """Dispatch the newest eligible release with absent crates; excluded releases never."""
+    seen = set()
+    for release, manifest, row, manifest_sha256 in catalog(config).values():
+        if release['id'] in seen:
+            continue
+        seen.add(release['id'])
+        if excluded_release(config, release, manifest):
+            continue
+        require(not any(excluded_coordinate(config, item['name'], item['version']) for item in manifest['crates']),
+                'excluded crate coordinate')
+        if any(registry_state(item) != 'present' for item in manifest['crates']):
+            # Each dispatch is an explicit side effect; no publication credential here.
+            dispatch(config, release, manifest, manifest_sha256)
+            # One release per run keeps failure/retry and concurrency bounded.
+            break
+
+
 def dispatch(config, release, manifest, manifest_sha256):
     token = os.environ.pop('GH_TOKEN', None)
     require(token and os.environ.get('GITHUB_REPOSITORY') == config['repository']
@@ -792,7 +935,64 @@ def finalize(config, source_tag, directory):
     return manifest
 
 
-def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, expected_owner_id):
+def new_crate_burst(value):
+    """argparse type for --burst: from 0 to crates.io's new-crate burst."""
+    if not re.fullmatch(r'[0-9]{1,2}', value) or int(value) > NEW_CRATE_BURST:
+        raise argparse.ArgumentTypeError(f'expected an integer from 0 to {NEW_CRATE_BURST}')
+    return int(value)
+
+
+def wait_for_new_crate_token(row, position, total):
+    """One full refill period plus margin, so the next new name has a token."""
+    remaining = NEW_CRATE_RATE_SECONDS + NEW_CRATE_MARGIN_SECONDS
+    while remaining > 0:
+        print(f"crates.io new-crate rate limit: {remaining // 60}m{remaining % 60:02d}s until reserving "
+              f"{row['name']}@{row['version']} ({position} of {total}).", file=sys.stderr)
+        step = min(PROGRESS_SECONDS, remaining)
+        time.sleep(step)
+        remaining -= step
+
+
+def report_put_failure(config, row, outcome):
+    """Owner recovery for a stopped upload. Intents are never removed here."""
+    ref = f"refs/tags/crate-upload-intent/{row['name']}/{row['version']}"
+    remove = f"gh api --method DELETE repos/{config['repository']}/git/{ref}"
+    rerun = 'Re-run this bootstrap with --burst 0; it skips crates that are already published.'
+    coordinate = f"{row['name']}@{row['version']}"
+    if outcome.rate_limited:
+        when = (f'crates.io accepts another new crate name after {outcome.retry_after}.' if outcome.retry_after
+                else 'crates.io gave no retry time; wait at least 10 minutes.')
+        lines = [f'crates.io refused {coordinate} with HTTP 429 (rate limit) before accepting it.', when,
+                 f'Its intent {ref} is still reserved and blocks another attempt. After that time:',
+                 f"  1. Confirm {row['name']} is still absent: {REGISTRY}/api/v1/crates/{row['name']} returns 404"
+                 ' and your crates.io dashboard does not list it.',
+                 f'  2. Remove the intent with your owner GitHub session: {remove}', f'  3. {rerun}']
+    elif outcome.accepted:
+        lines = [f'crates.io acknowledged {coordinate}, but registry reads did not confirm it in time.',
+                 f'Keep its intent {ref}: a published coordinate keeps its reservation permanently.',
+                 'Re-run this bootstrap with --burst 0 once the crate is visible; it skips published crates.']
+    else:
+        lines = [f'The upload of {coordinate} has no definite result, and registry reads did not confirm it.',
+                 f'Its intent {ref} stays reserved: crates.io may still have accepted the write,'
+                 ' and public absence alone does not prove that it did not.',
+                 f"If {coordinate} appears with sha256 {row['sha256']}, keep the intent and re-run this bootstrap.",
+                 'Only after authoritative confirmation that crates.io accepted no write, for example from'
+                 f' crates.io support, remove the intent: {remove}', rerun]
+    for line in lines:
+        print(line, file=sys.stderr)
+
+
+def recently_created(name, now):
+    """Whether crates.io created NAME inside the new-crate window; an unreadable time counts as recent."""
+    crate = json.loads(get(f'{REGISTRY}/api/v1/crates/{name}'))['crate']
+    try:
+        return (now - datetime.datetime.fromisoformat(crate['created_at'])).total_seconds() < NEW_CRATE_WINDOW_SECONDS
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return True
+
+
+def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, expected_owner_id,
+              burst=NEW_CRATE_BURST):
     """One-time owner-terminal bootstrap; never an Actions fallback credential."""
     require(not os.environ.get('GITHUB_ACTIONS') and not os.environ.get('CI') and
             not os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL') and
@@ -802,6 +1002,7 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
     require(sys.stdin.isatty() and sys.stderr.isatty(), 'bootstrap requires interactive terminal')
     require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,63}', expected_owner or '')
             and str(expected_owner_id).isdigit(), 'explicit owner identity required')
+    require(type(burst) is int and 0 <= burst <= NEW_CRATE_BURST, 'new-crate burst out of range')
     require(not subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT), 'dirty bootstrap checkout')
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     require(api(config, f'compare/{head}...main')['status'] in ('identical', 'ahead'), 'bootstrap tooling must be reviewed on main')
@@ -816,10 +1017,13 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
         users = json.loads(get(f'{REGISTRY}/api/v1/crates/{name}/owners'))['users']
         require(any(user.get('kind') == 'user' and str(user.get('id')) == str(expected_owner_id)
                     and user.get('login') == expected_owner for user in users), 'bootstrap owner mismatch')
-    to_publish = []
+    to_publish, recent = [], 0
+    now = datetime.datetime.now(datetime.timezone.utc)
     for row in ordered(manifest['crates']):
         if registry_state(row) == 'present':
             owned(row['name'])
+            # A resumed run: names published here moments ago still hold crates.io tokens.
+            recent += recently_created(row['name'], now)
             continue
         # A name that exists at any other coordinate is not a first publication.
         require(get(f"{REGISTRY}/api/v1/crates/{row['name']}", absent=True) is None,
@@ -827,23 +1031,55 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
         to_publish.append(row)
     if not to_publish:
         return
+    if recent:
+        print(f'{recent} of these crates were first published within the last {NEW_CRATE_WINDOW_SECONDS // 60}'
+              f' minutes; lowering --burst from {burst} to {max(0, burst - recent)}.', file=sys.stderr)
+        burst = max(0, burst - recent)
     coordinates = ', '.join(f"{row['name']}@{row['version']}" for row in to_publish)
     print(f'First publication of {coordinates} as {expected_owner} ({expected_owner_id}).', file=sys.stderr)
+    paced = max(0, len(to_publish) - burst)
+    if paced:
+        wait = NEW_CRATE_RATE_SECONDS + NEW_CRATE_MARGIN_SECONDS
+        print(f'Pacing for the crates.io new-crate rate limit: {len(to_publish) - paced} at once, then {paced}'
+              f' after a {wait} s wait each (at least {paced * wait // 60} minutes).', file=sys.stderr)
     print('Use a short-lived publish-new token created in this owner account; no token identity API is available.', file=sys.stderr)
     require(input(f'Type PUBLISH AS {expected_owner}: ') == f'PUBLISH AS {expected_owner}', 'bootstrap not confirmed')
     github_token = host_write_authority(config, expected_owner)
     token = getpass.getpass('One-use crates.io token (hidden): ')
     require(0 < len(token) <= 8192 and all(33 <= ord(char) <= 126 for char in token), 'invalid bootstrap token')
-    for row in to_publish:
-        require(release_snapshot(api(config, f'releases/{release_id}')) == release_snapshot(release),
-                'bootstrap source changed')
-        require(registry_state(row) == 'absent' and
-                get(f"{REGISTRY}/api/v1/crates/{row['name']}", absent=True) is None,
-                'bootstrap coordinate is no longer absent')
-        reserve_upload(config, release, row, revision, manifest_sha256, github_token)
-        put_once(snapshots[row['name']], row['metadata'], token)
-        confirm([row])
-        owned(row['name'])
+    sent = 0
+    try:
+        for position, row in enumerate(to_publish, 1):
+            if position > burst:
+                # Pace before the checks and intent: a refused PUT would strand its reservation.
+                wait_for_new_crate_token(row, position, len(to_publish))
+            require(release_snapshot(api(config, f'releases/{release_id}')) == release_snapshot(release),
+                    'bootstrap source changed')
+            require(registry_state(row) == 'absent' and
+                    get(f"{REGISTRY}/api/v1/crates/{row['name']}", absent=True) is None,
+                    'bootstrap coordinate is no longer absent')
+            reserve_upload(config, release, row, revision, manifest_sha256, github_token)
+            sent += 1  # Counted before the PUT: an interrupted request may still have reached crates.io.
+            outcome = put_once(snapshots[row['name']], row['metadata'], token)
+            if outcome.rate_limited:
+                report_put_failure(config, row, outcome)
+                raise ValueError('crates.io rate limit refused the upload; intent retained')
+            if not outcome.accepted:
+                print(f"crates.io did not acknowledge {row['name']}@{row['version']}; checking registry reads.",
+                      file=sys.stderr)
+            try:
+                confirm([row])
+            except Exception:
+                report_put_failure(config, row, outcome)
+                raise
+            owned(row['name'])
+    except BaseException:
+        if sent:
+            print(f'This run sent {sent} new crate upload(s) to crates.io. If you re-run within the next hour,'
+                  ' pass --burst 0.', file=sys.stderr)
+        raise
+    print(f'crates.io counts these {sent} new names for the next hour; pass --burst 0 to any other'
+          ' bootstrap with this account before then.', file=sys.stderr)
     print('Bootstrap confirmed; revoke this one-use token and register Trusted Publishing.', file=sys.stderr)
 
 
@@ -853,10 +1089,16 @@ def main():
     parser.add_argument('--release-id'); parser.add_argument('--revision'); parser.add_argument('--manifest-sha256')
     parser.add_argument('--source-tag'); parser.add_argument('--archives', type=Path)
     parser.add_argument('--expected-owner'); parser.add_argument('--expected-owner-id')
+    parser.add_argument('--burst', type=new_crate_burst, default=NEW_CRATE_BURST, help=(
+        f'bootstrap: new crate names to upload before pacing to one per {NEW_CRATE_RATE_SECONDS // 60} minutes'
+        f' (0-{NEW_CRATE_BURST}, default {NEW_CRATE_BURST}). Lower it if this crates.io account published'
+        f' other new crate names in the last hour: {NEW_CRATE_BURST} minus that count, or 0 when unsure.'
+        " This release's own recently published crates are counted automatically."))
     args = parser.parse_args()
     config = policy()
     if args.operation == 'bootstrap':
-        bootstrap(config, args.release_id, args.revision, args.manifest_sha256, args.expected_owner, args.expected_owner_id)
+        bootstrap(config, args.release_id, args.revision, args.manifest_sha256, args.expected_owner,
+                  args.expected_owner_id, args.burst)
     elif args.operation == 'finalize':
         require(args.archives is not None, 'prepared directory required')
         finalize(config, args.source_tag, args.archives)
@@ -880,16 +1122,7 @@ def main():
         if manifest['crates']:
             dispatch(config, release, manifest, digest(raw))
     else:
-        seen = set()
-        for release, manifest, row, manifest_sha256 in catalog(config).values():
-            if release['id'] in seen:
-                continue
-            seen.add(release['id'])
-            if any(registry_state(item) != 'present' for item in manifest['crates']):
-                # Each dispatch is an explicit side effect; no publication credential here.
-                dispatch(config, release, manifest, manifest_sha256)
-                # One release per run keeps failure/retry and concurrency bounded.
-                break
+        reconcile(config)
     print(json.dumps({'operation': args.operation, 'status': 'complete'}))
 
 
