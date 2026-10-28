@@ -1269,10 +1269,11 @@ fn rect(left: f64, top: f64, width: f64, height: f64) -> [[f64; 2]; 4] {
 /// texture coordinates, at zooms that are not whole numbers. Every pixel
 /// centre a ground quad covers lies inside its unsnapped art, but `f32`
 /// interpolation on any backend could carry a centre on the art's edge just
-/// outside it, where texels read as transparent. The margin keeps such centres inside. It grows the art by
-/// 1/65,536 of its size each way, so a pixel centre lying on the boundary
-/// between neighbouring art, to within that much, is drawn by both rather
-/// than by neither; painter order picks the one that shows.
+/// outside it, where texels read as transparent. The margin keeps such
+/// centres inside. It grows the art by 1/65,536 of its size each way, so a
+/// pixel centre lying on the boundary between neighbouring art, to within
+/// that much, is drawn by both rather than by neither; painter order picks
+/// the one that shows.
 const GROUND_UV_MARGIN: f64 = 1.0 / 65_536.0;
 
 /// Rows and columns of the mesh a bent isometric tile becomes.
