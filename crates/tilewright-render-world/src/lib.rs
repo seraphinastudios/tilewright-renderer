@@ -1254,9 +1254,10 @@ fn snap(value: f64) -> f64 {
 /// The pixel edge before the first pixel whose centre lies at or after
 /// `value`. Edges snapped this way cover the pixel centres from a start
 /// (inclusive) to an end (exclusive), the same rule by which nearest sampling
-/// gives a centre on a texel boundary to the later texel.
+/// gives a centre on a texel boundary to the later texel. An edge at zero is
+/// positive zero, as `snap` gives, so quads keep the same bits.
 fn centre_edge(value: f64) -> f64 {
-    (value - 0.5).ceil()
+    (value - 0.5).ceil() + 0.0
 }
 
 fn rect(left: f64, top: f64, width: f64, height: f64) -> [[f64; 2]; 4] {

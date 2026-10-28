@@ -1219,3 +1219,34 @@ fn ground_under_a_pixel_keeps_texture_coordinates_in_bounds() {
         assert_eq!([edges[2] - edges[0], edges[3] - edges[1]], [1.0, 1.0]);
     }
 }
+
+#[test]
+fn ground_edges_at_the_view_origin_are_positive_zero() {
+    // Consumers may hash or pack quad positions bit for bit, so an edge on
+    // the view's top or left side must not be negative zero.
+    for zoom in [0.25_f32, 0.5, 1.0, 2.0] {
+        let mut view = iso_view(Vec::new(), HeightField::empty());
+        view.camera.projection = Projection::TopDown { tile_size: 32 };
+        // The tile's top-left corner lands on the view's.
+        view.camera.center = [1.0 / f64::from(zoom); 2];
+        (view.camera.width, view.camera.height) = (64, 64);
+        view.camera.zoom = zoom;
+        view.objects = vec![WorldObject::new(
+            SemanticId(1),
+            [0, 0],
+            0,
+            Anchor::Ground,
+            texture(1, 32, 32),
+        )];
+        let quad = quads_of(&view, 1)[0];
+        assert!(
+            quad.positions
+                .iter()
+                .flatten()
+                .all(|value| value.to_bits() != (-0.0_f32).to_bits()),
+            "zoom {zoom}: {:?}",
+            quad.positions
+        );
+        assert_eq!(quad.positions[0], [0.0, 0.0], "zoom {zoom}");
+    }
+}
