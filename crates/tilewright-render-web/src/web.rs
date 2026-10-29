@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 //! The `wasm-bindgen` surface. Browsers are single-threaded here: the
-//! renderer lives in an `Rc<RefCell<…>>` so an asynchronous readback can
-//! own it while it waits. A shared state marks the renderer busy from the
-//! moment `readFrame` is called until it settles, so every call made in the
-//! meantime fails with the `busy` code instead of racing the frame, and
-//! marks it destroyed once `destroy` is called. Destroying also signals the
-//! renderer lost, so a readback still waiting ends at its next poll.
+//! renderer lives in an `Rc<RefCell<…>>` so an asynchronous readback or
+//! `finish` can own it while it waits. A shared state marks the renderer
+//! busy from the moment `readFrame` or `finish` is called until it settles,
+//! so every call made in the meantime fails with the `busy` code instead of
+//! racing the frame, and marks it destroyed once `destroy` is called.
+//! Destroying also signals the renderer lost, so a wait still in progress
+//! ends at its next poll.
 
 use crate::{
     errors::{CodedError, parse_digest, safe_integer},
@@ -114,7 +115,7 @@ fn render_error(error: &tilewright_render_api::Error) -> JsError {
 fn busy() -> JsError {
     js_error(CodedError::new(
         "busy",
-        "the renderer is reading a frame back; wait for readFrame to settle",
+        "the renderer is waiting for the GPU; wait for readFrame or finish to settle",
     ))
 }
 
@@ -477,6 +478,38 @@ impl WebRenderer {
         {
             inner.release();
         }
+    }
+
+    /// Resolves once the GPU has finished every frame submitted so far,
+    /// presented or read back: frame-time measurement awaits it after
+    /// `render`. Like a readback, it keeps the renderer busy until it
+    /// settles.
+    pub fn finish(&self) -> js_sys::Promise {
+        if let Err(error) = self.ready() {
+            return js_sys::Promise::reject(&error.into());
+        }
+        self.state.busy.set(true);
+        let guard = Busy(Rc::clone(&self.state));
+        let inner = Rc::clone(&self.inner);
+        // The borrow is held while waiting; the busy state turns every other
+        // call away.
+        #[allow(clippy::await_holding_refcell_ref)]
+        wasm_bindgen_futures::future_to_promise(async move {
+            let mut inner = inner.try_borrow_mut().map_err(|_| busy())?;
+            // Destroyed before the wait started: nothing else matters.
+            if guard.0.destroyed.get() {
+                inner.release();
+                return Err(destroyed().into());
+            }
+            let finished = inner.renderer()?.finish().await;
+            if guard.0.destroyed.get() {
+                inner.release();
+                return Err(destroyed().into());
+            }
+            drop(guard);
+            finished.map_err(|error| render_error(&error))?;
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
     /// Renders the current scene with the CPU reference renderer: the

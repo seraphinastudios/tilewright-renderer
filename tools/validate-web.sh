@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Validates the browser package: strict Clippy for both wasm32 bundles and
-# the test hooks, the package build, and the headless Chromium tests for
-# WebGL2 and WebGPU, context loss and traps. Set TILEWRIGHT_REQUIRE_WEBGPU=0
-# to skip, rather than fail, the WebGPU test where the browser offers no
-# WebGPU adapter.
+# the test hooks, the package build, the headless Chromium tests for WebGL2
+# and WebGPU, context loss and traps, and a short run of the frame-time
+# harness. Set TILEWRIGHT_REQUIRE_WEBGPU=0 to skip, rather than fail, the
+# WebGPU test where the browser offers no WebGPU adapter; it also runs the
+# harness on WebGL2 only.
 set -euo pipefail
 
 repository=$(git rev-parse --show-toplevel)
@@ -29,3 +30,14 @@ trap rebuild_without_hooks EXIT
 export TILEWRIGHT_WEB_TEST_HOOKS=1
 tools/build-web.sh
 (cd packages/tilewright-render && TILEWRIGHT_REQUIRE_WEBGPU="${TILEWRIGHT_REQUIRE_WEBGPU:-1}" npm test)
+
+# Keep the browser frame-time harness working; its numbers are not checked.
+# With TILEWRIGHT_REQUIRE_WEBGPU=0 it runs on WebGL2 only, so a browser
+# without WebGPU passes here too.
+bench_backend=all
+if [ "${TILEWRIGHT_REQUIRE_WEBGPU:-1}" = 0 ]; then
+  bench_backend=webgl2
+fi
+(cd packages/tilewright-render \
+  && npm run bench -- --backend "${bench_backend}" --width 320 --height 180 --characters 50 \
+    --frames 5 --warmup 1)

@@ -42,7 +42,7 @@ const GROUND = [
   ],
 ];
 
-function frameTexel(column, row, x, y) {
+export function frameTexel(column, row, x, y) {
   const opaque = ([r, g, b]) => [r, g, b, 255];
   if (row === 0) {
     const phase = [0, 1, 0, -1][column];

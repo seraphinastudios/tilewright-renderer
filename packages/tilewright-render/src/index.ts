@@ -623,6 +623,15 @@ export class TilewrightRenderer {
   }
 
   /**
+   * Resolves once the GPU has finished every frame submitted so far,
+   * presented or read back: await it after `render` to measure a frame's
+   * GPU time.
+   */
+  async finish(): Promise<void> {
+    await untilTrapped(this.bundle, () => this.#renderer().finish(), () => undefined);
+  }
+
+  /**
    * Renders the submitted scene with the CPU reference renderer: the frame
    * every backend matches within one 8-bit step, with exact picking planes.
    */

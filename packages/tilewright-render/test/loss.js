@@ -92,6 +92,29 @@ async function run() {
     WebGL2RenderingContext.prototype.isContextLost = isContextLost;
   }
 
+  // finish() waiting for the GPU ends the same ways: with device-lost when
+  // the context is lost, and, when the loss is hidden, only on destroy.
+  const finishing = await renderer('finishing');
+  finishing.renderer.render();
+  const lostFinish = finishing.renderer.finish();
+  await Promise.resolve();
+  lose(finishing.canvas);
+  const finishCodes = [await settled(lostFinish, 5_000)];
+  finishing.renderer.destroy();
+  const hidden = await renderer('hidden');
+  WebGL2RenderingContext.prototype.isContextLost = () => false;
+  try {
+    hidden.renderer.render();
+    const abandoned = hidden.renderer.finish();
+    await Promise.resolve();
+    lose(hidden.canvas);
+    finishCodes.push(await settled(abandoned, 300));
+    hidden.renderer.destroy();
+    finishCodes.push(await settled(abandoned, 5_000));
+  } finally {
+    WebGL2RenderingContext.prototype.isContextLost = isContextLost;
+  }
+
   // A canvas whose context is lost is refused with a typed error rather
   // than trapping the module.
   const lostCodes = [
@@ -131,6 +154,7 @@ async function run() {
     duringCodes,
     destroyedCodes,
     lostCodes,
+    finishCodes,
     reusedWhite,
     other: { width: frame.width, presented: otherPresented, white: frame.rgba[0] },
   };
