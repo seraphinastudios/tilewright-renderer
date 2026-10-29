@@ -1312,18 +1312,61 @@ type GpuInitialization = (
 );
 
 /// The wgpu backends a preference allows. `Automatic` means Vulkan or
-/// Direct3D 12 natively, and WebGPU or WebGL2 in browsers.
-fn preferred_backends(preference: BackendPreference) -> wgpu::Backends {
-    match preference {
+/// Direct3D 12 natively, and WebGPU or WebGL2 in browsers. Vulkan needs
+/// `vulkan_loader` (see [`vulkan_loader_installed`]): without it,
+/// `Automatic` uses Direct3D 12 alone and `Vulkan` is unavailable.
+fn preferred_backends(
+    preference: BackendPreference,
+    vulkan_loader: bool,
+) -> Result<wgpu::Backends, Error> {
+    let vulkan = if vulkan_loader {
+        wgpu::Backends::VULKAN
+    } else {
+        wgpu::Backends::empty()
+    };
+    Ok(match preference {
         BackendPreference::Automatic if cfg!(target_arch = "wasm32") => {
             wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL
         }
-        BackendPreference::Automatic => wgpu::Backends::VULKAN | wgpu::Backends::DX12,
+        BackendPreference::Automatic => vulkan | wgpu::Backends::DX12,
+        BackendPreference::Vulkan if !vulkan_loader => {
+            return Err(Error::BackendUnavailable(format!(
+                "no vulkan-1.dll in the Windows system directory for requested {preference:?} backend policy"
+            )));
+        }
         BackendPreference::Vulkan => wgpu::Backends::VULKAN,
         BackendPreference::Direct3D12 => wgpu::Backends::DX12,
         BackendPreference::WebGpu => wgpu::Backends::BROWSER_WEBGPU,
         BackendPreference::WebGl2 => wgpu::Backends::GL,
-    }
+    })
+}
+
+/// Whether wgpu may load the Vulkan loader. On Windows it loads
+/// `vulkan-1.dll` by bare name, and when the system directory has no copy
+/// the search goes on into the current directory, so Vulkan is used only
+/// when `%SystemRoot%\System32` holds the loader, as every Vulkan runtime
+/// installs it. Other platforms' loaders do not search the current
+/// directory, and Apple platforms have no Vulkan backend here.
+fn vulkan_loader_installed() -> bool {
+    !cfg!(windows)
+        || std::env::var_os("SystemRoot").is_some_and(|root| {
+            std::path::Path::new(&root)
+                .join("System32")
+                .join("vulkan-1.dll")
+                .is_file()
+        })
+}
+
+/// The instance options: wgpu's own defaults and `WGPU_*` environment
+/// variables, except that Direct3D 12 compiles shaders with FXC
+/// (`d3dcompiler_47.dll`, part of Windows) unless `WGPU_DX12_COMPILER`
+/// names another compiler. wgpu's default would load `dxcompiler.dll` by
+/// bare name, and Windows' search order can then find it in the current
+/// directory.
+fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::Fxc;
+    descriptor.with_env()
 }
 
 async fn initialize_gpu(
@@ -1332,8 +1375,8 @@ async fn initialize_gpu(
     context_lost: impl Fn() -> bool,
     startup: Stopwatch,
 ) -> Result<GpuInitialization, Error> {
-    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-    descriptor.backends &= preferred_backends(preference);
+    let mut descriptor = instance_descriptor();
+    descriptor.backends &= preferred_backends(preference, vulkan_loader_installed())?;
     if descriptor.backends.is_empty() {
         return Err(Error::BackendUnavailable(format!(
             "no backend enabled for requested {preference:?} backend policy"
@@ -3148,6 +3191,69 @@ mod tests {
         let mut state = SurfaceState::Invalidated;
         assert!(state.take_matching(8, 4).is_none());
         assert!(matches!(state, SurfaceState::Invalidated));
+    }
+
+    #[test]
+    fn dx12_shader_compiler_is_fxc_unless_the_environment_names_one() {
+        let selected = super::instance_descriptor()
+            .backend_options
+            .dx12
+            .shader_compiler;
+        let expected = wgpu::Dx12Compiler::from_env().unwrap_or(wgpu::Dx12Compiler::Fxc);
+        assert_eq!(format!("{selected:?}"), format!("{expected:?}"));
+    }
+
+    /// Changing the environment is unsafe, so the test above reruns in child
+    /// processes with `WGPU_DX12_COMPILER` unset, invalid, and set.
+    #[test]
+    fn an_explicit_dx12_compiler_variable_overrides_the_fxc_default() {
+        const CHILD: &str = "tests::dx12_shader_compiler_is_fxc_unless_the_environment_names_one";
+        for value in [None, Some("unknown"), Some("auto"), Some("dxc")] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([CHILD, "--exact", "--test-threads=1"]);
+            match value {
+                Some(value) => child.env("WGPU_DX12_COMPILER", value),
+                None => child.env_remove("WGPU_DX12_COMPILER"),
+            };
+            let output = child.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains(" 1 passed;"),
+                "WGPU_DX12_COMPILER={value:?}: {stdout}{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
+    #[test]
+    fn vulkan_is_requested_only_with_its_system_loader() {
+        use super::{preferred_backends, vulkan_loader_installed};
+        use tilewright_render_api::{BackendPreference, Error};
+        use wgpu::Backends;
+        assert_eq!(
+            preferred_backends(BackendPreference::Automatic, true),
+            Ok(Backends::VULKAN | Backends::DX12)
+        );
+        assert_eq!(
+            preferred_backends(BackendPreference::Automatic, false),
+            Ok(Backends::DX12)
+        );
+        assert_eq!(
+            preferred_backends(BackendPreference::Vulkan, true),
+            Ok(Backends::VULKAN)
+        );
+        assert!(matches!(
+            preferred_backends(BackendPreference::Vulkan, false),
+            Err(Error::BackendUnavailable(message)) if message.contains("vulkan-1.dll")
+        ));
+        for loader in [true, false] {
+            assert_eq!(
+                preferred_backends(BackendPreference::Direct3D12, loader),
+                Ok(Backends::DX12)
+            );
+        }
+        // Only Windows searches the current directory for the loader.
+        assert!(cfg!(windows) || vulkan_loader_installed());
     }
 
     #[test]
