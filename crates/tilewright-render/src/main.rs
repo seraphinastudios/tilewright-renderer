@@ -811,4 +811,89 @@ mod tests {
         assert!(persist_new(&directory.path().join("missing/frame"), &[b"x"]).is_err());
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
+
+    #[test]
+    fn fractional_zoom_ground_matches_the_reference_when_a_gpu_adapter_is_available() {
+        use tilewright_render_api::{RenderRequest, Renderer};
+        use tilewright_render_testkit::{
+            GroundArt, ReferenceRenderer, ground_grid_provider, ground_grid_view,
+        };
+        use tilewright_render_wgpu::WgpuRenderer;
+        use tilewright_render_world::{Camera, Projection, compile};
+        use tilewright_scene::{Sampling, SceneLimits};
+        let isometric = |tile_width, tile_height| Projection::Isometric {
+            tile_width,
+            tile_height,
+        };
+        let (width, height) = (61, 47);
+        let Ok(mut renderer) = WgpuRenderer::new(super::target(width, height)) else {
+            eprintln!("skipping GPU ground comparison: no supported adapter");
+            return;
+        };
+        // Checker art shows every texel choice. Tile-aligned cameras at the
+        // first four zooms, and just off zoom 1, put texel boundaries on or a
+        // hair from pixel centres, where the backends must still agree.
+        let near_one = [
+            f32::from_bits(1.0_f32.to_bits() - 1),
+            f32::from_bits(1.0_f32.to_bits() + 1),
+        ];
+        let zooms = [
+            0.5,
+            0.75,
+            1.25,
+            1.5,
+            0.7,
+            1.1,
+            1.3,
+            near_one[0],
+            near_one[1],
+        ];
+        for (projection, art) in [
+            (Projection::TopDown { tile_size: 32 }, GroundArt::Checker),
+            (isometric(48, 24), GroundArt::Checker),
+            (isometric(48, 24), GroundArt::Diamond),
+            (isometric(64, 32), GroundArt::Diamond),
+        ] {
+            for (zoom, center) in zooms.iter().flat_map(|zoom| {
+                [[0.0, 0.0], [0.5, 0.5], [3.37, 7.81]].map(|center| (*zoom, center))
+            }) {
+                let camera = Camera {
+                    projection,
+                    center,
+                    zoom,
+                    width,
+                    height,
+                    sampling: Sampling::Nearest,
+                };
+                let scene = compile(
+                    &ground_grid_view(camera, art).unwrap(),
+                    SceneLimits::default(),
+                )
+                .unwrap();
+                let request = RenderRequest {
+                    scene: &scene,
+                    resources: ground_grid_provider(projection, art).unwrap(),
+                };
+                let frame = renderer.render(request.clone()).unwrap();
+                let reference = ReferenceRenderer::new(super::target(width, height))
+                    .unwrap()
+                    .render(request)
+                    .unwrap();
+                // The GPU samples the same opaque texels everywhere, so no
+                // background shows through on either backend.
+                assert!(reference.semantic_ids.iter().all(|id| *id != 0));
+                assert_eq!(frame.semantic_ids, reference.semantic_ids);
+                let difference = frame
+                    .rgba8
+                    .iter()
+                    .zip(&reference.rgba8)
+                    .map(|(gpu, cpu)| gpu.abs_diff(*cpu))
+                    .max();
+                assert!(
+                    difference <= Some(1),
+                    "{projection:?} {art:?} zoom {zoom} centre {center:?}: {difference:?}"
+                );
+            }
+        }
+    }
 }
