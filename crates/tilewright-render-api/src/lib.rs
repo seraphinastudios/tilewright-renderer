@@ -12,8 +12,11 @@ use tilewright_scene::SceneBundle;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendPreference {
     /// Vulkan or Direct3D 12 natively; WebGPU in browsers that support it,
-    /// and WebGL2 otherwise.
+    /// and WebGL2 otherwise. On Windows, Vulkan is a candidate only when its
+    /// loader is installed in the system directory.
     Automatic,
+    /// Vulkan; on Windows, only when its loader is installed in the system
+    /// directory.
     Vulkan,
     Direct3D12,
     /// Browser WebGPU.

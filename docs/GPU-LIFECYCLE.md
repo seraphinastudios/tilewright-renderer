@@ -40,6 +40,16 @@ time, maximum 2D texture dimension, and buffer limit. Explicit Vulkan/D3D12
 requests never cross-fallback to the other backend. Adapter and surface
 capability failures include the requested policy and missing capability.
 
+On Windows, Vulkan is enabled only when its loader, `vulkan-1.dll`, is
+installed in the system directory. Without it `Automatic` enables D3D12 alone,
+and an explicit Vulkan request fails with `BackendUnavailable`. Whenever D3D12
+is enabled, the instance loads the FXC shader compiler that ships with Windows
+as it is created, whichever adapter is then selected, and D3D12 pipelines
+compile with FXC. `WGPU_DX12_COMPILER` selects another compiler; an
+application that enables wgpu's `static-dxc` feature must set it to
+`staticdxc` to use that compiler. The [security
+policy](../SECURITY.md#native-libraries-on-windows) explains both rules.
+
 The sole unsafe assertion is private to `raw_handle_bridge`: an ephemeral
 wrapper is declared `Send + Sync` only to synchronously copy immutable raw SDL
 handles into wgpu. It is never stored, sent, or used for an SDL operation, and
