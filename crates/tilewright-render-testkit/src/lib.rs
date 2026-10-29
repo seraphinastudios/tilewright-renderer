@@ -4,12 +4,17 @@
 #![forbid(unsafe_code)]
 
 mod atlas;
+#[cfg(test)]
+mod seams;
 mod world;
 pub use atlas::{
     ATLAS_FRAME_SIZE, ATLAS_ID, ATLAS_SHEET, atlas_digest, atlas_provider, atlas_resource,
     atlas_scene, character_sheet,
 };
-pub use world::{iso_world_scene, top_down_world_scene, world_provider, world_texture};
+pub use world::{
+    GroundArt, ground_grid_provider, ground_grid_scene, ground_grid_view, iso_world_scene,
+    top_down_world_scene, world_provider, world_texture,
+};
 
 use sha2::{Digest, Sha256};
 use std::{

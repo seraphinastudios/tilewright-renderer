@@ -4,7 +4,7 @@
 //! Procedural textures and world views for the conformance corpus. Every
 //! texture is generated from constants; no game art is involved.
 
-use crate::FakeResourceProvider;
+use crate::{FakeResourceProvider, texture_envelope};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tilewright_render_resources::Error as ResourceError;
@@ -20,6 +20,7 @@ const PILLAR: u64 = 103;
 const ORB: u64 = 104;
 const MEADOW: u64 = 105;
 const STONE: u64 = 106;
+const GROUND_GRID: u64 = 201;
 
 fn atx1(width: u32, height: u32, pixels: &[[u8; 4]]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(12 + pixels.len() * 4);
@@ -317,4 +318,191 @@ pub fn top_down_world_scene(
         ground_layer_ranks: 3,
         objects,
     })
+}
+
+/// Art for [`ground_grid_view`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GroundArt {
+    /// Opaque art filling its whole quad: the tile square in top-down
+    /// projection, or the isometric tile's bounding rectangle.
+    Full,
+    /// An opaque isometric diamond one pixel shorter than its tile, the usual
+    /// shape of isometric ground art. Rows widen by four texels from the
+    /// tips to the full width at the middle, so the diamonds of tiles twice
+    /// as wide as they are tall interlock exactly. Top-down tiles draw
+    /// [`GroundArt::Full`] instead.
+    Diamond,
+    /// [`GroundArt::Full`] in a checkerboard of single texels in two
+    /// colours, so the texel every pixel samples shows in the picture.
+    Checker,
+}
+
+/// Largest tile side the world compiler accepts, which bounds the ground
+/// grid's texture before any of it is built.
+const MAXIMUM_TILE_SIDE: u32 = 1_024;
+
+/// The ground grid texture's size, or `None` for a tile side of 0 or over
+/// [`MAXIMUM_TILE_SIDE`].
+fn ground_grid_size(projection: Projection, art: GroundArt) -> Option<(u32, u32, bool)> {
+    let (width, height, diamond) = match projection {
+        Projection::TopDown { tile_size } => (tile_size, tile_size, false),
+        Projection::Isometric {
+            tile_width,
+            tile_height,
+        } => match art {
+            GroundArt::Full | GroundArt::Checker => (tile_width, tile_height, false),
+            GroundArt::Diamond => (tile_width, tile_height.saturating_sub(1).max(1), true),
+        },
+    };
+    ((1..=MAXIMUM_TILE_SIDE).contains(&width) && (1..=MAXIMUM_TILE_SIDE).contains(&height))
+        .then_some((width, height, diamond))
+}
+
+/// The ground grid's texture: its size and `ATX1` envelope with digest. At
+/// most 1,024 texels on a side, so at most 4 MiB.
+fn ground_grid_texture(
+    (width, height, diamond): (u32, u32, bool),
+    art: GroundArt,
+) -> (Vec<u8>, Digest256) {
+    let (columns, rows) = (width as usize, height as usize);
+    let mut pixels = vec![[0_u8; 4]; columns * rows];
+    for row in 0..rows {
+        let half = if diamond {
+            (2 + 2 * row.min(rows - 1 - row)).min(columns / 2)
+        } else {
+            columns
+        };
+        for column in 0..columns {
+            if column + half >= columns / 2 && column < columns / 2 + half {
+                pixels[row * columns + column] =
+                    if art == GroundArt::Checker && (row + column) % 2 != 0 {
+                        [40, 70, 200, 255]
+                    } else {
+                        [170, 140, 90, 255]
+                    };
+            }
+        }
+    }
+    texture_envelope(width, height, &pixels)
+}
+
+/// A provider holding the texture [`ground_grid_view`] draws for this
+/// projection and art.
+///
+/// # Errors
+/// Returns [`ResourceError::LimitExceeded`], before building the texture,
+/// for a tile side of 0 or over 1,024 px, which the world compiler rejects,
+/// or a provider availability error if its internal lock is poisoned.
+pub fn ground_grid_provider(
+    projection: Projection,
+    art: GroundArt,
+) -> Result<Arc<FakeResourceProvider>, ResourceError> {
+    let size = ground_grid_size(projection, art).ok_or(ResourceError::LimitExceeded)?;
+    let provider = Arc::new(FakeResourceProvider::default());
+    let (bytes, _) = ground_grid_texture(size, art);
+    provider.insert(ResourceId(GROUND_GRID), 1, bytes)?;
+    Ok(provider)
+}
+
+/// Flat ground tiles covering the camera's whole view and two tiles past
+/// it, all showing one opaque texture: a surface with no holes, for seam
+/// and coverage checks. Semantic IDs count from 1 along each row of tiles,
+/// rows from the lowest `y`.
+///
+/// # Errors
+/// Returns [`tilewright_scene::Error::LimitExceeded`], before allocating
+/// anything, for a tile side of 0 or over 1,024 px, which the world compiler
+/// rejects, when the view needs more tiles than the default scene quad
+/// budget, or for a zoom at which the view has no finite extent.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+pub fn ground_grid_view(
+    camera: Camera,
+    art: GroundArt,
+) -> Result<WorldView, tilewright_scene::Error> {
+    let size =
+        ground_grid_size(camera.projection, art).ok_or(tilewright_scene::Error::LimitExceeded)?;
+    // The view's corners in tile coordinates bound the tiles in view.
+    let zoom = f64::from(camera.zoom);
+    let tile = |x: u32, y: u32| -> [f64; 2] {
+        let dx = (f64::from(x) - f64::from(camera.width) / 2.0) / zoom;
+        let dy = (f64::from(y) - f64::from(camera.height) / 2.0) / zoom;
+        let [across, down] = match camera.projection {
+            Projection::TopDown { tile_size } => {
+                let size = f64::from(tile_size);
+                return [camera.center[0] + dx / size, camera.center[1] + dy / size];
+            }
+            Projection::Isometric {
+                tile_width,
+                tile_height,
+            } => [
+                2.0 * dx / f64::from(tile_width),
+                2.0 * dy / f64::from(tile_height),
+            ],
+        };
+        [
+            camera.center[0] + f64::midpoint(across, down),
+            camera.center[1] + (down - across) / 2.0,
+        ]
+    };
+    let corners = [
+        tile(0, 0),
+        tile(camera.width, 0),
+        tile(0, camera.height),
+        tile(camera.width, camera.height),
+    ];
+    let along = |axis: usize| corners.iter().map(move |corner| corner[axis]);
+    let low = |axis: usize| along(axis).fold(f64::INFINITY, f64::min).floor() - 2.0;
+    let high = |axis: usize| along(axis).fold(f64::NEG_INFINITY, f64::max).ceil() + 2.0;
+    let [left, top, right, bottom] = [low(0), low(1), high(0), high(1)];
+    let tiles = (right - left + 1.0) * (bottom - top + 1.0);
+    if !(tiles.is_finite() && tiles <= SceneLimits::default().maximum_quads as f64) {
+        return Err(tilewright_scene::Error::LimitExceeded);
+    }
+    let (_, digest) = ground_grid_texture(size, art);
+    let texture = TextureRef {
+        id: ResourceId(GROUND_GRID),
+        revision: 1,
+        digest,
+        width: size.0,
+        height: size.1,
+    };
+    let mut objects = Vec::with_capacity(tiles as usize);
+    for y in top as i64..=bottom as i64 {
+        for x in left as i64..=right as i64 {
+            let id = u32::try_from(objects.len() + 1).unwrap_or(u32::MAX);
+            objects.push(WorldObject::new(
+                SemanticId(id),
+                [x, y],
+                0,
+                Anchor::Ground,
+                texture,
+            ));
+        }
+    }
+    Ok(WorldView {
+        revision: 1,
+        clock_millis: 0,
+        camera,
+        clear_color: [0.0, 0.0, 0.0, 1.0],
+        heights: HeightField::empty(),
+        stretch: Stretch::default(),
+        ground_layer_ranks: 1,
+        objects,
+    })
+}
+
+/// [`ground_grid_view`] compiled into a scene.
+///
+/// # Errors
+/// Returns the view's error, or a scene validation error for a camera
+/// outside scene bounds.
+pub fn ground_grid_scene(
+    camera: Camera,
+    art: GroundArt,
+) -> Result<SceneBundle, tilewright_scene::Error> {
+    compiled(&ground_grid_view(camera, art)?)
 }
