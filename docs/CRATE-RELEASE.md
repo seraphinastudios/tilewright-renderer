@@ -96,7 +96,12 @@ digests, source release, revision and verified producer. A preexisting intent
 blocks another automatic attempt even when public registry reads still report
 absence. The publisher's contents-write permission serves this reservation;
 `GH_INTENT_TOKEN` is exposed only to the upload step and is stripped before
-Cargo or signature-verifier subprocesses.
+Cargo or signature-verifier subprocesses. The precheck, source tree lookup and
+post-creation readback use that same GitHub intent authority, refuse redirects
+and request cache revalidation. Reads retry at most three times for transport
+failures or HTTP 502/503/504; only the post-creation readback also retries HTTP
+404 to allow propagation. Creation requests and registry PUTs are never retried.
+An existing intent or a mismatched readback still stops publication.
 
 Retain an intent after ambiguous upload results. The owner must establish whether
 the registry accepted the write; public absence alone is insufficient. Only
@@ -191,7 +196,15 @@ same advice for any other bootstrap with this account.
 ### Stopped bootstrap uploads
 
 The bootstrap never removes an intent. When an upload fails it stops, keeps
-the intent and prints the recovery for that crate:
+the intent and prints the recovery for that crate. Static stage diagnostics
+distinguish a stop before the current crate's PUT from an attempted PUT with a
+possibly unresolved outcome; they never print exception bodies or credentials.
+A reservation failure identifies its precheck, source tree read, commit creation,
+ref creation or readback stage. It makes no registry PUT for that coordinate in
+that run. Any created intent remains reserved and still requires explicit owner
+recovery; this message says nothing about writes from other runs.
+
+For failures after a PUT:
 
 - **HTTP 429 (definite rejection).** crates.io checks its rate limits before
   it reads the archive, and it publishes nothing for a 429. The bootstrap prints
