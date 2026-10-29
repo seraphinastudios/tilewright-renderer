@@ -741,6 +741,78 @@ impl Projector {
         ]
     }
 
+    /// The corners and texture coordinates of ground art spanning
+    /// `top_left` to `bottom_right` in world pixels before the tile's
+    /// `rise`.
+    ///
+    /// Each edge is projected and snapped to the pixel grid on its own, and
+    /// the quad covers exactly the pixels whose centres lie inside the art.
+    /// Ground that meets its neighbour at a world edge computes that edge
+    /// from the same value, so the two share one pixel edge at every zoom,
+    /// view size and camera position: tiled ground leaves no gap and no
+    /// overlap between quads. The texture coordinates keep every texel where
+    /// the unsnapped art puts it, so art that interlocks inside its quads,
+    /// such as isometric diamonds, interlocks the same way in every tile.
+    ///
+    /// At whole-number zooms the art first moves by at most half a pixel
+    /// onto the pixel grid, rounding halves up as it always has, so pixel
+    /// centres fall on texel centres and the art keeps its whole texture.
+    /// The shift is taken from one reference point per edge class: art whose
+    /// edges lie a whole number of art pixels apart at the same rise, which
+    /// includes every neighbour sharing an edge, shares that point and so
+    /// moves by exactly the same amount. No shift can put every texel
+    /// boundary on a pixel edge at other zooms, so there all ground moves by
+    /// the same [`GROUND_TIE_OFFSET_PX`] instead.
+    fn ground_quad(
+        &self,
+        top_left: [f64; 2],
+        bottom_right: [f64; 2],
+        rise: f64,
+    ) -> ([[f64; 2]; 4], [[f32; 2]; 4]) {
+        let lifted = |point: [f64; 2]| self.screen([point[0], point[1] - rise]);
+        let (start, end) = (lifted(top_left), lifted(bottom_right));
+        let whole = self.zoom.fract() == 0.0;
+        // The class's point nearest the camera, so it keeps its precision far
+        // from the world origin.
+        let reference = lifted(std::array::from_fn(|index| {
+            self.camera_world[index].floor() + top_left[index].rem_euclid(1.0)
+        }));
+        let axis = |index: usize| {
+            let (shift, margin) = if whole {
+                (snap(reference[index]) - reference[index], 0.0)
+            } else {
+                (-GROUND_TIE_OFFSET_PX, GROUND_UV_MARGIN)
+            };
+            let (start, end) = (start[index] + shift, end[index] + shift);
+            let edges = [start, end].map(centre_edge);
+            let extent = end - start;
+            // Whole-zoom art spans whole pixels and keeps every pixel centre
+            // half a pixel inside its edges. Art under a pixel across covers
+            // at most one pixel centre. Use that centre's actual coordinate
+            // at both edges to preserve its texel without unbounded UVs.
+            let uvs = if whole {
+                [0.0, 1.0]
+            } else if extent < 1.0 {
+                let sample = if edges[0] < edges[1] {
+                    margin + (edges[0] + 0.5 - start) / extent * (1.0 - 2.0 * margin)
+                } else {
+                    0.5
+                };
+                [sample, sample]
+            } else {
+                edges.map(|edge| margin + (edge - start) / extent * (1.0 - 2.0 * margin))
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            (edges, uvs.map(|uv| uv as f32))
+        };
+        let ([left, right], [u0, u1]) = axis(0);
+        let ([top, bottom], [v0, v1]) = axis(1);
+        (
+            [[left, top], [right, top], [right, bottom], [left, bottom]],
+            [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+        )
+    }
+
     fn order_key(&self, object: &WorldObject, repeat: bool, ground_ranks: u16) -> OrderKey {
         let front_x = object.tile[0] + i64::from(object.footprint[0]) - 1;
         let front_y = object.tile[1] + i64::from(object.footprint[1]) - 1;
@@ -965,15 +1037,24 @@ impl Projector {
                         point
                     };
                     if flat(&heights) {
-                        let center = self.screen(self.world(
-                            lattice[0].0 + 0.5,
-                            lattice[0].1 + 0.5,
-                            heights[0],
-                        ));
-                        let left = snap(center[0] - center_x * self.zoom);
-                        let top = snap(center[1] - center_y * self.zoom);
-                        let (width, height) = (art_w * self.zoom, art_h * self.zoom);
-                        push(base, rect(left, top, width, height), [width, height], false)?;
+                        // The art's edges in world pixels before the tile's
+                        // rise are multiples of half a pixel, so exact and
+                        // equal wherever neighbouring art meets; each edge
+                        // then subtracts the same rise once.
+                        #[allow(clippy::cast_precision_loss)]
+                        let (across, down) =
+                            ((tile_x - tile_y) as f64, (tile_x + tile_y + 1) as f64);
+                        let left = across * f64::from(tile_width) / 2.0 - center_x;
+                        let top = down * f64::from(diamond_height) / 2.0 - center_y;
+                        let rise = heights[0] * ppu;
+                        let (corners, uvs) =
+                            self.ground_quad([left, top], [left + art_w, top + art_h], rise);
+                        push(
+                            Quad { uvs, ..base },
+                            corners,
+                            [art_w * self.zoom, art_h * self.zoom],
+                            false,
+                        )?;
                     } else {
                         let steps = MESH_STEPS;
                         for row in 0..steps {
@@ -1009,18 +1090,19 @@ impl Projector {
                 }
                 Projection::TopDown { tile_size } => {
                     #[allow(clippy::cast_precision_loss)]
-                    let origin = self.screen(self.world(
-                        object.tile[0] as f64,
-                        object.tile[1] as f64,
-                        f64::from(tile_height),
-                    ));
+                    let [x, y] = object.tile.map(|value| value as f64);
+                    let [across, down] = object.footprint.map(f64::from);
+                    let rise = f64::from(tile_height) * f64::from(self.stretch.pixels_per_unit);
                     let size = f64::from(tile_size) * self.zoom;
-                    let width = size * f64::from(object.footprint[0]);
-                    let height = size * f64::from(object.footprint[1]);
+                    let (corners, uvs) = self.ground_quad(
+                        self.world(x, y, 0.0),
+                        self.world(x + across, y + down, 0.0),
+                        rise,
+                    );
                     push(
-                        base,
-                        rect(snap(origin[0]), snap(origin[1]), width, height),
-                        [width, height],
+                        Quad { uvs, ..base },
+                        corners,
+                        [size * across, size * down],
                         false,
                     )?;
                 }
@@ -1176,11 +1258,46 @@ fn snap(value: f64) -> f64 {
     (value + 0.5).floor()
 }
 
+/// The pixel edge before the first pixel whose centre lies at or after
+/// `value`. Edges snapped this way cover the pixel centres from a start
+/// (inclusive) to an end (exclusive), the same rule by which nearest sampling
+/// gives a centre on a texel boundary to the later texel. An edge at zero is
+/// positive zero, as `snap` gives, so quads keep the same bits.
+fn centre_edge(value: f64) -> f64 {
+    (value - 0.5).ceil() + 0.0
+}
+
 fn rect(left: f64, top: f64, width: f64, height: f64) -> [[f64; 2]; 4] {
     let right = left + width;
     let bottom = top + height;
     [[left, top], [right, top], [right, bottom], [left, bottom]]
 }
+
+/// How far inside the texture's edges ground art maps its own edges, in
+/// texture coordinates, at zooms that are not whole numbers. Every pixel
+/// centre a ground quad covers lies inside its unsnapped art, but `f32`
+/// interpolation on any backend could carry a centre on the art's edge just
+/// outside it, where texels read as transparent. The margin keeps such
+/// centres inside. It grows the art by 1/65,536 of its size each way, so a
+/// pixel centre lying on the boundary between neighbouring art, to within
+/// that much, is drawn by both rather than by neither; painter order picks
+/// the one that shows.
+const GROUND_UV_MARGIN: f64 = 1.0 / 65_536.0;
+
+/// How far all ground moves up and left, in pixels, at zooms that are not
+/// whole numbers.
+///
+/// With the camera at a round position, such as on a tile corner at zoom
+/// 0.5, 0.75, 1.25 or 1.5, texel boundaries land exactly on pixel centres.
+/// Nearest sampling gives such a centre the later texel, as whole-zoom art
+/// always does, but the [`GROUND_UV_MARGIN`] moves boundaries by up to
+/// 1/65,536 of the art's size about its centre, which would give it the
+/// earlier texel in the right or lower half of each tile and stripe periodic
+/// art. Moving the art by 1/128 px puts those centres just inside the later
+/// texel across the whole tile. Ties remain only for cameras exactly 1/128 px
+/// off a round position, and within art more than 512 px across, where the
+/// margin outgrows the offset near the art's edges.
+const GROUND_TIE_OFFSET_PX: f64 = 1.0 / 128.0;
 
 /// Rows and columns of the mesh a bent isometric tile becomes.
 const MESH_STEPS: u16 = 4;
