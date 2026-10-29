@@ -1,10 +1,14 @@
 # GPU lifecycle and ownership
 
-One `WgpuRenderer` owns one adapter, device, queue, and pipeline. Every offscreen
-frame uses the same render path: validate scene/target agreement, reuse bounded
-color/depth/readback targets and a geometrically grown vertex buffer, submit
-once, wait for bounded readback,
-strip WebGPU row padding, and produce exact semantic planes. Resize validates
+One `WgpuRenderer` owns one adapter, device, queue, and pipeline. Every frame
+read back offscreen uses the same render path: validate scene/target
+agreement, reuse bounded color/depth/readback targets and a geometrically
+grown vertex buffer, submit once, wait for bounded readback, strip WebGPU row
+padding, and produce exact semantic planes. `draw` takes the same path up to
+the submission, without the readback or the semantic planes, and `finish`
+waits until the GPU has finished every frame submitted so far, presented or
+offscreen; the frame-time harness times a native frame with them, and the
+browser bindings expose `finish` for the browser harness. Resize validates
 the new total pixel budget and increments recovery metrics.
 
 The SDL bridge borrows an existing window or creates one proof window, then asks

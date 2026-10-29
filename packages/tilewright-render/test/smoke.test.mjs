@@ -100,7 +100,15 @@ for (const backend of ['webgl2', 'webgpu']) {
     assert.equal(result.conflict, 'invalid-texture');
     assert.equal(result.stale, 'unknown-texture');
     assert.deepEqual(result.busyCodes, ['busy', 'busy', 'busy']);
-    assert.deepEqual(result.destroyedCodes, ['destroyed', 'destroyed', 'destroyed']);
+    assert.deepEqual(result.finishBusy, ['busy', 'busy', 'busy']);
+    assert.equal(result.finished, 'none');
+    assert.deepEqual(result.destroyedCodes, [
+      'destroyed',
+      'destroyed',
+      'destroyed',
+      'destroyed',
+      'destroyed',
+    ]);
     assert.equal(result.wrongSize, 'invalid-target');
     assert.equal(result.forgedRecords, 'invalid-scene');
     // The failed submits left the scene with a frame outside its texture.
@@ -130,6 +138,7 @@ test('a lost WebGL2 context fails calls and readbacks with device-lost', TIMEOUT
   assert.deepEqual(result.beforeCodes, ['device-lost', 'device-lost']);
   assert.deepEqual(result.duringCodes, ['device-lost', 'device-lost']);
   assert.deepEqual(result.destroyedCodes, ['pending', 'destroyed']);
+  assert.deepEqual(result.finishCodes, ['device-lost', 'pending', 'destroyed']);
   assert.deepEqual(result.lostCodes, ['device-lost', 'device-lost']);
   assert.equal(result.reusedWhite, 20);
   assert.deepEqual(result.other, { width: 8, presented: true, white: 255 });

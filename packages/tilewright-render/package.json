@@ -1,6 +1,6 @@
 {
   "name": "@seraphinastudios/tilewright-render",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "WebGPU and WebGL2 browser renderer for Tilewright scenes",
   "license": "MIT",
   "private": true,
@@ -19,7 +19,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "bench": "node bench/frame-time.mjs"
   },
   "engines": {
     "node": ">=22"

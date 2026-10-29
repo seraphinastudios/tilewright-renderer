@@ -16,7 +16,7 @@
  * - `surface-lost`, `device-lost`: recreate the renderer; after a lost
  *   WebGL2 context, on a new canvas.
  * - `resource`: a texture failed to load or a frame lies outside its texture.
- * - `busy`: a readback is still in flight.
+ * - `busy`: a `readFrame()` or `finish()` is still pending.
  * - `destroyed`: the renderer was destroyed.
  * - `unsupported`: the host cannot run the package.
  * - `internal`: an unexpected renderer failure, an uncaptured GPU error, or
