@@ -448,10 +448,10 @@ class IntentTests(unittest.TestCase):
         entry, release = self.intent_fixture()
         barrier, lock = threading.Barrier(2), threading.Lock()
         state = {'ref': None, 'commits': 0, 'puts': 0}
-        def absent(*args, **kwargs):
-            barrier.wait(timeout=5)
-            return None
-        def api(config, suffix):
+        def read(config, suffix, token, *, absent=False, readback=False):
+            if absent:
+                barrier.wait(timeout=5)
+                return None
             if suffix.startswith('git/commits/'):
                 return {'tree': {'sha': 'c' * 40}}
             with lock:
@@ -472,7 +472,7 @@ class IntentTests(unittest.TestCase):
                     state['puts'] += 1
             except ValueError:
                 pass
-        with patch.object(R, 'get', side_effect=absent), patch.object(R, 'api', side_effect=api), \
+        with patch.object(R, 'github_intent_read', side_effect=read), \
              patch.object(R, 'github_write', side_effect=write), ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(lambda _: caller(), range(2)))
         self.assertEqual(state['puts'], 1)
@@ -486,8 +486,11 @@ class IntentTests(unittest.TestCase):
             if suffix == 'git/commits': return {'sha': 'd' * 40}
             state['exists'] = True
             raise TimeoutError('response lost after server committed')
-        with patch.object(R, 'get', side_effect=lambda *a, **k: b'existing' if state['exists'] else None), \
-             patch.object(R, 'api', return_value={'tree': {'sha': 'c' * 40}}), \
+        def read(config, suffix, token, *, absent=False):
+            if absent:
+                return {'ref': 'existing'} if state['exists'] else None
+            return {'tree': {'sha': 'c' * 40}}
+        with patch.object(R, 'github_intent_read', side_effect=read), \
              patch.object(R, 'github_write', side_effect=write) as writer:
             with self.assertRaises(TimeoutError):
                 R.reserve_upload(CONFIG, release, entry, REVISION, 'b' * 64, 'github-token')
@@ -515,11 +518,100 @@ class IntentTests(unittest.TestCase):
     def test_claim_readback_must_match_acknowledged_commit(self):
         entry, release = self.intent_fixture()
         ref = 'refs/tags/crate-upload-intent/example/0.1.0'
-        with patch.object(R, 'get', return_value=None), \
-             patch.object(R, 'api', side_effect=[{'tree': {'sha': 'c' * 40}}, {'ref': ref, 'object': {'type': 'commit', 'sha': 'e' * 40}}]), \
+        with patch.object(R, 'github_intent_read', side_effect=[None, {'tree': {'sha': 'c' * 40}},
+                {'ref': ref, 'object': {'type': 'commit', 'sha': 'e' * 40}}]), \
              patch.object(R, 'github_write', side_effect=[{'sha': 'd' * 40}, {'ref': ref, 'object': {'sha': 'd' * 40}}]), \
              self.assertRaisesRegex(ValueError, 'readback mismatch'):
             R.reserve_upload(CONFIG, release, entry, REVISION, 'b' * 64, 'github-token')
+
+
+class IntentReadTests(unittest.TestCase):
+    URL = 'https://api.github.com/repos/seraphinastudios/example/git/ref/tags/intent'
+
+    def response(self, value, url=URL, status=200):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.status = status
+        response.geturl.return_value = url
+        response.read.return_value = R.canonical(value)
+        return response
+
+    def error(self, code):
+        return urllib.error.HTTPError(self.URL, code, 'untrusted secret-body', {}, io.BytesIO(b'secret-body'))
+
+    def test_read_uses_explicit_authority_and_fresh_fixed_host_without_redirects(self):
+        opener = MagicMock()
+        opener.open.return_value = self.response({'ref': 'expected'})
+        with patch.dict(os.environ, {'GH_READ_TOKEN': 'other-read-token'}), \
+             patch.object(R.urllib.request, 'build_opener', return_value=opener) as build:
+            self.assertEqual(R.github_intent_read(CONFIG, 'git/ref/tags/intent', 'intent-secret'), {'ref': 'expected'})
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, self.URL)
+        self.assertEqual(request.get_method(), 'GET')
+        self.assertEqual(request.get_header('Authorization'), 'Bearer intent-secret')
+        self.assertEqual(request.get_header('Cache-control'), 'no-cache')
+        self.assertEqual(request.get_header('Pragma'), 'no-cache')
+        self.assertEqual(opener.open.call_args.kwargs, {'timeout': 30})
+        self.assertEqual(build.call_args.args[0].proxies, {})
+        redirect = build.call_args.args[1]
+        self.assertIsInstance(redirect, R.NoRedirect)
+        with self.assertRaisesRegex(ValueError, 'redirect refused'):
+            redirect.redirect_request(request, None, 302, '', {}, 'https://attacker.invalid/')
+
+    def test_only_readback_retries_404_and_transient_reads_are_bounded(self):
+        for failure in (404, 502, 503, 504, 'timeout', 'transport'):
+            with self.subTest(failure=failure):
+                def error():
+                    if failure == 'timeout': return TimeoutError('secret-body')
+                    if failure == 'transport': return urllib.error.URLError('secret-body')
+                    return self.error(failure)
+                opener = MagicMock()
+                opener.open.side_effect = [error(), error(), self.response({'ref': 'expected'})]
+                with patch.object(R.urllib.request, 'build_opener', return_value=opener), \
+                     patch.object(R.time, 'sleep') as sleep:
+                    self.assertEqual(R.github_intent_read(CONFIG, 'git/ref/tags/intent', 'secret', readback=True),
+                                     {'ref': 'expected'})
+                self.assertEqual(opener.open.call_count, 3)
+                self.assertEqual([call.args for call in sleep.call_args_list], [(2,), (2,)])
+                opener.open.side_effect = [error(), error(), error()]
+                opener.open.reset_mock()
+                with patch.object(R.urllib.request, 'build_opener', return_value=opener), \
+                     patch.object(R.time, 'sleep') as sleep, self.assertRaisesRegex(ValueError, 'read unresolved'):
+                    R.github_intent_read(CONFIG, 'git/ref/tags/intent', 'secret', readback=True)
+                self.assertEqual(opener.open.call_count, 3)
+                self.assertEqual(sleep.call_count, 2)
+        opener = MagicMock()
+        opener.open.side_effect = self.error(404)
+        with patch.object(R.urllib.request, 'build_opener', return_value=opener), patch.object(R.time, 'sleep') as sleep:
+            self.assertIsNone(R.github_intent_read(CONFIG, 'git/ref/tags/intent', 'secret', absent=True))
+        self.assertEqual(opener.open.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_permanent_failure_malformed_response_and_missing_authority_do_not_retry(self):
+        for failure in (self.error(401), self.error(403), self.error(429), self.error(422),
+                        self.response({}, status=302), self.response({}, url='https://attacker.invalid/')):
+            opener = MagicMock()
+            if isinstance(failure, Exception): opener.open.side_effect = failure
+            else: opener.open.return_value = failure
+            with patch.object(R.urllib.request, 'build_opener', return_value=opener), \
+                 patch.object(R.time, 'sleep') as sleep, self.assertRaises(ValueError):
+                R.github_intent_read(CONFIG, 'git/ref/tags/intent', 'secret', readback=True)
+            self.assertEqual(opener.open.call_count, 1)
+            sleep.assert_not_called()
+        for raw in (b'{', b'null', b'[]', b'x' * (R.MAX_JSON + 1)):
+            response = self.response({})
+            response.read.return_value = raw
+            opener = MagicMock()
+            opener.open.return_value = response
+            with patch.object(R.urllib.request, 'build_opener', return_value=opener), \
+                 patch.object(R.time, 'sleep') as sleep, self.assertRaises(ValueError):
+                R.github_intent_read(CONFIG, 'git/ref/tags/intent', 'secret', readback=True)
+            self.assertEqual(opener.open.call_count, 1)
+            sleep.assert_not_called()
+        for token in (None, '', 'bad\nsecret', 'bad\rsecret'):
+            with patch.object(R.urllib.request, 'build_opener') as build, self.assertRaises(ValueError):
+                R.github_intent_read(CONFIG, 'git/ref/tags/intent', token)
+            build.assert_not_called()
 
 
 class BoundaryTests(unittest.TestCase):
@@ -685,12 +777,14 @@ class BoundaryTests(unittest.TestCase):
 class BootstrapPacingTests(unittest.TestCase):
     """crates.io allows a burst of new names, then one per refill period."""
 
-    def run_bootstrap(self, count, burst=R.NEW_CRATE_BURST, outcomes=(), confirm=None, present=(), interrupt=False):
+    def run_bootstrap(self, count, burst=R.NEW_CRATE_BURST, outcomes=(), confirm=None, present=(), interrupt=False,
+                      reserve=None):
         """`present` holds crates.io created_at values for the first crates, already published."""
-        rows = [{'name': f'crate{index}', 'version': '0.1.0', 'sha256': 'c' * 64, 'metadata': {'deps': []}}
+        rows = [{'name': f'crate{index}', 'version': '0.1.0', 'asset': f'crate{index}-0.1.0.crate',
+                 'sha256': 'c' * 64, 'metadata': {'deps': []}}
                 for index in range(count)]
         published = {f'crate{index}': created for index, created in enumerate(present)}
-        release, events, outcomes = {'id': 10}, [], list(outcomes)
+        release, events, outcomes = {'id': 10, '_verified_producer': {'run_id': 100, 'run_attempt': 2}}, [], list(outcomes)
         def get(url, absent=False, **_):
             if url.endswith('/api/v1/users/owner'):
                 return R.canonical({'user': {'id': 123, 'login': 'owner'}})
@@ -733,7 +827,7 @@ class BootstrapPacingTests(unittest.TestCase):
             stack.enter_context(patch.object(R.getpass, 'getpass', return_value='test-only-token'))
             stack.enter_context(patch.object(R, 'host_write_authority', return_value='test-github-token'))
             stack.enter_context(patch.object(R, 'reserve_upload',
-                side_effect=lambda config, value, item, *args: events.append(('reserve', item['name']))))
+                side_effect=reserve or (lambda config, value, item, *args: events.append(('reserve', item['name'])))))
             stack.enter_context(patch.object(R, 'put_once', side_effect=put))
             stack.enter_context(patch.object(R, 'confirm', side_effect=confirmed))
             stack.enter_context(patch.object(R.time, 'sleep', side_effect=sleep))
@@ -742,6 +836,63 @@ class BootstrapPacingTests(unittest.TestCase):
             except (ValueError, KeyboardInterrupt) as raised:
                 error = raised
         return events, stderr.getvalue(), error
+
+    def test_real_reservation_readback_propagation_never_repeats_writes_or_leaks_secrets(self):
+        ref = 'refs/tags/crate-upload-intent/crate0/0.1.0'
+        ref_url = 'https://api.github.com/repos/seraphinastudios/example/git/ref/' + ref.removeprefix('refs/')
+        tree_url = 'https://api.github.com/repos/seraphinastudios/example/git/commits/' + REVISION
+        confirmed = {'ref': ref, 'object': {'sha': 'd' * 40, 'type': 'commit'}}
+        fixture = IntentReadTests()
+        for recovers in (True, False):
+            with self.subTest(recovers=recovers):
+                opener = MagicMock()
+                # Precheck is absent, both POSTs succeed, then readback initially returns 404.
+                reads = [fixture.error(404), fixture.response({'tree': {'sha': 'c' * 40}}, tree_url),
+                         fixture.error(404), fixture.error(404),
+                         fixture.response(confirmed, ref_url) if recovers else fixture.error(404)]
+                opener.open.side_effect = reads
+                with patch.object(R.urllib.request, 'build_opener', return_value=opener), \
+                     patch.object(R, 'github_write', side_effect=[{'sha': 'd' * 40}, confirmed]) as write:
+                    events, output, error = self.run_bootstrap(1, reserve=R.reserve_upload)
+                self.assertEqual(write.call_count, 2)
+                self.assertEqual([call.args[1] for call in write.call_args_list], ['git/commits', 'git/refs'])
+                self.assertEqual(opener.open.call_count, 5)
+                for call in opener.open.call_args_list:
+                    self.assertEqual(call.args[0].get_header('Authorization'), 'Bearer test-github-token')
+                    self.assertEqual(call.args[0].get_header('Cache-control'), 'no-cache')
+                puts = [event for event in events if event[0] == 'put']
+                if recovers:
+                    self.assertIsNone(error)
+                    self.assertEqual(puts, [('put', 'crate0')])
+                else:
+                    self.assertIsInstance(error, ValueError)
+                    self.assertEqual(puts, [])
+                    self.assertIn('authenticated ref readback', output)
+                    self.assertIn('No registry PUT was attempted for this coordinate in this run.', output)
+                    self.assertIn('Any created intent remains reserved', output)
+                    self.assertNotIn('This run sent', output)
+                for secret in ('secret-body', 'test-github-token', 'test-only-token'):
+                    self.assertNotIn(secret, output)
+
+    def test_reservation_stage_failure_diagnostics_are_static_and_put_is_not_attempted(self):
+        for failure_at, label in [(0, 'authenticated precheck'), (1, 'authenticated source tree read'),
+                                  (2, 'commit creation'), (3, 'atomic ref creation')]:
+            with self.subTest(stage=label):
+                values = [None, {'tree': {'sha': 'c' * 40}}, {'sha': 'd' * 40}]
+                def operation(*args, **kwargs):
+                    if len(values) == 3 - failure_at:
+                        raise ValueError('attacker-text test-github-token test-only-token')
+                    return values.pop(0)
+                with patch.object(R, 'github_intent_read', side_effect=operation), \
+                     patch.object(R, 'github_write', side_effect=operation) as write:
+                    events, output, error = self.run_bootstrap(1, reserve=R.reserve_upload)
+                self.assertIsInstance(error, ValueError)
+                self.assertIn('stopped during ' + label, output)
+                self.assertIn('No registry PUT was attempted', output)
+                self.assertEqual(write.call_count, max(0, failure_at - 1))
+                self.assertNotIn('put', [event[0] for event in events])
+                for secret in ('attacker-text', 'test-github-token', 'test-only-token'):
+                    self.assertNotIn(secret, output)
 
     def segments(self, events):
         """What happens between the previous upload (or the confirmation) and each reservation."""
@@ -832,6 +983,8 @@ class BootstrapPacingTests(unittest.TestCase):
                 _, output, error = self.run_bootstrap(3, outcomes=outcomes, confirm=confirm)
                 self.assertIsInstance(error, ValueError)
                 self.assertIn(advice, output)
+                self.assertIn('A registry PUT was attempted for the current crate', output)
+                self.assertNotIn('No registry PUT was attempted', output)
         # Nothing sent yet: an interrupted first wait needs no advice.
         events, output, error = self.run_bootstrap(2, burst=0, interrupt=True)
         self.assertIsInstance(error, KeyboardInterrupt)

@@ -216,6 +216,36 @@ def api(config, suffix):
     return json.loads(get(root + ('/' + suffix if suffix else '')))
 
 
+def github_intent_read(config, suffix, token, *, absent=False, readback=False):
+    """Fresh intent-authorized reads; only transient reads may be retried."""
+    require(isinstance(token, str) and 0 < len(token) <= 8192
+            and all(33 <= ord(char) <= 126 for char in token), 'missing GitHub intent authority')
+    url = f"https://api.github.com/repos/{config['repository']}/{suffix}"
+    request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token,
+        'Accept': 'application/vnd.github+json', 'User-Agent': 'tilewright-crate-release/1',
+        'Cache-Control': 'no-cache', 'Pragma': 'no-cache'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    for attempt in range(3):
+        try:
+            with opener.open(request, timeout=30) as response:
+                require(response.status == 200 and response.geturl() == url, 'GitHub intent read response')
+                raw = response.read(MAX_JSON + 1)
+                require(len(raw) <= MAX_JSON, 'GitHub intent read bound')
+                value = json.loads(raw)
+                require(isinstance(value, dict), 'GitHub intent read object')
+                return value
+        except urllib.error.HTTPError as error:
+            code = error.code
+            error.close()
+            if absent and code == 404:
+                return None
+            require(code in (502, 503, 504) or (readback and code == 404), 'GitHub intent read failed')
+        except (urllib.error.URLError, TimeoutError):
+            pass
+        require(attempt < 2, 'GitHub intent read unresolved')
+        time.sleep(2)
+
+
 def github_write(config, suffix, body, token):
     """One bounded API mutation. Ambiguous responses are never retried."""
     require(isinstance(token, str) and token and '\n' not in token, 'missing GitHub intent authority')
@@ -411,23 +441,35 @@ def reserve_upload(config, release, row, revision, manifest_sha256, token):
     require(not excluded_coordinate(config, row['name'], row['version']), 'excluded crate coordinate')
     ref = f"refs/tags/crate-upload-intent/{row['name']}/{row['version']}"
     suffix = ref.removeprefix('refs/')
-    url = f"https://api.github.com/repos/{config['repository']}/git/ref/{suffix}"
-    require(get(url, absent=True) is None, 'existing upload intent requires explicit owner recovery')
-    producer = release['_verified_producer']
-    intent = {'schema_version': 1, 'kind': 'tilewright-crate-upload-intent', 'repository_id': config['repository_id'],
-        'name': row['name'], 'version': row['version'], 'archive_sha256': row['sha256'],
-        'manifest_sha256': manifest_sha256, 'source_revision': revision, 'source_release_id': release['id'],
-        'producer': producer, 'nonce': secrets.token_hex(32)}
-    tree = api(config, f'git/commits/{revision}')['tree']['sha']
-    require(SHA.fullmatch(tree), 'intent tree identity')
-    commit = github_write(config, 'git/commits', {'message': canonical(intent).decode(), 'tree': tree, 'parents': [revision]}, token)
-    require(SHA.fullmatch(commit.get('sha', '')), 'intent commit identity')
-    created = github_write(config, 'git/refs', {'ref': ref, 'sha': commit['sha']}, token)
-    require(created.get('ref') == ref and created.get('object', {}).get('sha') == commit['sha'], 'intent acknowledgement mismatch')
-    confirmed = api(config, 'git/ref/' + suffix)
-    require(confirmed.get('ref') == ref and confirmed.get('object', {}).get('type') == 'commit'
-        and confirmed['object']['sha'] == commit['sha'], 'intent readback mismatch')
-    return commit['sha']
+    stage = 'authenticated precheck'
+    try:
+        require(github_intent_read(config, 'git/ref/' + suffix, token, absent=True) is None,
+                'existing upload intent requires explicit owner recovery')
+        producer = release['_verified_producer']
+        intent = {'schema_version': 1, 'kind': 'tilewright-crate-upload-intent', 'repository_id': config['repository_id'],
+            'name': row['name'], 'version': row['version'], 'archive_sha256': row['sha256'],
+            'manifest_sha256': manifest_sha256, 'source_revision': revision, 'source_release_id': release['id'],
+            'producer': producer, 'nonce': secrets.token_hex(32)}
+        stage = 'authenticated source tree read'
+        tree = github_intent_read(config, f'git/commits/{revision}', token)['tree']['sha']
+        require(SHA.fullmatch(tree), 'intent tree identity')
+        stage = 'commit creation'
+        commit = github_write(config, 'git/commits', {'message': canonical(intent).decode(), 'tree': tree, 'parents': [revision]}, token)
+        require(SHA.fullmatch(commit.get('sha', '')), 'intent commit identity')
+        stage = 'atomic ref creation'
+        created = github_write(config, 'git/refs', {'ref': ref, 'sha': commit['sha']}, token)
+        require(created.get('ref') == ref and created.get('object', {}).get('sha') == commit['sha'], 'intent acknowledgement mismatch')
+        stage = 'authenticated ref readback'
+        confirmed = github_intent_read(config, 'git/ref/' + suffix, token, readback=True)
+        require(confirmed.get('ref') == ref and confirmed.get('object', {}).get('type') == 'commit'
+            and confirmed['object']['sha'] == commit['sha'], 'intent readback mismatch')
+        return commit['sha']
+    except BaseException:
+        # Only local stage labels are printed, never remote bodies or exceptions.
+        print(f'Upload intent reservation stopped during {stage}. No registry PUT was attempted for this'
+              ' coordinate in this run. Any created intent remains reserved; explicit owner recovery is required.',
+              file=sys.stderr)
+        raise
 
 
 def host_write_authority(config, expected_owner):
@@ -1048,8 +1090,12 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
     token = getpass.getpass('One-use crates.io token (hidden): ')
     require(0 < len(token) <= 8192 and all(33 <= ord(char) <= 126 for char in token), 'invalid bootstrap token')
     sent = 0
+    attempted = False
+    stage = 'pre-upload checks'
     try:
         for position, row in enumerate(to_publish, 1):
+            attempted = False
+            stage = 'pre-upload checks'
             if position > burst:
                 # Pace before the checks and intent: a refused PUT would strand its reservation.
                 wait_for_new_crate_token(row, position, len(to_publish))
@@ -1058,7 +1104,10 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
             require(registry_state(row) == 'absent' and
                     get(f"{REGISTRY}/api/v1/crates/{row['name']}", absent=True) is None,
                     'bootstrap coordinate is no longer absent')
+            stage = 'upload intent reservation'
             reserve_upload(config, release, row, revision, manifest_sha256, github_token)
+            stage = 'registry PUT attempt'
+            attempted = True
             sent += 1  # Counted before the PUT: an interrupted request may still have reached crates.io.
             outcome = put_once(snapshots[row['name']], row['metadata'], token)
             if outcome.rate_limited:
@@ -1067,13 +1116,18 @@ def bootstrap(config, release_id, revision, manifest_sha256, expected_owner, exp
             if not outcome.accepted:
                 print(f"crates.io did not acknowledge {row['name']}@{row['version']}; checking registry reads.",
                       file=sys.stderr)
+            stage = 'registry confirmation'
             try:
                 confirm([row])
             except Exception:
                 report_put_failure(config, row, outcome)
                 raise
+            stage = 'owner verification'
             owned(row['name'])
     except BaseException:
+        print(f'Bootstrap stopped during {stage}. ' +
+              ('A registry PUT was attempted for the current crate; its outcome may be unresolved.' if attempted else
+               'No registry PUT was attempted for the current crate in this run.'), file=sys.stderr)
         if sent:
             print(f'This run sent {sent} new crate upload(s) to crates.io. If you re-run within the next hour,'
                   ' pass --burst 0.', file=sys.stderr)
