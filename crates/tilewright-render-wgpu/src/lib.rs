@@ -79,6 +79,9 @@ pub struct WgpuRenderer {
     /// Device loss and uncaptured GPU errors; every later frame fails once
     /// either is reported.
     health: Arc<DeviceHealth>,
+    /// Command buffers submitted, so tests can tell a frame was submitted.
+    #[cfg(test)]
+    submissions: std::sync::atomic::AtomicU64,
 }
 
 /// What is known about the device's health. wgpu's device-lost callback, a
@@ -430,6 +433,8 @@ impl WgpuRenderer {
                 canvas: None,
             }),
             health,
+            #[cfg(test)]
+            submissions: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -448,6 +453,13 @@ impl WgpuRenderer {
     #[must_use]
     pub const fn maximum_texture_dimension(&self) -> u32 {
         self.limits.maximum_dimension
+    }
+
+    /// Submits one frame's commands.
+    fn submit(&self, encoder: wgpu::CommandEncoder) {
+        self.queue.submit(Some(encoder.finish()));
+        #[cfg(test)]
+        self.submissions.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A handle that marks this renderer lost from outside it; see
@@ -617,7 +629,7 @@ impl WgpuRenderer {
             &prepared,
             [red, green, blue, 1.0],
         )?;
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         self.queue.present(frame);
         // WebGL2 reports errors while the frame is encoded and submitted.
         self.check_device()?;
@@ -813,11 +825,14 @@ impl WgpuRenderer {
         Ok(true)
     }
 
-    async fn render_frame(
+    /// Draws a scene into the offscreen target, returning the unsubmitted
+    /// commands, the prepared quads and the frame's work counts (readback
+    /// excluded).
+    fn encode_offscreen(
         &mut self,
         scene: &SceneBundle,
         resources: &dyn ResourceProvider,
-    ) -> Result<(Vec<u8>, SemanticPlanes, FrameWork), Error> {
+    ) -> Result<(wgpu::CommandEncoder, Vec<PreparedSprite>, FrameWork), Error> {
         // The device must be able to hold the vertex stream before any
         // resource is loaded or the cache changes.
         self.check_vertex_stream(scene)?;
@@ -843,6 +858,41 @@ impl WgpuRenderer {
             &prepared,
             scene.clear_color(),
         )?;
+        let uploaded_bytes = prepared
+            .iter()
+            .try_fold(0_u64, |total, sprite| {
+                total.checked_add(sprite.uploaded_bytes)
+            })
+            .ok_or(Error::LimitExceeded)?;
+        let pixel_count = u64::from(self.target.width) * u64::from(self.target.height);
+        let work = FrameWork {
+            resource_requests: prepared
+                .iter()
+                .filter(|sprite| sprite.uploaded_bytes != 0)
+                .count() as u64,
+            uploaded_bytes,
+            vertex_count: vertices.len() as u64,
+            vertex_allocation_bytes,
+            target_allocation_bytes: if allocated {
+                pixel_count.checked_mul(12).ok_or(Error::LimitExceeded)?
+            } else {
+                0
+            },
+            readback_bytes: 0,
+        };
+        Ok((encoder, prepared, work))
+    }
+
+    async fn render_frame(
+        &mut self,
+        scene: &SceneBundle,
+        resources: &dyn ResourceProvider,
+    ) -> Result<(Vec<u8>, SemanticPlanes, FrameWork), Error> {
+        let (mut encoder, prepared, mut work) = self.encode_offscreen(scene, resources)?;
+        let target = self
+            .offscreen
+            .as_ref()
+            .ok_or_else(|| Error::Internal("offscreen target missing after creation".to_owned()))?;
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &target.color,
@@ -860,7 +910,7 @@ impl WgpuRenderer {
             },
             target.size,
         );
-        self.queue.submit(Some(encoder.finish()));
+        self.submit(encoder);
         let slice = target.readback.slice(..);
         // If this future is dropped while the mapping is pending, the guard
         // unmaps the shared readback buffer, which cancels the mapping, so
@@ -869,7 +919,7 @@ impl WgpuRenderer {
             buffer: &target.readback,
             armed: true,
         };
-        let mapped = self.wait_for_mapping(MapFuture::new(&slice)).await;
+        let mapped = self.wait_for(Completion::mapping(&slice)).await;
         pending.armed = false;
         mapped?;
         let mapped = slice
@@ -886,63 +936,86 @@ impl WgpuRenderer {
         drop(mapped);
         target.readback.unmap();
         let planes = semantic_planes(scene, &prepared)?;
-        let uploaded_bytes = prepared
-            .iter()
-            .try_fold(0_u64, |total, sprite| {
-                total.checked_add(sprite.uploaded_bytes)
-            })
+        work.readback_bytes = u64::from(self.target.width)
+            .checked_mul(u64::from(self.target.height))
+            .and_then(|pixels| pixels.checked_mul(4))
             .ok_or(Error::LimitExceeded)?;
-        let pixel_count = u64::from(self.target.width) * u64::from(self.target.height);
-        Ok((
-            rgba,
-            planes,
-            FrameWork {
-                resource_requests: prepared
-                    .iter()
-                    .filter(|sprite| sprite.uploaded_bytes != 0)
-                    .count() as u64,
-                uploaded_bytes,
-                vertex_count: vertices.len() as u64,
-                vertex_allocation_bytes,
-                target_allocation_bytes: if allocated {
-                    pixel_count.checked_mul(12).ok_or(Error::LimitExceeded)?
-                } else {
-                    0
-                },
-                readback_bytes: pixel_count.checked_mul(4).ok_or(Error::LimitExceeded)?,
-            },
-        ))
+        Ok((rgba, planes, work))
     }
 
-    /// Waits for a readback mapping. Native devices finish the copy and run
-    /// the mapping callback while polled to completion.
+    /// Draws the scene into the offscreen target and submits it, without
+    /// reading it back or building picking planes: the GPU work of a
+    /// presented frame, for benchmarks and warm-up. Pair it with
+    /// [`WgpuRenderer::finish`] to wait for the GPU.
+    ///
+    /// # Errors
+    /// Returns a typed target, resource, limit, or backend error.
+    pub fn draw(&mut self, request: &RenderRequest<'_>) -> Result<(), Error> {
+        self.check_device()?;
+        if request.scene.viewport().width != self.target.width
+            || request.scene.viewport().height != self.target.height
+        {
+            return Err(Error::InvalidTarget);
+        }
+        let started = Stopwatch::start();
+        let (encoder, _prepared, work) =
+            self.encode_offscreen(request.scene, request.resources.as_ref())?;
+        self.submit(encoder);
+        // WebGL2 reports errors while the frame is encoded and submitted.
+        self.check_device()?;
+        self.record(work, started);
+        Ok(())
+    }
+
+    /// Waits until the GPU has finished every frame submitted so far,
+    /// presented or offscreen. Natively this blocks in the device poll; in
+    /// browsers it resolves from the event loop.
+    ///
+    /// # Errors
+    /// Returns [`Error::Internal`] when the device cannot be polled.
+    pub async fn finish(&self) -> Result<(), Error> {
+        self.wait_for(Completion::submitted_work(&self.queue)).await
+    }
+
+    fn record(&mut self, work: FrameWork, started: Stopwatch) {
+        self.metrics.frames_submitted += 1;
+        self.metrics.resource_requests = work.resource_requests;
+        self.metrics.uploaded_bytes = work.uploaded_bytes;
+        self.metrics.vertex_count = work.vertex_count;
+        self.metrics.vertex_allocation_bytes = work.vertex_allocation_bytes;
+        self.metrics.target_allocation_bytes = work.target_allocation_bytes;
+        self.metrics.readback_bytes = work.readback_bytes;
+        self.metrics.frame_cpu_micros = started.elapsed_micros();
+    }
+
+    /// Waits for a GPU callback. Native devices run it while polled to
+    /// completion.
     #[cfg(not(target_arch = "wasm32"))]
-    async fn wait_for_mapping(&self, mapped: MapFuture) -> Result<(), Error> {
+    async fn wait_for(&self, completion: Completion) -> Result<(), Error> {
         let polled = self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
         self.check_device()?;
         polled.map_err(|error| Error::Internal(error.to_string()))?;
-        mapped.await.or_else(|error| {
+        completion.await.or_else(|error| {
             self.check_device()?;
             Err(error)
         })
     }
 
-    /// Waits for a readback mapping without blocking the browser: WebGPU
-    /// resolves the mapping from its own event loop, and WebGL2 reports
-    /// finished work only between tasks, so the device is polled once per
-    /// task until the mapping settles.
+    /// Waits for a GPU callback without blocking the browser: WebGPU runs it
+    /// from its own event loop, and WebGL2 reports finished work only
+    /// between tasks, so the device is polled once per task until it runs.
     #[cfg(target_arch = "wasm32")]
-    async fn wait_for_mapping(&self, mapped: MapFuture) -> Result<(), Error> {
+    async fn wait_for(&self, completion: Completion) -> Result<(), Error> {
         loop {
             // A lost device may never settle the mapping, or fail it.
             self.check_device()?;
             self.device
                 .poll(wgpu::PollType::Poll)
                 .map_err(|error| Error::Internal(error.to_string()))?;
-            if let Some(result) = mapped.try_take()? {
+            if let Some(result) = completion.try_take()? {
                 return result.or_else(|error| {
                     self.check_device()?;
                     Err(error)
@@ -1280,14 +1353,7 @@ impl WgpuRenderer {
         let (rgba8, (semantic_ids, depth, coverage), work) = self
             .render_frame(request.scene, request.resources.as_ref())
             .await?;
-        self.metrics.frames_submitted += 1;
-        self.metrics.resource_requests = work.resource_requests;
-        self.metrics.uploaded_bytes = work.uploaded_bytes;
-        self.metrics.vertex_count = work.vertex_count;
-        self.metrics.vertex_allocation_bytes = work.vertex_allocation_bytes;
-        self.metrics.target_allocation_bytes = work.target_allocation_bytes;
-        self.metrics.readback_bytes = work.readback_bytes;
-        self.metrics.frame_cpu_micros = started.elapsed_micros();
+        self.record(work, started);
         let output = FrameOutput {
             width: self.target.width,
             height: self.target.height,
@@ -1505,24 +1571,25 @@ impl Drop for PendingMap<'_> {
     }
 }
 
-/// Resolves when a buffer mapping requested with `map_async` completes.
-/// Native devices run the callback while the device is polled; browsers run
-/// it from their event loop.
-struct MapFuture {
-    state: Arc<Mutex<MapState>>,
+/// Resolves when a GPU callback reports completion: a buffer mapping, or
+/// all submitted work. Native devices run callbacks while polled; browsers
+/// run them from their event loop.
+struct Completion {
+    state: Arc<Mutex<CompletionState>>,
 }
 
 #[derive(Default)]
-struct MapState {
-    result: Option<Result<(), wgpu::BufferAsyncError>>,
+struct CompletionState {
+    result: Option<Result<(), Error>>,
     waker: Option<Waker>,
 }
 
-impl MapFuture {
-    fn new(slice: &wgpu::BufferSlice<'_>) -> Self {
-        let state = Arc::new(Mutex::new(MapState::default()));
+impl Completion {
+    /// A completion and the callback that settles it.
+    fn new() -> (Self, impl FnOnce(Result<(), Error>) + Send + 'static) {
+        let state = Arc::new(Mutex::new(CompletionState::default()));
         let callback_state = Arc::clone(&state);
-        slice.map_async(wgpu::MapMode::Read, move |result| {
+        let settle = move |result| {
             // A poisoned lock means a panicking waiter; nothing is left to wake.
             if let Ok(mut state) = callback_state.lock() {
                 state.result = Some(result);
@@ -1530,23 +1597,34 @@ impl MapFuture {
                     waker.wake();
                 }
             }
-        });
-        Self { state }
+        };
+        (Self { state }, settle)
     }
-}
 
-impl MapFuture {
-    /// The mapping's result once it has settled.
+    /// Settles when the slice is mapped for reading.
+    fn mapping(slice: &wgpu::BufferSlice<'_>) -> Self {
+        let (completion, settle) = Self::new();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            settle(result.map_err(|error| Error::Internal(error.to_string())));
+        });
+        completion
+    }
+
+    /// Settles when every submission so far has finished on the GPU.
+    fn submitted_work(queue: &wgpu::Queue) -> Self {
+        let (completion, settle) = Self::new();
+        queue.on_submitted_work_done(move || settle(Ok(())));
+        completion
+    }
+
+    /// The result once settled.
     #[cfg(target_arch = "wasm32")]
     fn try_take(&self) -> Result<Option<Result<(), Error>>, Error> {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| Error::Internal("readback state lock poisoned".to_owned()))?;
-        Ok(state
-            .result
-            .take()
-            .map(|result| result.map_err(|error| Error::Internal(error.to_string()))))
+            .map_err(|_| Error::Internal("completion state lock poisoned".to_owned()))?;
+        Ok(state.result.take())
     }
 }
 
@@ -1645,17 +1723,17 @@ async fn next_task() {
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
-impl Future for MapFuture {
+impl Future for Completion {
     type Output = Result<(), Error>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let Ok(mut state) = self.state.lock() else {
             return Poll::Ready(Err(Error::Internal(
-                "readback state lock poisoned".to_owned(),
+                "completion state lock poisoned".to_owned(),
             )));
         };
         if let Some(result) = state.result.take() {
-            Poll::Ready(result.map_err(|error| Error::Internal(error.to_string())))
+            Poll::Ready(result)
         } else {
             state.waker = Some(context.waker().clone());
             Poll::Pending
@@ -3063,6 +3141,61 @@ mod tests {
                 .rgba8
                 .chunks_exact(4)
                 .all(|pixel| pixel == [255, 0, 0, 255])
+        );
+    }
+
+    #[test]
+    fn drawn_frames_skip_readback_and_finish_on_the_gpu() {
+        let Ok(mut renderer) = WgpuRenderer::new(offscreen_target(112, 64)) else {
+            eprintln!("skipping GPU draw test: no supported adapter");
+            return;
+        };
+        let scene = atlas_scene(112, 64).unwrap();
+        let request = RenderRequest {
+            scene: &scene,
+            resources: atlas_provider().unwrap(),
+        };
+        renderer.draw(&request).unwrap();
+        // The frame was submitted, not only encoded.
+        assert_eq!(
+            renderer
+                .submissions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        pollster::block_on(renderer.finish()).unwrap();
+        // Finishing waited for the submitted frame: nothing is in flight.
+        assert!(
+            renderer
+                .device
+                .poll(wgpu::PollType::Poll)
+                .unwrap()
+                .is_queue_empty()
+        );
+        let metrics = renderer.metrics();
+        assert_eq!(metrics.frames_submitted, 1);
+        assert_eq!(metrics.resource_requests, 1);
+        assert_eq!(metrics.readback_bytes, 0);
+        assert_eq!(metrics.vertex_count, 34 * 6);
+        // A finished renderer waits for nothing, and a later readback still
+        // matches the reference.
+        pollster::block_on(renderer.finish()).unwrap();
+        let frame = renderer.render(request.clone()).unwrap();
+        assert_eq!(frame.metrics.frames_submitted, 2);
+        assert_eq!(frame.metrics.resource_requests, 0);
+        let reference = ReferenceRenderer::new(offscreen_target(112, 64))
+            .unwrap()
+            .render(request)
+            .unwrap();
+        assert_eq!(frame.semantic_ids, reference.semantic_ids);
+        // A scene of another size is refused.
+        let small = atlas_scene(120, 64).unwrap();
+        assert_eq!(
+            renderer.draw(&RenderRequest {
+                scene: &small,
+                resources: atlas_provider().unwrap(),
+            }),
+            Err(tilewright_render_api::Error::InvalidTarget)
         );
     }
 

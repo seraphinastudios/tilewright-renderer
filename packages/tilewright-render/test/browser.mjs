@@ -23,6 +23,13 @@ export const SOFTWARE_FLAGS = [
   '--use-webgpu-adapter=swiftshader',
 ];
 
+/**
+ * Flags that let headless Chrome draw WebGL2 on the machine's GPU, for the
+ * frame-time harness. Its WebGPU stays on SwiftShader; docs/FRAME-TIME.md
+ * describes a hardware WebGPU setup.
+ */
+export const GPU_FLAGS = ['--enable-unsafe-webgpu', '--ignore-gpu-blocklist', '--enable-gpu'];
+
 export function launch(flags = SOFTWARE_FLAGS, options = {}) {
   const settings = { ...options, args: flags };
   if (process.env.TILEWRIGHT_CHROMIUM) {

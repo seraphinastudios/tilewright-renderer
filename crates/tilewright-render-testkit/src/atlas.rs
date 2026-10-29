@@ -35,7 +35,7 @@ const GROUND: [([u8; 3], [u8; 3]); 4] = [
 ];
 
 /// The texel of one frame of the atlas at a frame-relative position.
-fn frame_texel(column: u32, row: u32, x: i32, y: i32) -> [u8; 4] {
+pub(crate) fn frame_texel(column: u32, row: u32, x: i32, y: i32) -> [u8; 4] {
     let index = usize::try_from(column).unwrap_or(0);
     let opaque = |rgb: [u8; 3]| [rgb[0], rgb[1], rgb[2], 255];
     match row {
