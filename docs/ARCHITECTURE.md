@@ -116,8 +116,10 @@ knows nothing about any game or content format.
   zoom 1. A texture-coordinate margin of 1/65,536 keeps every sampled centre
   inside the art on every backend; a pixel centre on the boundary between
   neighbouring art, to within that margin, is drawn by both and painter order
-  picks the one that shows. At whole-number zooms ground art first moves by at
-  most half a pixel onto the grid, rounding halves up, so pixel centres sample
+  picks the one that shows. Art under one pixel across uses its sole covered
+  centre's texture coordinate at both edges, preserving that centre's texel
+  while keeping the coordinates bounded. At whole-number zooms ground art first
+  moves by at most half a pixel onto the grid, rounding halves up, so pixel centres sample
   texel centres and every backend picks the same texels, as before. All ground
   whose edges lie whole art pixels apart at one height moves by the same
   amount, so where an edge falls within floating-point error of half a pixel

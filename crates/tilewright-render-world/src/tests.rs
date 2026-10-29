@@ -1225,7 +1225,8 @@ fn ground_under_a_pixel_keeps_texture_coordinates_in_bounds() {
     assert!(!scene.quads().is_empty());
     for quad in scene.quads() {
         let (edges, uvs) = edges(quad);
-        assert_eq!(uvs, [0.0, 0.0, 1.0, 1.0]);
+        assert!(uvs.iter().all(|uv| (0.0..=1.0).contains(uv)));
+        assert_eq!([uvs[0], uvs[1]], [uvs[2], uvs[3]]);
         assert_eq!([edges[2] - edges[0], edges[3] - edges[1]], [1.0, 1.0]);
     }
 }

@@ -788,10 +788,17 @@ impl Projector {
             let extent = end - start;
             // Whole-zoom art spans whole pixels and keeps every pixel centre
             // half a pixel inside its edges. Art under a pixel across covers
-            // at most one pixel centre, which samples its middle; this keeps
-            // its coordinates small.
-            let uvs = if whole || extent < 1.0 {
+            // at most one pixel centre. Use that centre's actual coordinate
+            // at both edges to preserve its texel without unbounded UVs.
+            let uvs = if whole {
                 [0.0, 1.0]
+            } else if extent < 1.0 {
+                let sample = if edges[0] < edges[1] {
+                    margin + (edges[0] + 0.5 - start) / extent * (1.0 - 2.0 * margin)
+                } else {
+                    0.5
+                };
+                [sample, sample]
             } else {
                 edges.map(|edge| margin + (edge - start) / extent * (1.0 - 2.0 * margin))
             };

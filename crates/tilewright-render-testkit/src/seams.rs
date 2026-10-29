@@ -176,6 +176,50 @@ fn neighbouring_ground_quads_never_overlap() {
 }
 
 #[test]
+fn ground_under_a_pixel_samples_the_world_selected_texel() {
+    // A half-pixel tile covers one centre, whose position within the art
+    // changes as the camera pans. Only the selected texel is opaque, so a
+    // midpoint lookup would lose both its colour and semantic identity.
+    for tile in [[0, 0], [-1, -1]] {
+        for (x, center_x) in [(0, 0.4), (1, 0.6)] {
+            for (y, center_y) in [(0, 0.4), (1, 0.6)] {
+                let camera = Camera {
+                    projection: Projection::TopDown { tile_size: 2 },
+                    center: [f64::from(tile[0]) + center_x, f64::from(tile[1]) + center_y],
+                    zoom: 0.25,
+                    width: 1,
+                    height: 1,
+                    sampling: Sampling::Nearest,
+                };
+                let mut view = ground_grid_view(camera, GroundArt::Full).unwrap();
+                view.objects
+                    .retain(|object| object.tile == tile.map(i64::from));
+                let mut pixels = [[0; 4]; 4];
+                pixels[y * 2 + x] = [170, 140, 90, 255];
+                let (bytes, digest) = crate::texture_envelope(2, 2, &pixels);
+                let object = &mut view.objects[0];
+                object.animation.frames[0].digest = digest;
+                let id = object.semantic_id.0;
+                let provider = std::sync::Arc::new(crate::FakeResourceProvider::default());
+                provider
+                    .insert(object.animation.frames[0].id, 1, bytes)
+                    .unwrap();
+                let scene = compile(&view, SceneLimits::default()).unwrap();
+                let frame = ReferenceRenderer::new(offscreen_target(1, 1))
+                    .unwrap()
+                    .render(RenderRequest {
+                        scene: &scene,
+                        resources: provider,
+                    })
+                    .unwrap();
+                assert_eq!(frame.semantic_ids, [id], "texel {x},{y}");
+                assert_eq!(frame.rgba8, [170, 140, 90, 255], "texel {x},{y}");
+            }
+        }
+    }
+}
+
+#[test]
 fn ground_grids_are_bounded_before_allocating() {
     let camera = |zoom| Camera {
         projection: ISO_48,
