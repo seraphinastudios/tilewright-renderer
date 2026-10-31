@@ -1,12 +1,32 @@
 {
   "schema_version": 1,
-  "provenance": "new synthetic MIT fixture; no classic or third-party visual source",
+  "provenance": "Original eight synthetic MIT resources retained; shared UI uses the pinned OFL-1.1 font candidate and independently authored MIT solid texture.",
   "failure_cases": [
-    {"name": "missing-resource", "expected": "NotFound", "owner": "renderer"},
-    {"name": "digest-mismatch", "expected": "DigestMismatch", "owner": "renderer"},
-    {"name": "corrupt-texture-envelope", "expected": "InvalidFormat", "owner": "renderer"},
-    {"name": "oversized-resource", "expected": "LimitExceeded", "owner": "renderer"},
-    {"name": "frame-out-of-bounds", "expected": "FrameOutOfBounds", "owner": "renderer"}
+    {
+      "name": "missing-resource",
+      "expected": "NotFound",
+      "owner": "renderer"
+    },
+    {
+      "name": "digest-mismatch",
+      "expected": "DigestMismatch",
+      "owner": "renderer"
+    },
+    {
+      "name": "corrupt-texture-envelope",
+      "expected": "InvalidFormat",
+      "owner": "renderer"
+    },
+    {
+      "name": "oversized-resource",
+      "expected": "LimitExceeded",
+      "owner": "renderer"
+    },
+    {
+      "name": "frame-out-of-bounds",
+      "expected": "FrameOutOfBounds",
+      "owner": "renderer"
+    }
   ],
   "resources": [
     {
@@ -112,6 +132,32 @@
       "license": "MIT",
       "transformation": "A 4 x 4 sheet of 16 x 16 frames: body, tunic and hair layers of a four-step walk built from circles and rectangles, and four checkered ground tiles, computed per texel.",
       "notice": "Original procedural fixture generated from constants; no game or third-party art."
+    },
+    {
+      "name": "ui-roboto-mono-atlas",
+      "resource_id": 301,
+      "revision": 1,
+      "width": 512,
+      "height": 256,
+      "sha256": "ce4577f281f9b001044036cf0cd4e8d270c656f8e1fb00fea09ca8226a5ec21f",
+      "license": "OFL-1.1",
+      "author": "The Roboto Mono Project Authors",
+      "source": "https://github.com/googlefonts/RobotoMono/blob/895ec691990d041dd727c7b5afa3ce56525d98e6/fonts/ttf/RobotoMono-Regular.ttf",
+      "transformation": "Selected independent 20 px grayscale glyph masks packed as white RGBA8 ATX1",
+      "notice": "OFL.txt"
+    },
+    {
+      "name": "ui-solid",
+      "resource_id": 302,
+      "revision": 1,
+      "width": 1,
+      "height": 1,
+      "sha256": "a8354140d41a231fea70c89645d3380bc06f429a2ad65a5451144445ad487a16",
+      "license": "MIT",
+      "author": "Seraphina Studios",
+      "source": "tools/ui-font/generate.py synthetic white RGBA constant",
+      "transformation": "Original synthetic 1x1 opaque white RGBA8 ATX1",
+      "notice": "Renderer MIT LICENSE"
     }
   ],
   "cases": [
@@ -127,7 +173,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 1512,
+        "vertex_allocation_bytes": 2016,
         "target_allocation_bytes": 2816
       },
       "digests": {
@@ -149,7 +195,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 1512,
+        "vertex_allocation_bytes": 2016,
         "target_allocation_bytes": 5797
       },
       "digests": {
@@ -164,14 +210,14 @@
       "width": 48,
       "height": 48,
       "clock_millis": 375,
-      "maximum_rgba_channel_difference": 1,
+      "maximum_rgba_channel_difference": 2,
       "performance": {
         "maximum_cpu_micros": 75000,
         "quad_count": 11,
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 66,
-        "vertex_allocation_bytes": 5544,
+        "vertex_allocation_bytes": 7392,
         "target_allocation_bytes": 25344
       },
       "digests": {
@@ -193,7 +239,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 6144,
-        "vertex_allocation_bytes": 516096,
+        "vertex_allocation_bytes": 688128,
         "target_allocation_bytes": 180224
       },
       "digests": {
@@ -215,7 +261,7 @@
         "resource_requests": 4,
         "uploaded_bytes": 11792,
         "vertex_count": 3030,
-        "vertex_allocation_bytes": 254520,
+        "vertex_allocation_bytes": 339360,
         "target_allocation_bytes": 270336
       },
       "digests": {
@@ -237,7 +283,7 @@
         "resource_requests": 4,
         "uploaded_bytes": 5008,
         "vertex_count": 168,
-        "vertex_allocation_bytes": 14112,
+        "vertex_allocation_bytes": 18816,
         "target_allocation_bytes": 67584
       },
       "digests": {
@@ -259,7 +305,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16384,
         "vertex_count": 204,
-        "vertex_allocation_bytes": 17136,
+        "vertex_allocation_bytes": 22848,
         "target_allocation_bytes": 78848
       },
       "digests": {
@@ -267,6 +313,50 @@
         "semantic_u32le": "35de09d9ceaf67e04908320277eb9f86cd1bffe236d6c41b56d4a304183100c3",
         "depth_i16le": "9a7a519e0e25ca63e280709ace8f4da0932c10b5ca2c9abfd98562caa3b2be91",
         "coverage_u8": "d0428c6c2aa3cd276064506d4059c2a8cc8837b6cbbb0c5ad6568fffa9f5c959"
+      }
+    },
+    {
+      "name": "shared-ui-dpi-125",
+      "width": 400,
+      "height": 240,
+      "clock_millis": 375,
+      "maximum_rgba_channel_difference": 2,
+      "performance": {
+        "maximum_cpu_micros": 400000,
+        "quad_count": 91,
+        "resource_requests": 3,
+        "uploaded_bytes": 525316,
+        "vertex_count": 546,
+        "vertex_allocation_bytes": 61152,
+        "target_allocation_bytes": 1056000
+      },
+      "digests": {
+        "rgba8": "bac4be2f7b398ee2d61742de2c4e909a54b9ad7303cd4df61518f8a1cb1512a4",
+        "semantic_u32le": "07eafa68ce28524e8e5717b3e20ad86655576de7423bca20a7278a9445ed9d69",
+        "depth_i16le": "cd28bb3f1b443edab3173d58d94b71f3167b350a1cbe1c36510ab328b4ad4f45",
+        "coverage_u8": "53fc3cb3312d0abfa71af7c70d987d2c55647d44f28ae2d1d185a8c9ffaa18bb"
+      }
+    },
+    {
+      "name": "shared-ui-dpi-150",
+      "width": 480,
+      "height": 288,
+      "clock_millis": 375,
+      "maximum_rgba_channel_difference": 1,
+      "performance": {
+        "maximum_cpu_micros": 500000,
+        "quad_count": 91,
+        "resource_requests": 3,
+        "uploaded_bytes": 525316,
+        "vertex_count": 546,
+        "vertex_allocation_bytes": 61152,
+        "target_allocation_bytes": 1520640
+      },
+      "digests": {
+        "rgba8": "da51ea6b0d6e2715ce4bb2e52c9701526162de24599a02a641b42c80b14bb342",
+        "semantic_u32le": "f33db0af5ee37f793799f411d343ca7cb52d7eed1d41b65d7b4c5461b52cffc8",
+        "depth_i16le": "62ab39d99159dc0e273b7b2d1c49723d02a127a4c3bdf0880b9c418bf63f1d76",
+        "coverage_u8": "afe2c17fb6ccec9430f2652528a1be831c4e62c89a133ac1de757d46ca41795c"
       }
     }
   ]

@@ -22,6 +22,8 @@ for crate in "${crates[@]}"; do
   tar -xzf "${packages}/${crate}-${version}.crate" -C "${verification}"
 done
 
+python3 tools/check-font-crate.py "${packages}/tilewright-render-ui-${version}.crate"
+
 patches=()
 for crate in "${crates[@]}"; do
   patches+=(

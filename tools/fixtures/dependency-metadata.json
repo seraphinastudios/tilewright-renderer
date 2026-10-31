@@ -36,6 +36,18 @@
         {"name":"sha2","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null}
       ]
     },
+    {
+      "id":"path+file:///renderer#tilewright-render-ui@0.6.0","name":"tilewright-render-ui","version":"0.6.0","license":"MIT","source":null,
+      "dependencies":[
+        {"name":"cosmic-text","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null},
+        {"name":"sha2","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null},
+        {"name":"unicode-script","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null},
+        {"name":"unicode-segmentation","source":"registry+https://github.com/rust-lang/crates.io-index","kind":null}
+      ]
+    },
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#cosmic-text@0.19.0","name":"cosmic-text","version":"0.19.0","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#unicode-script@0.5.8","name":"unicode-script","version":"0.5.8","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#unicode-segmentation@1.13.3","name":"unicode-segmentation","version":"1.13.3","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#bytemuck@1.26.0","name":"bytemuck","version":"1.26.0","license":"Zlib OR Apache-2.0 OR MIT","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#naga@30.1.0","name":"naga","version":"30.1.0","license":"MIT OR Apache-2.0","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
     {"id":"registry+https://github.com/rust-lang/crates.io-index#pollster@1.1.0","name":"pollster","version":"1.1.0","license":"Apache-2.0/MIT","source":"registry+https://github.com/rust-lang/crates.io-index","dependencies":[]},
@@ -57,10 +69,20 @@
     "path+file:///renderer#tilewright-render@0.1.0",
     "path+file:///renderer#tilewright-render-resources@0.1.0",
     "path+file:///renderer#tilewright-render-sdl3@0.1.0",
-    "path+file:///renderer#tilewright-render-wgpu@0.1.0"
+    "path+file:///renderer#tilewright-render-wgpu@0.1.0",
+    "path+file:///renderer#tilewright-render-ui@0.6.0"
   ],
   "resolve": {
     "nodes": [
+      {
+        "id":"path+file:///renderer#tilewright-render-ui@0.6.0",
+        "deps":[
+          {"pkg":"registry+https://github.com/rust-lang/crates.io-index#cosmic-text@0.19.0"},
+          {"pkg":"registry+https://github.com/rust-lang/crates.io-index#sha2@0.11.1"},
+          {"pkg":"registry+https://github.com/rust-lang/crates.io-index#unicode-script@0.5.8"},
+          {"pkg":"registry+https://github.com/rust-lang/crates.io-index#unicode-segmentation@1.13.3"}
+        ]
+      },
       {
         "id":"path+file:///renderer#tilewright-render@0.1.0",
         "deps": [

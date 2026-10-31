@@ -4,6 +4,9 @@ set -euo pipefail
 repository=$(git rev-parse --show-toplevel)
 cd "${repository}"
 
+# Acceptance fixtures are explicit repository assets, never ambient fonts.
+export TILEWRIGHT_UNICODE_FONT_ROOT="${repository}/assets/unicode"
+
 test "$(rustc --version | cut -d' ' -f2)" = 1.97.1
 python3 -m unittest tools.test_crate_release
 python3 tools/crate_prepare.py check-version --base "${CRATE_RELEASE_BASE:-$(git rev-parse HEAD)}"

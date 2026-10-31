@@ -1226,7 +1226,6 @@ impl WgpuRenderer {
                 key,
                 sampling: quad.sampling,
                 frame,
-                clamped: frame != TextureRect::whole(cached.image.width(), cached.image.height()),
             });
         }
         Ok(prepared)
@@ -1821,21 +1820,18 @@ fn create_depth_target(device: &wgpu::Device, size: wgpu::Extent3d, label: &str)
     })
 }
 
-/// The scene pipelines for one target format: one for quads sampling a
-/// whole texture, and one per sampling for quads sampling a smaller frame.
+/// The scene pipelines for one target format: one per sampling mode. Whole textures and atlas frames use the same texel path.
 #[derive(Clone)]
 struct Pipelines {
-    whole: wgpu::RenderPipeline,
-    framed_nearest: wgpu::RenderPipeline,
-    framed_linear: wgpu::RenderPipeline,
+    nearest: wgpu::RenderPipeline,
+    linear: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
-    const fn get(&self, clamped: bool, sampling: Sampling) -> &wgpu::RenderPipeline {
-        match (clamped, sampling) {
-            (false, _) => &self.whole,
-            (true, Sampling::Nearest) => &self.framed_nearest,
-            (true, Sampling::Linear) => &self.framed_linear,
+    const fn get(&self, sampling: Sampling) -> &wgpu::RenderPipeline {
+        match sampling {
+            Sampling::Nearest => &self.nearest,
+            Sampling::Linear => &self.linear,
         }
     }
 }
@@ -1858,23 +1854,8 @@ fn create_pipelines(
         immediate_size: 0,
     });
     Pipelines {
-        whole: create_pipeline(device, &shader, &layout, format, writes, None),
-        framed_nearest: create_pipeline(
-            device,
-            &shader,
-            &layout,
-            format,
-            writes,
-            Some(Sampling::Nearest),
-        ),
-        framed_linear: create_pipeline(
-            device,
-            &shader,
-            &layout,
-            format,
-            writes,
-            Some(Sampling::Linear),
-        ),
+        nearest: create_pipeline(device, &shader, &layout, format, writes, Sampling::Nearest),
+        linear: create_pipeline(device, &shader, &layout, format, writes, Sampling::Linear),
     }
 }
 
@@ -1884,19 +1865,16 @@ fn create_pipeline(
     layout: &wgpu::PipelineLayout,
     format: wgpu::TextureFormat,
     writes: wgpu::ColorWrites,
-    framed: Option<Sampling>,
+    sampling: Sampling,
 ) -> wgpu::RenderPipeline {
-    let constants = [
-        ("FRAMED", if framed.is_some() { 1.0 } else { 0.0 }),
-        (
-            "NEAREST",
-            if framed == Some(Sampling::Nearest) {
-                1.0
-            } else {
-                0.0
-            },
-        ),
-    ];
+    let constants = [(
+        "NEAREST",
+        if sampling == Sampling::Nearest {
+            1.0
+        } else {
+            0.0
+        },
+    )];
     let compilation_options = wgpu::PipelineCompilationOptions {
         constants: &constants,
         ..wgpu::PipelineCompilationOptions::default()
@@ -1984,13 +1962,12 @@ fn encode_scene(
         while end < sprites.len()
             && sprites[end].key == sprites[start].key
             && sprites[end].sampling == sprites[start].sampling
-            && sprites[end].clamped == sprites[start].clamped
         {
             end += 1;
         }
-        let pipeline = (sprites[start].clamped, sprites[start].sampling);
+        let pipeline = sprites[start].sampling;
         if current != Some(pipeline) {
-            pass.set_pipeline(pipelines.get(pipeline.0, pipeline.1));
+            pass.set_pipeline(pipelines.get(pipeline));
             current = Some(pipeline);
         }
         let first = u32::try_from(start)
@@ -2022,18 +1999,21 @@ struct Vertex {
     flags: u32,
     /// The sampled frame's texel x, y, width and height.
     frame: [u16; 4],
-    /// The texture's width and height in texels.
-    texture_size: [u16; 2],
+    /// Snapped physical bounds and UV endpoints for the reference's aligned
+    /// rectangle path. Other quads keep hardware-interpolated UVs.
+    screen_rect: [f32; 4],
+    uv_rect: [f32; 4],
 }
 
 /// The quad draws only its glow halo.
 const FLAG_GLOW: u32 = 1;
+const FLAG_ALIGNED: u32 = 2;
 
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 11] = wgpu::vertex_attr_array![
         0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32,
         4 => Float32, 5 => Float32x4, 6 => Float32x2, 7 => Uint32,
-        8 => Uint16x4, 9 => Uint16x2
+        8 => Uint16x4, 9 => Float32x4, 10 => Float32x4
     ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -2053,8 +2033,6 @@ struct PreparedSprite {
     sampling: Sampling,
     /// The quad's frame, checked against its texture.
     frame: TextureRect,
-    /// The frame is smaller than its texture, so samples are clamped inside it.
-    clamped: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2074,9 +2052,10 @@ fn vertices(scene: &SceneBundle, prepared: &[PreparedSprite]) -> Result<Vec<Vert
     for (quad, prepared) in scene.quads().iter().zip(prepared) {
         let z = depth_value(quad);
         let effect = effect_amount(quad, scene.clock_millis());
-        let (glow_color, glow_radius, flags) = quad.glow.map_or(([0.0; 4], [0.0; 2], 0), |glow| {
-            (glow.color, glow.radius_uv, FLAG_GLOW)
-        });
+        let (glow_color, glow_radius, mut flags) =
+            quad.glow.map_or(([0.0; 4], [0.0; 2], 0), |glow| {
+                (glow.color, glow.radius_uv, FLAG_GLOW)
+            });
         // Frames lie inside textures no larger than the device's 2D limit,
         // which never exceeds 16 bits.
         let frame = [
@@ -2084,25 +2063,30 @@ fn vertices(scene: &SceneBundle, prepared: &[PreparedSprite]) -> Result<Vec<Vert
             prepared.frame.y,
             prepared.frame.width,
             prepared.frame.height,
-            prepared.image.width(),
-            prepared.image.height(),
         ]
         .map(u16::try_from);
-        let [
-            Ok(left),
-            Ok(top),
-            Ok(width),
-            Ok(height),
-            Ok(texture_width),
-            Ok(texture_height),
-        ] = frame
-        else {
+        let [Ok(left), Ok(top), Ok(width), Ok(height)] = frame else {
             return Err(Error::LimitExceeded);
         };
         let frame = [left, top, width, height];
-        let texture_size = [texture_width, texture_height];
+        let snapped = Quad {
+            positions: quad.positions.map(|point| point.map(subpixel_position)),
+            ..*quad
+        };
+        let (screen_rect, uv_rect) = snapped.aligned_rect().map_or(([0.0; 4], [0.0; 4]), |rect| {
+            flags |= FLAG_ALIGNED;
+            (
+                [rect.left, rect.top, rect.right, rect.bottom],
+                [
+                    rect.uv_min[0],
+                    rect.uv_min[1],
+                    rect.uv_max[0],
+                    rect.uv_max[1],
+                ],
+            )
+        });
         let vertex = |corner: usize| {
-            let [x, y] = quad.positions[corner].map(subpixel_position);
+            let [x, y] = snapped.positions[corner];
             Vertex {
                 position: [
                     x.mul_add(2.0 / viewport.width as f32, -1.0),
@@ -2117,7 +2101,8 @@ fn vertices(scene: &SceneBundle, prepared: &[PreparedSprite]) -> Result<Vec<Vert
                 glow_radius,
                 flags,
                 frame,
-                texture_size,
+                screen_rect,
+                uv_rect,
             }
         };
         output.extend_from_slice(&[
@@ -2338,6 +2323,14 @@ mod tests {
         scene: &tilewright_scene::SceneBundle,
         resources: &std::sync::Arc<tilewright_render_testkit::FakeResourceProvider>,
     ) -> Option<tilewright_render_api::FrameOutput> {
+        assert_matches_reference_with_allowance(scene, resources, 1)
+    }
+
+    fn assert_matches_reference_with_allowance(
+        scene: &tilewright_scene::SceneBundle,
+        resources: &std::sync::Arc<tilewright_render_testkit::FakeResourceProvider>,
+        allowance: u8,
+    ) -> Option<tilewright_render_api::FrameOutput> {
         let viewport = scene.viewport();
         let target = offscreen_target(viewport.width, viewport.height);
         let Ok(mut renderer) = WgpuRenderer::new(target) else {
@@ -2365,8 +2358,8 @@ mod tests {
             .max_by_key(|(_, difference)| *difference)
             .unwrap_or((0, 0));
         assert!(
-            difference <= 1,
-            "{}x{} scene differs from the reference by {difference} at byte {index}: GPU={}, reference={}",
+            difference <= allowance,
+            "{}x{} scene differs from the reference by {difference} (allowance {allowance}) at byte {index}: GPU={}, reference={}",
             viewport.width,
             viewport.height,
             frame.rgba8[index],
@@ -2450,8 +2443,9 @@ mod tests {
             eprintln!("skipping GPU vertex limit test: no supported adapter");
             return;
         };
-        // One quad more than a 256 MiB buffer of 504-byte quads holds.
-        let count = (256_u32 << 20) / 504 + 1;
+        // One quad more than the vertex buffer limit holds.
+        let quad_bytes = 6 * u32::try_from(std::mem::size_of::<super::Vertex>()).unwrap();
+        let count = (256_u32 << 20) / quad_bytes + 1;
         let quads = (0..count).map(|index| Quad {
             semantic_id: SemanticId(index + 1),
             part: 0,
@@ -2496,8 +2490,9 @@ mod tests {
     fn vertex_buffers_stay_within_the_device_buffer_limit() {
         use super::vertex_buffer_capacity;
         let limit = 256 << 20;
-        // 600,000 quads of six 84-byte vertices need about 288 MiB.
-        assert!(vertex_buffer_capacity(600_000 * 504, limit).is_err());
+        // The current vertex stream must fit before any resources load.
+        let quad_bytes = 6 * std::mem::size_of::<super::Vertex>() as u64;
+        assert!(vertex_buffer_capacity(600_000 * quad_bytes, limit).is_err());
         // Rounding up to a power of two never passes the device limit.
         assert_eq!(vertex_buffer_capacity(150 << 20, limit), Ok(limit));
         assert_eq!(vertex_buffer_capacity(100 << 20, limit), Ok(128 << 20));
@@ -2613,6 +2608,84 @@ mod tests {
             std::mem::size_of::<super::Vertex>() as u64,
             tilewright_render_testkit::VERTEX_BYTES
         );
+        let limits = wgpu::Limits::downlevel_webgl2_defaults();
+        assert!(super::Vertex::ATTRIBUTES.len() <= limits.max_vertex_attributes as usize);
+        assert!(
+            std::mem::size_of::<super::Vertex>() <= limits.max_vertex_buffer_array_stride as usize
+        );
+        // The ten user varyings contain 27 scalar components; no storage
+        // buffers, float64, or additional inter-stage locations are needed.
+        assert!(10 <= limits.max_inter_stage_shader_variables);
+    }
+
+    #[test]
+    fn exact_pixel_edges_nearest_ties_and_byte_rounding_match_the_reference() {
+        use tilewright_render_testkit::{shared_ui_provider, shared_ui_scene, structural_scene};
+        // Whole-texture nearest v=.5 at (28,22), plus staged filtered/tinted
+        // colors formerly differing by two channels in the unaligned target.
+        assert_matches_reference_with_allowance(
+            &structural_scene(48, 48).unwrap(),
+            &synthetic_provider().unwrap(),
+            tilewright_render_testkit::corpus_maximum_rgba_channel_difference("structural-fog-ui"),
+        );
+        assert_matches_reference(
+            &synthetic_scene(31, 17).unwrap(),
+            &synthetic_provider().unwrap(),
+        );
+        // Real font frames have ink exactly at included top pixel centers,
+        // including (250,134) at 1.25 DPI and (370,82) at 1.5 DPI. The same
+        // fixtures exercise cropped glyphs and arbitrary filter fractions.
+        for (name, width, height) in [
+            ("shared-ui-dpi-125", 400, 240),
+            ("shared-ui-dpi-150", 480, 288),
+        ] {
+            assert_matches_reference_with_allowance(
+                &shared_ui_scene(width, height).unwrap(),
+                &shared_ui_provider().unwrap(),
+                tilewright_render_testkit::corpus_maximum_rgba_channel_difference(name),
+            );
+        }
+    }
+
+    #[test]
+    fn aligned_flips_and_outside_frame_coordinates_match_the_reference() {
+        use tilewright_scene::{SceneBundle, SceneLimits, TextureRect, Viewport};
+        let original = synthetic_scene(31, 17).unwrap();
+        for flipped in [false, true] {
+            let mut quads = original.quads().to_vec();
+            for (index, quad) in quads.iter_mut().enumerate() {
+                // A smaller frame exercises clamping, while coordinates
+                // outside 0..1 must remain transparent rather than smeared.
+                quad.frame = Some(TextureRect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 2,
+                });
+                let (left, right) = if flipped {
+                    (1.25, -0.25)
+                } else {
+                    (-0.25, 1.25)
+                };
+                quad.uvs = [[left, 1.25], [right, 1.25], [right, -0.25], [left, -0.25]];
+                quad.positions = [[1.5, 1.5], [27.5, 1.5], [27.5, 16.5], [1.5, 16.5]];
+                quad.painter_order = u32::try_from(index).unwrap();
+            }
+            let scene = SceneBundle::from_quads(
+                1,
+                375,
+                Viewport {
+                    width: 31,
+                    height: 17,
+                    scale_milli: 1000,
+                },
+                original.clear_color(),
+                quads,
+                SceneLimits::default(),
+            )
+            .unwrap();
+            assert_matches_reference(&scene, &synthetic_provider().unwrap());
+        }
     }
 
     #[test]

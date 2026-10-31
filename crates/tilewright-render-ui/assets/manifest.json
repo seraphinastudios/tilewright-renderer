@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "license": "OFL-1.1",
+  "copyright": "Copyright 2015 The Roboto Mono Project Authors (https://github.com/googlefonts/robotomono)",
+  "reserved_font_names": [],
+  "reserved_font_names_evidence": "Pinned upstream OFL.txt declares none after the copyright statement.",
+  "source": {
+    "repository": "https://github.com/googlefonts/RobotoMono",
+    "revision": "895ec691990d041dd727c7b5afa3ce56525d98e6",
+    "path": "fonts/ttf/RobotoMono-Regular.ttf",
+    "sha256": "af0bff7599c3df3831755c16e39b3c496df74b8c8d8a1161b14dc8461be17cb4",
+    "url": "https://github.com/googlefonts/RobotoMono/blob/895ec691990d041dd727c7b5afa3ce56525d98e6/fonts/ttf/RobotoMono-Regular.ttf"
+  },
+  "notice": {
+    "path": "OFL.txt",
+    "sha256": "50ab8dd54680d3473f649c9db86fece88434d097c7834475c1c72d2f8c429215",
+    "url": "https://github.com/googlefonts/RobotoMono/blob/895ec691990d041dd727c7b5afa3ce56525d98e6/OFL.txt"
+  },
+  "generator": {
+    "path": "tools/ui-font/generate.py",
+    "sha256": "ab0307d22a1ba80ff0ee8649b009c4e6d6166b895baef8fee89146045f52febc",
+    "image": "sha256:7abe7338937bc6609ebae586eb66e7a79ff8667d19f62cb1ed212cc1fbf7e13f",
+    "python": "3.13.5",
+    "pillow": "11.1.0",
+    "freetype": "2.13.3",
+    "layout": "BASIC; independent scalar masks, no shaping or kerning",
+    "anchor": "ls (left baseline)",
+    "mode": "L mask to white RGBA8 with mask alpha",
+    "native_size": 20,
+    "packing": "scalar-sorted shelves, width 512, two transparent pixels between frames, power-of-two height",
+    "runtime": "immutable ATX1/metrics only; no font lookup, parsing, rasterization or network"
+  },
+  "coverage": {
+    "description": "Printable ASCII, available Latin-1 and Latin Extended-A, selected punctuation/arrows/symbols; see exact supported_scalars in metrics.json.",
+    "source_cmap_count": 876,
+    "selected_count": 337,
+    "unsupported": "Other scalars including combining marks, bidi controls and shaped scripts require explicit diagnostics; original UTF-8 is preserved by consumers.",
+    "omitted_requested_scalars": [
+      8208,
+      8209,
+      8210,
+      8223,
+      8592,
+      8593,
+      8594,
+      8595,
+      9633
+    ]
+  },
+  "files": {
+    "atlas.atx": {
+      "sha256": "ce4577f281f9b001044036cf0cd4e8d270c656f8e1fb00fea09ca8226a5ec21f",
+      "bytes": 524300,
+      "license": "OFL-1.1",
+      "author": "The Roboto Mono Project Authors",
+      "source": "https://github.com/googlefonts/RobotoMono/blob/895ec691990d041dd727c7b5afa3ce56525d98e6/fonts/ttf/RobotoMono-Regular.ttf",
+      "transformation": "Selected independent 20 px grayscale glyph masks packed as white RGBA8 ATX1",
+      "notice": "OFL.txt"
+    },
+    "solid.atx": {
+      "sha256": "a8354140d41a231fea70c89645d3380bc06f429a2ad65a5451144445ad487a16",
+      "bytes": 16,
+      "license": "MIT",
+      "author": "Seraphina Studios",
+      "source": "tools/ui-font/generate.py synthetic white RGBA constant",
+      "transformation": "Original synthetic 1x1 opaque white RGBA8 ATX1",
+      "notice": "Renderer MIT LICENSE"
+    },
+    "metrics.json": {
+      "sha256": "c32c5ff91d5bff7b866ff1ab1234f0318554d8b7d2c88300894744b2f8be6c66",
+      "bytes": 64090,
+      "license": "OFL-1.1",
+      "author": "The Roboto Mono Project Authors",
+      "source": "https://github.com/googlefonts/RobotoMono/blob/895ec691990d041dd727c7b5afa3ce56525d98e6/fonts/ttf/RobotoMono-Regular.ttf",
+      "transformation": "Selected scalar frames, baseline bearings and advances",
+      "notice": "OFL.txt"
+    },
+    "glyphs.rs": {
+      "sha256": "0cd64be2e3158764d0b4ea6aa029be3c5cff57f5b251488613f715a0b147ff22",
+      "bytes": 58430,
+      "license": "OFL-1.1",
+      "author": "The Roboto Mono Project Authors",
+      "source": "https://github.com/googlefonts/RobotoMono/blob/895ec691990d041dd727c7b5afa3ce56525d98e6/fonts/ttf/RobotoMono-Regular.ttf",
+      "transformation": "Rust constants generated from the same glyph metrics and texture hashes",
+      "notice": "OFL.txt"
+    },
+    "source-cmap.json": {
+      "sha256": "daa6ae8a12184671d96e94923d0cb97fbfd344df7c49a1cb70589f9c4ef4adcb",
+      "bytes": 8842,
+      "license": "OFL-1.1",
+      "author": "The Roboto Mono Project Authors",
+      "source": "https://github.com/googlefonts/RobotoMono/blob/895ec691990d041dd727c7b5afa3ce56525d98e6/fonts/ttf/RobotoMono-Regular.ttf",
+      "transformation": "Exact mapped scalar and selected embedded name-table inventory",
+      "notice": "OFL.txt"
+    }
+  }
+}

@@ -5,11 +5,12 @@ use sha2::{Digest, Sha256};
 use std::{fmt::Write as _, time::Instant};
 use tilewright_render_api::{RenderRequest, Renderer};
 use tilewright_render_testkit::{
-    ATLAS_ID, ReferenceRenderer, atlas_digest, atlas_provider, atlas_scene, dense_scene,
-    iso_world_scene, offscreen_target, structural_scene, synthetic_digest, synthetic_provider,
+    ATLAS_ID, ReferenceRenderer, atlas_digest, atlas_provider, atlas_scene,
+    corpus_maximum_rgba_channel_difference, dense_scene, iso_world_scene, offscreen_target,
+    shared_ui_provider, shared_ui_scene, structural_scene, synthetic_digest, synthetic_provider,
     synthetic_scene, top_down_world_scene, world_provider, world_texture,
 };
-use tilewright_scene::Digest256;
+use tilewright_scene::{Digest256, SceneBundle};
 
 /// The resources a corpus scenario draws from.
 #[derive(Clone, Copy)]
@@ -17,6 +18,7 @@ enum Resources {
     Synthetic,
     World,
     Atlas,
+    Ui,
 }
 
 /// Every fixture texture the scenarios draw: its name, identity, size and
@@ -35,6 +37,20 @@ fn resources() -> Vec<(&'static str, u64, u32, u32, Digest256)> {
         resources.push((name, id, texture.width, texture.height, texture.digest));
     }
     resources.push(("atlas-character-sheet", ATLAS_ID.0, 64, 64, atlas_digest()));
+    resources.push((
+        "ui-roboto-mono-atlas",
+        301,
+        512,
+        256,
+        Digest256(tilewright_render_ui::builtin::ATLAS_SHA256),
+    ));
+    resources.push((
+        "ui-solid",
+        302,
+        1,
+        1,
+        Digest256(tilewright_render_ui::builtin::SOLID_SHA256),
+    ));
     resources
 }
 
@@ -48,11 +64,10 @@ fn print_resources() {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("{{\"schema_version\":1,\"resources\":[");
-    print_resources();
-    println!("],\"cases\":[");
-    let cases = [
+type Case = (&'static str, SceneBundle, u64, Resources);
+
+fn cases() -> Result<[Case; 9], tilewright_scene::Error> {
+    Ok([
         (
             "overlap-square",
             synthetic_scene(16, 16)?,
@@ -95,8 +110,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             200_000,
             Resources::Atlas,
         ),
-    ];
-    for (index, (name, scene, maximum_cpu_micros, resources)) in cases.into_iter().enumerate() {
+        (
+            "shared-ui-dpi-125",
+            shared_ui_scene(400, 240)?,
+            400_000,
+            Resources::Ui,
+        ),
+        (
+            "shared-ui-dpi-150",
+            shared_ui_scene(480, 288)?,
+            500_000,
+            Resources::Ui,
+        ),
+    ])
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("{{\"schema_version\":1,\"resources\":[");
+    print_resources();
+    println!("],\"cases\":[");
+    for (index, (name, scene, maximum_cpu_micros, resources)) in cases()?.into_iter().enumerate() {
         let viewport = scene.viewport();
         let started = Instant::now();
         let frame = ReferenceRenderer::new(offscreen_target(viewport.width, viewport.height))?
@@ -106,6 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Resources::Synthetic => synthetic_provider()?,
                     Resources::World => world_provider()?,
                     Resources::Atlas => atlas_provider()?,
+                    Resources::Ui => shared_ui_provider()?,
                 },
             })?;
         let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -126,12 +160,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .flat_map(|value| value.to_le_bytes())
             .collect::<Vec<_>>();
         println!(
-            "{}{{\"name\":\"{}\",\"width\":{},\"height\":{},\"clock_millis\":{},\"maximum_rgba_channel_difference\":1,\"performance\":{{\"maximum_cpu_micros\":{},\"quad_count\":{},\"resource_requests\":{},\"uploaded_bytes\":{},\"vertex_count\":{},\"vertex_allocation_bytes\":{},\"target_allocation_bytes\":{}}},\"digests\":{{\"rgba8\":\"{}\",\"semantic_u32le\":\"{}\",\"depth_i16le\":\"{}\",\"coverage_u8\":\"{}\"}}}}",
+            "{}{{\"name\":\"{}\",\"width\":{},\"height\":{},\"clock_millis\":{},\"maximum_rgba_channel_difference\":{},\"performance\":{{\"maximum_cpu_micros\":{},\"quad_count\":{},\"resource_requests\":{},\"uploaded_bytes\":{},\"vertex_count\":{},\"vertex_allocation_bytes\":{},\"target_allocation_bytes\":{}}},\"digests\":{{\"rgba8\":\"{}\",\"semantic_u32le\":\"{}\",\"depth_i16le\":\"{}\",\"coverage_u8\":\"{}\"}}}}",
             if index == 0 { "" } else { "," },
             name,
             viewport.width,
             viewport.height,
             scene.clock_millis(),
+            corpus_maximum_rgba_channel_difference(name),
             maximum_cpu_micros,
             scene.quads().len(),
             frame.metrics.resource_requests,
