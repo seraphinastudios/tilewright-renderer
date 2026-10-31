@@ -3,7 +3,8 @@ name = "tilewright-render-ui"
 description = "Renderer-neutral UI and typography seam for Tilewright"
 authors.workspace = true
 edition.workspace = true
-license.workspace = true
+# Implementation is MIT; bundled font source and derived data retain OFL-1.1.
+license = "MIT AND OFL-1.1"
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true

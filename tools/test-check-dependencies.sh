@@ -80,3 +80,45 @@ if run_check "${undeclared_direct}"; then
   echo "dependency policy accepted an undeclared direct dependency" >&2
   exit 1
 fi
+
+# Font data is permitted for precisely the reviewed UI package/version.
+approved_font="${temporary}/approved-font.json"
+jq '.packages += [{"id":"path+file:///renderer#tilewright-render-ui@0.6.0",
+  "name":"tilewright-render-ui", "version":"0.6.0", "license":"MIT AND OFL-1.1",
+  "source":null, "dependencies":[]}]
+  | .workspace_members += ["path+file:///renderer#tilewright-render-ui@0.6.0"]' \
+  "${updated}" >"${approved_font}"
+run_check "${approved_font}"
+
+for mutation in unrelated wrong-version forbidden-conjunct; do
+  case "${mutation}" in
+    unrelated) expression='(.packages[] | select(.name == "tilewright-render-ui") | .name) = "unrelated-font"' ;;
+    wrong-version) expression='(.packages[] | select(.name == "tilewright-render-ui") | .version) = "0.6.1"' ;;
+    forbidden-conjunct) expression='(.packages[] | select(.name == "tilewright-render-ui") | .license) = "MIT AND OFL-1.1 AND GPL-3.0-only"' ;;
+  esac
+  jq "${expression}" "${approved_font}" >"${temporary}/${mutation}.json"
+  if run_check "${temporary}/${mutation}.json"; then
+    echo "dependency policy accepted out-of-scope font license: ${mutation}" >&2
+    exit 1
+  fi
+done
+
+# Exercise policy schema failures in a private repository, never mutate policy
+# in the caller's checkout while a concurrent validator may be using it.
+mkdir -p "${temporary}/repository/tools" "${temporary}/repository/policy"
+cp tools/check-dependencies.sh "${temporary}/repository/tools/"
+git -C "${temporary}/repository" init --quiet
+for mutation in wildcard duplicate missing-reason unknown-key empty-license; do
+  case "${mutation}" in
+    wildcard) expression='.package_license_exceptions[0].version = "*"' ;;
+    duplicate) expression='.package_license_exceptions += [.package_license_exceptions[0]]' ;;
+    missing-reason) expression='del(.package_license_exceptions[0].reason)' ;;
+    unknown-key) expression='.package_license_exceptions[0].future = true' ;;
+    empty-license) expression='.package_license_exceptions[0].allowed_spdx = []' ;;
+  esac
+  jq "${expression}" policy/dependencies.json >"${temporary}/repository/policy/dependencies.json"
+  if (cd "${temporary}/repository" && run_check "${approved_font}"); then
+    echo "dependency policy accepted invalid package license exception: ${mutation}" >&2
+    exit 1
+  fi
+done

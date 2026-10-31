@@ -36,7 +36,11 @@ cargo build --locked --release --package tilewright-render --features sdl3
 cp "${target_directory}/release/tilewright-render" "${output}/"
 tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
   -cf - corpus | gzip -n >"${output}/corpus.tar.gz"
+python3 tools/ui-font/check.py
 cp LICENSE PROVENANCE.md THIRD_PARTY_NOTICES.md "${output}/"
+# Standalone binaries embed the OFL font data; retain the exact upstream notice.
+cp crates/tilewright-render-ui/assets/OFL.txt "${output}/OFL-RobotoMono.txt"
+cp crates/tilewright-render-ui/assets/manifest.json "${output}/ui-font-manifest.json"
 
 SYFT_CHECK_FOR_APP_UPDATE=false syft dir:. \
   --source-name tilewright-renderer --source-version "${version}" \

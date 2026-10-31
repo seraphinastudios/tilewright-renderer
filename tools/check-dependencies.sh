@@ -7,13 +7,24 @@ cd "${repository}"
 jq -e '
   def nonempty_string: type == "string" and length > 0;
 
-  .schema_version == 2
+  .schema_version == 3
   and (.allowed_spdx
     | type == "array" and length > 0
       and all(.[]; nonempty_string) and length == (unique | length))
   and (.allowed_spdx_exceptions
     | type == "array"
       and all(.[]; nonempty_string) and length == (unique | length))
+  and (.package_license_exceptions
+    | type == "array"
+      and all(.[];
+        type == "object"
+        and keys == ["allowed_spdx", "name", "reason", "version"]
+        and (.name | type == "string" and test("^[a-zA-Z0-9][a-zA-Z0-9_-]*$"))
+        and (.version | type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"))
+        and (.reason | nonempty_string)
+        and (.allowed_spdx | type == "array" and length > 0
+          and all(.[]; nonempty_string) and length == (unique | length)))
+      and (map([.name, .version]) | length == (unique | length)))
   and (.allowed_registry_sources
     | type == "array" and length > 0
       and all(.[]; nonempty_string) and length == (unique | length))
@@ -127,14 +138,18 @@ jq -e --slurpfile policy policy/dependencies.json '
   | ($policy[0].direct_dependencies | map(.name) | unique | sort) as $policy_names
   | $direct_names == $policy_names
     and all($metadata.packages[];
-      (.license // "") as $expression
+      . as $package
+      | ($policy[0].package_license_exceptions
+          | map(select(.name == $package.name and .version == $package.version)
+            | .allowed_spdx[]) ) as $package_allowed
+      | (.license // "") as $expression
       | [$expression
           | scan("\\(|\\)|AND|OR|WITH|/|[A-Za-z0-9][A-Za-z0-9.+-]*")]
         as $tokens
       | ($expression | gsub("\\s"; "")) == ($tokens | join(""))
         and ($tokens
           | evaluate_license(
-              $policy[0].allowed_spdx;
+              ($policy[0].allowed_spdx + $package_allowed);
               $policy[0].allowed_spdx_exceptions)))
     and all($metadata.packages[];
       if (.id as $id | $workspace_members | index($id))

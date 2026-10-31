@@ -1,7 +1,15 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "allowed_spdx": ["Apache-2.0", "BSD-2-Clause", "ISC", "MIT", "Unicode-3.0", "Zlib"],
   "allowed_spdx_exceptions": [],
+  "package_license_exceptions": [
+    {
+      "name": "tilewright-render-ui",
+      "version": "0.6.0",
+      "allowed_spdx": ["OFL-1.1"],
+      "reason": "Pinned Roboto Mono source and derived font data only; implementation remains MIT. See PROVENANCE.md and crates/tilewright-render-ui/assets/manifest.json."
+    }
+  ],
   "allowed_registry_sources": ["registry+https://github.com/rust-lang/crates.io-index"],
   "direct_dependencies": [
     {"name":"bytemuck","purpose":"checked vertex byte views"},
