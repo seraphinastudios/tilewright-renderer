@@ -253,8 +253,9 @@ mod tests {
                     .iter()
                     .filter(|quad| quad.semantic_id == SemanticId(9208))
                     .map(|quad| quad.positions[0][1])
-                    .fold(f32::INFINITY, f32::min),
-                157.25 * width as f32 / 320.0
+                    .fold(f32::INFINITY, f32::min)
+                    .to_bits(),
+                (157.25 * width as f32 / 320.0).to_bits()
             );
             let frame = ReferenceRenderer::new(offscreen_target(width, height))
                 .unwrap()
