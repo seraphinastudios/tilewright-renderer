@@ -477,32 +477,36 @@ fn rtl_ligature_hit_and_partial_selection_share_caret_geometry() {
         return;
     };
     let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
-    let layout = system.layout("لا", 32.0, None).unwrap();
+    // Explicit RTL embedding exercises a standard Latin ffi ligature with an
+    // odd bidi level even though the bundled Arabic face uses contextual
+    // lam/alef forms rather than a single lam-alef glyph.
+    let layout = system.layout("\u{202e}ffi\u{202c}", 32.0, None).unwrap();
     assert!(
         layout
             .clusters()
             .iter()
-            .any(|cluster| cluster.bytes == (0..4)),
-        "fixture must exercise lam-alef ligature: {:?}", layout.clusters()
+            .any(|cluster| cluster.right_to_left && cluster.bytes == (3..6)),
+        "fixture must exercise RTL ffi ligature: {:?}",
+        layout.clusters()
     );
     let start = TextCursor {
-        byte: 0,
+        byte: 3,
         affinity: TextAffinity::After,
     };
     let middle = TextCursor {
-        byte: 2,
+        byte: 4,
         affinity: TextAffinity::Before,
     };
     let end = TextCursor {
-        byte: 4,
+        byte: 6,
         affinity: TextAffinity::Before,
     };
     let right = layout.caret(start).unwrap();
     let center = layout.caret(middle).unwrap();
     let left = layout.caret(end).unwrap();
     assert!(right.x > center.x && center.x > left.x);
-    assert_eq!(layout.hit([right.x - 0.1, right.y + 5.0]).byte, 0);
-    assert_eq!(layout.hit([left.x + 0.1, left.y + 5.0]).byte, 4);
+    assert_eq!(layout.hit([right.x - 0.1, right.y + 5.0]).byte, 3);
+    assert_eq!(layout.hit([left.x + 0.1, left.y + 5.0]).byte, 6);
     let selected = layout.selection_rects(start, middle);
     assert_eq!(selected.len(), 1);
     assert!((selected[0].x - center.x).abs() < 0.001);
