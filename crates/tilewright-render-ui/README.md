@@ -1,9 +1,66 @@
-# Shared UI compiler candidate
+# Shared UI and Unicode text candidate
 
 The additive positioned display list compiles logical rectangles and text into
 existing `tilewright_scene::Quad` values on `Layer::Interface`. The original
 `UiQuad`, `TextRun` and `UiFrame` struct layouts remain unchanged. This worktree
 is a local candidate; it does not identify a published registry release.
+
+## Unicode text
+
+`FontPack::new` verifies an ordered set of `FontBlob { family, bytes, sha256 }`
+inputs. `TextSystem::new` accepts that pack and explicit `TextLimits`; create one
+engine per renderer session. The large OFL Noto pack is separate application
+data. `unicode_fonts::FONTS` and `FONT_PACK_MANIFEST` identify the exact files,
+lengths, digests and notices. The consumer supplies verified bytes from its
+explicit trusted asset source; this crate never searches the filesystem or loads
+system fonts. The published crate contains identities, not the 39.6 MB font pack.
+
+`TextSystem::layout(text, size, width)` performs advanced shaping, deterministic
+font fallback and bidirectional layout. A width enables wrapping; `None` preserves
+a single visual line per source line. Layout retains original UTF-8 without
+normalization and exposes byte cluster ranges, extended-grapheme boundaries,
+`caret`, `hit`, `move_visual` and `selection_rects`. `TextCursor` carries an
+original byte offset plus `TextAffinity` to distinguish bidi/wrap boundaries.
+Invalid interior-grapheme cursors have no caret/selection geometry. Ligature
+interiors use advance subdivisions; this API does not expose font-specific GDEF
+ligature caret positions. Selection may produce multiple disconnected rectangles.
+
+`TextSystem::compile(viewport, list, solid, first_resource, limits)` consumes the
+same positioned display list and emits ordinary interface quads plus immutable
+`UnicodeTexture` ATX1 resources. `builtin::FONT_ID` selects the pack primary role;
+unknown role IDs fail. Bind the returned resources by full ID/revision/digest,
+retain them while frames are in flight, and reserve their IDs against World.
+The engine advances revisions when atlas bytes change and reuses identity for
+unchanged bytes. Retire the engine resource namespace before replacing an engine.
+The CPU reference and GPU renderers consume identical glyph bytes and scene
+geometry. The engine supports monochrome outline fonts (including bundled emoji);
+color bitmap/outline font tables are rejected before rasterization.
+
+The pack covers the accepted Latin, combining, Arabic, Hebrew, Indic, Han/kana,
+Hangul and emoji corpus. Coverage is finite, not every Unicode scalar or emoji
+sequence. Missing glyphs retain their original byte ranges and produce a visible
+font fallback and diagnostics. Consumers preserve all source text; they decide
+whether missing visible coverage should prevent a specific review action.
+
+Defaults cap fonts at 32/64 MiB, one text request at 64 KiB, glyphs at 65536 and
+lines at 4096; caller limits can tighten these values. Size is 1–256 logical
+pixels, raster size at most 1024 pixels, and the atlas at most 16 Mi pixels
+(64 MiB RGBA plus 12 ATX1 header bytes). Set a smaller raster-pixel budget if the
+consumer resource-provider byte cap is lower. Glyph outline bounds are checked
+before pixel allocation. Retained raster images are capped at 4096/16 MiB;
+layouts at 256 entries and an 8 MiB conservative text/glyph retention charge.
+Private shaping scratch is rebuilt every 256 uncached requests from the same
+immutable database, preserving face IDs and existing layouts. `clear_cache`
+drops retained work without invalidating caller-held layouts/resources.
+
+Focus, IME preedit, selection state, input generation fencing, and source edits
+belong to the consumer. Compose preedit only into transient display text and use
+this exact layout for caret geometry and IME placement; commits reach document
+authority through its existing review/transaction path.
+
+## Legacy bitmap text
+
+The original `compile_ui` API below retains its bounded unshaped repertoire.
 
 ```rust
 use tilewright_render_ui::{builtin, BitmapFontSet, UiDisplayList, UiLimits,
@@ -51,8 +108,7 @@ the original character and exact UTF-8 byte interval. Combining marks, bidi
 controls and complex scripts are unsupported even if a supplied font has a glyph.
 `font.supports_text(full_original_text)` uses the same support rule without
 truncation or normalization. Consumers must preserve the original field value and
-disable lossy visual editing of unsupported text. This bounded font candidate is
-pending the owner's font-scope choice.
+disable lossy visual editing of unsupported text. Use the Unicode path above for international editing.
 
 Input byte, scalar, primitive, line, viewport and output budgets are bounded by
 caller limits and absolute caps. Validation and a dry compilation pass precede

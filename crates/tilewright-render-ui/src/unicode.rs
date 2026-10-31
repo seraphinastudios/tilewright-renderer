@@ -52,7 +52,7 @@ impl Default for TextLimits {
             maximum_text_bytes: 65_536,
             maximum_glyphs: 65_536,
             maximum_lines: 4096,
-            maximum_cached_layouts: 64,
+            maximum_cached_layouts: 256,
             maximum_layout_cache_bytes: 8 * 1024 * 1024,
             maximum_raster_pixels: 16 * 1024 * 1024,
         }

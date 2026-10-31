@@ -470,7 +470,7 @@ impl TextSystem {
             retained_bytes,
         }));
         let budget = self.limits.maximum_layout_cache_bytes.min(8 * 1024 * 1024);
-        let count = self.limits.maximum_cached_layouts.min(64);
+        let count = self.limits.maximum_cached_layouts.min(256);
         if retained_bytes <= budget && count > 0 {
             while self.layouts.len() >= count
                 || self.layout_bytes.saturating_add(retained_bytes) > budget

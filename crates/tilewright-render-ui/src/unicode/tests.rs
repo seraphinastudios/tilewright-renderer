@@ -417,3 +417,129 @@ fn primitive_order_survives_equal_painter_order_and_clipping() {
     assert_eq!(output.quads[0].part, 0);
     assert_eq!(output.quads[1].part, 1);
 }
+
+/// Run with --release --nocapture and the explicit test font root for evidence.
+/// Timings are measured output, not machine-dependent pass/fail thresholds.
+#[test]
+fn performance_international_ui() {
+    let Some(pack) = explicit_pack() else {
+        return;
+    };
+    let start = std::time::Instant::now();
+    let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
+    let initialization = start.elapsed();
+    let mut labels: Vec<_> = (0..100)
+        .map(|index| format!("Panel {index}: العربية שלום नमस्ते 日本語 한국어 👩🏽‍💻 e\u{301}"))
+        .collect();
+    let sample = "العربية שלום नमस्ते 日本語 한국어 👩🏽‍💻 e\u{301} ";
+    let mut draft = String::new();
+    while draft.len() + sample.len() <= 4096 {
+        draft.push_str(sample);
+    }
+    draft.extend(std::iter::repeat_n('x', 4096 - draft.len()));
+    labels.push(draft);
+    let clip = crate::UiRect {
+        x: 0.0,
+        y: 0.0,
+        width: 2048.0,
+        height: 2048.0,
+    };
+    let primitives: Vec<_> = labels
+        .iter()
+        .enumerate()
+        .map(|(index, text)| crate::UiPrimitive::Text {
+            origin: [0.0, f32::from(u16::try_from(index).unwrap()) * 19.0],
+            clip,
+            paint: crate::UiPaint {
+                semantic_id: tilewright_scene::SemanticId(u64::try_from(index + 1).unwrap()),
+                painter_order: u32::try_from(index).unwrap(),
+                color: [1.0; 4],
+            },
+            font: crate::builtin::FONT_ID,
+            size: 14.0,
+            text,
+        })
+        .collect();
+    let viewport = crate::UiViewport {
+        logical_size: [2048, 2048],
+        physical_size: [2048, 2048],
+    };
+    let solid = crate::UiTexture {
+        id: tilewright_scene::ResourceId(2),
+        revision: 1,
+        digest: tilewright_scene::Digest256(crate::builtin::SOLID_SHA256),
+    };
+    let start = std::time::Instant::now();
+    let cold = system
+        .compile(
+            viewport,
+            crate::UiDisplayList {
+                primitives: &primitives,
+            },
+            solid,
+            3,
+            crate::UiLimits::default(),
+        )
+        .unwrap();
+    let cold_elapsed = start.elapsed();
+    assert!(cold.unsupported.is_empty());
+    let mut warm = Vec::new();
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let frame = system
+            .compile(
+                viewport,
+                crate::UiDisplayList {
+                    primitives: &primitives,
+                },
+                solid,
+                3,
+                crate::UiLimits::default(),
+            )
+            .unwrap();
+        warm.push(start.elapsed().as_micros());
+        assert_eq!(frame.resources[0].identity, cold.resources[0].identity);
+        assert_eq!(frame.resources[0].bytes, cold.resources[0].bytes);
+    }
+    warm.sort_unstable();
+    assert_eq!(system.cached_layouts(), 101);
+    assert!(system.raster.len() <= 4096);
+    assert!(system.raster_bytes <= 16 * 1024 * 1024);
+    let font = crate::builtin::builtin_font(crate::UiTexture {
+        id: tilewright_scene::ResourceId(1),
+        revision: 1,
+        digest: tilewright_scene::Digest256(crate::builtin::ATLAS_SHA256),
+    })
+    .unwrap();
+    let values = [font];
+    let fonts = crate::BitmapFontSet::new(&values).unwrap();
+    let start = std::time::Instant::now();
+    let legacy = crate::compile_ui(
+        viewport,
+        crate::UiDisplayList {
+            primitives: &primitives,
+        },
+        &fonts,
+        solid,
+        crate::UiLimits::default(),
+    )
+    .unwrap();
+    let legacy_elapsed = start.elapsed();
+    println!(
+        "{{\"case\":\"100 international labels + 4096-byte draft\",\"font_bytes\":{},\"initialization_us\":{},\"cold_shape_raster_pack_us\":{},\"warm_median_us\":{},\"warm_min_us\":{},\"warm_max_us\":{},\"legacy_unshaped_us\":{},\"legacy_unsupported_scalars\":{},\"atlas_bytes\":{},\"raster_cache_bytes\":{},\"raster_cache_entries\":{},\"layout_cache_entries\":{},\"layout_retention_charge\":{},\"quads\":{}}}",
+        crate::unicode_fonts::TOTAL_FONT_BYTES,
+        initialization.as_micros(),
+        cold_elapsed.as_micros(),
+        warm[2],
+        warm[0],
+        warm[4],
+        legacy_elapsed.as_micros(),
+        legacy.unsupported.len(),
+        cold.resources[0].bytes.len(),
+        system.raster_bytes,
+        system.raster.len(),
+        system.cached_layouts(),
+        system.layout_bytes,
+        cold.quads.len()
+    );
+}
