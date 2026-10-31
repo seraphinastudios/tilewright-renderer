@@ -1,7 +1,7 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-#![allow(clippy::float_cmp)]
+#![allow(clippy::float_cmp, clippy::cast_precision_loss)]
 
 use super::*;
 use tilewright_scene::{

@@ -19,7 +19,7 @@ pub const ATLAS_BYTES: &[u8] = include_bytes!("../assets/atlas.atx");
 pub const SOLID_BYTES: &[u8] = include_bytes!("../assets/solid.atx");
 
 /// Binds the immutable built-in metrics to a caller-reserved resource ID and
-/// revision. The resource provider must supply ATLAS_BYTES at this identity.
+/// revision. The resource provider must supply `ATLAS_BYTES` at this identity.
 ///
 /// # Errors
 /// Rejects a digest other than the exact atlas digest, or an invalid identity.

@@ -324,42 +324,44 @@ fn validate_inputs(
 }
 
 struct PartLedger {
-    entries: [(SemanticId, usize); MAX_PRIMITIVES],
+    ids: [SemanticId; MAX_PRIMITIVES],
+    counts: [u32; MAX_PRIMITIVES],
     used: usize,
 }
 impl PartLedger {
     fn new() -> Self {
         Self {
-            entries: [(SemanticId(0), 0); MAX_PRIMITIVES],
+            ids: [SemanticId(0); MAX_PRIMITIVES],
+            counts: [0; MAX_PRIMITIVES],
             used: 0,
         }
     }
     fn claim(&mut self, id: SemanticId, count: usize) -> Result<usize, UiError> {
-        let index = match self.entries[..self.used]
-            .iter()
-            .position(|entry| entry.0 == id)
+        let index = if let Some(index) = self.ids[..self.used].iter().position(|entry| *entry == id)
         {
-            Some(index) => index,
-            None => {
-                if self.used == MAX_PRIMITIVES {
-                    return Err(UiError::LimitExceeded);
-                }
-                let index = self.used;
-                self.entries[index].0 = id;
-                self.used += 1;
-                index
+            index
+        } else {
+            if self.used == MAX_PRIMITIVES {
+                return Err(UiError::LimitExceeded);
             }
+            let index = self.used;
+            self.ids[index] = id;
+            self.used += 1;
+            index
         };
-        let start = self.entries[index].1;
+        let start = usize::try_from(self.counts[index]).map_err(|_| UiError::PartOverflow)?;
         let end = start.checked_add(count).ok_or(UiError::PartOverflow)?;
         if end > 65_536 {
             return Err(UiError::PartOverflow);
         }
-        self.entries[index].1 = end;
+        self.counts[index] = u32::try_from(end).map_err(|_| UiError::PartOverflow)?;
         Ok(start)
     }
 }
 
+// Keep dry and emitting passes on the same geometry/layout code. All integer
+// casts here are exact: validated dimensions/frames <=8192 and lines <=4096.
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
 fn compile_pass(
     viewport: UiViewport,
     list: UiDisplayList<'_>,
