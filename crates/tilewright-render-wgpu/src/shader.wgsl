@@ -82,7 +82,10 @@ fn vertex_main(
 // Round nonnegative byte-domain values as Rust f32::round does. WGSL round
 // uses ties-to-even, which is not the renderer's RGBA8 contract.
 fn bytes(value: vec4<f32>) -> vec4<f32> {
-    return clamp(floor(value + vec4<f32>(0.5)), vec4<f32>(0.0), vec4<f32>(255.0));
+    // Adding 0.5 first can round a value just below a tie upward. Compare
+    // the fractional part instead, including at powers of two.
+    let rounded = floor(value) + select(vec4<f32>(0.0), vec4<f32>(1.0), fract(value) >= vec4<f32>(0.5));
+    return clamp(rounded, vec4<f32>(0.0), vec4<f32>(255.0));
 }
 
 fn texel(frame: vec4<f32>, point: vec2<f32>) -> vec4<f32> {
@@ -137,8 +140,7 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 alpha = max(alpha, sample_inside(uv + direction * 0.5, input.frame).a);
             }
         }
-        let output = bytes(vec4<f32>(input.glow_color.rgb * 255.0, input.glow_color.a * alpha));
-        return vec4<f32>(output.rgb * output.a / 65025.0, output.a / 255.0);
+        return bytes(vec4<f32>(input.glow_color.rgb * 255.0, input.glow_color.a * alpha)) / 255.0;
     }
     var output = sample_inside(uv, input.frame) * input.color;
     if (input.grayscale > 0.0) {
@@ -148,5 +150,5 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
     output = bytes(output);
     output = bytes(vec4<f32>(fma(output.rgb, vec3<f32>(1.0 - input.effect), output.bgr * input.effect), output.a));
-    return vec4<f32>(output.rgb * output.a / 65025.0, output.a / 255.0);
+    return output / 255.0;
 }

@@ -1894,7 +1894,7 @@ fn create_pipeline(
             compilation_options,
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: writes,
             })],
         }),
