@@ -103,6 +103,26 @@ failures or HTTP 502/503/504; only the post-creation readback also retries HTTP
 404 to allow propagation. Creation requests and registry PUTs are never retried.
 An existing intent or a mismatched readback still stops publication.
 
+After each automatic PUT, before registry confirmation, the helper logs and
+writes a `tilewright-crate-put-outcome` JSON receipt. It records the source
+release/revision, manifest/archive digests, intent ref/commit, verified producer,
+publishing run/attempt and workflow revision, actual HTTP status when received,
+and a fixed outcome category. The result is `acknowledged`, `rate_limited` (HTTP
+429 only), or `uncertain`; a retry time is included only when strictly parsed
+and normalized to UTC. Raw response bodies, header dumps, exception messages
+and credentials are never recorded. Redirects are refused and their status is
+retained. Transport failures retain a status if headers were already received.
+The workflow collects receipts from its temporary directory as
+`crate-put-outcomes-RUN_ID-ATTEMPT`, including when upload fails, with 90-day
+retention. The receipt is diagnostic evidence, not proof of registry visibility
+or permission to retry. Confirmation still uses registry reads only.
+
+If receipt persistence fails after a PUT, the helper stops and retains the
+intent as unresolved; a partial file or log cannot authorize recovery. Missing
+receipts, including for older runs, say nothing about whether the registry
+accepted a write. These diagnostics cannot recover a response discarded by
+an older publisher.
+
 Retain an intent after ambiguous upload results. The owner must establish whether
 the registry accepted the write; public absence alone is insufficient. Only
 explicit owner recovery after authoritative confirmation of no accepted write
@@ -131,9 +151,11 @@ python3 tools/crate_prepare.py check-version --base ACCEPTED_BASE_SHA
 python3 tools/crate_prepare.py prepare --source-tag vSOURCE_VERSION --output /tmp/renderer-crates
 ```
 
-For recovery, dispatch the existing eligible release through the same workflow
-with its exact release ID, revision and manifest checksum. Never rebuild or
-replace release archives to recover a failed upload. Correct conflicting
+For owner-authorized recovery, first resolve any existing intent as described
+above, then dispatch the existing eligible release through the same workflow
+with its exact release ID, revision and manifest checksum. HTTP 403 and other
+non-429 failures remain uncertain; a status alone does not authorize removing
+an intent. Never rebuild or replace release archives to recover a failed upload. Correct conflicting
 packages through a new reviewed Cargo version and source release.
 
 ### Owner bootstrap
@@ -230,8 +252,9 @@ For failures after a PUT:
 
 ### Activation order
 
-`publish-crate.yml` and `reconcile-crates.yml` have been disabled since
-2026-10-17. While the publisher is disabled, the final `dispatch` step of every
+The original rollout disabled `publish-crate.yml` and `reconcile-crates.yml` on
+2026-10-17. This historical sequence is not a claim about their current settings.
+While the publisher is disabled, the final `dispatch` step of every
 release that owns new coordinates fails after the release is published, as it
 did for v1.12.0, v1.13.0 and v1.14.0. Their prepare and attest jobs succeeded,
 so their evidence remains valid. Trusted Publishing cannot create crate names,
@@ -252,17 +275,31 @@ order:
    records the repository owner's GitHub ID along with the owner and
    repository names, so renaming or transferring the repository or the
    organization requires reconfiguring the publishers.
-4. The owner re-enables `publish-crate.yml` and `reconcile-crates.yml`. This
-   is a repository Actions setting that only the owner changes; no code or
-   agent re-enables them.
+4. The owner separately authorizes publisher activation and hourly reconciler
+   activation. These are repository Actions settings; this sequence does not
+   authorize an agent to change them. Approval to publish one exact batch does
+   not authorize hourly reconciliation or publication of older eligible cohorts.
+
+The 2026-10-31 owner approval for the eight 0.6.0 archives from immutable source
+release `429775329` is batch-specific. It does not authorize enabling the hourly
+reconciler or publishing older cohorts. Retained intents from its interrupted
+publication require the same authoritative, explicit owner recovery above.
+
+The owner subsequently selected preparation of a new reviewed 0.6.1 cohort,
+retaining the unresolved 0.6.0 intent. All eight public libraries and their
+internal exact dependency requirements advance together; this does not replace
+the immutable 0.6.0 archives or establish their missing upload outcome. The next
+source release after v1.19.0 is expected to be v1.20.0 under the `main` minor
+release policy, subject to the final release plan. Preparation is not approval
+to publish: the owner must review the concrete new release artifacts first.
 
 From then on, merges release normally. A release that changes no packaged
 crate content reuses the published archives, owns no new coordinates and
 dispatches nothing. A release that changes packaged content bumps the Cargo
 version and owns new coordinates; v1.15.0's 0.4.0 is the first after v1.14.0.
 While the publisher is disabled, such a release's dispatch fails after the
-release is published, and once it is active, reconciliation publishes those
-releases, one per run. Later Cargo version bumps publish automatically.
+release is published, and once separately authorized and active, reconciliation
+publishes those releases, one per run. Later Cargo version bumps publish automatically.
 crates.io's first version, 0.3.0, and 0.4.0 keep wgpu's default Direct3D 12
 shader compiler, which prefers `dxcompiler.dll`, and request Vulkan on Windows
 without checking for a system loader. From 0.4.1 the renderer selects FXC and

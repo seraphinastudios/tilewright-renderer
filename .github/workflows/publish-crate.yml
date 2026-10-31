@@ -87,9 +87,18 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           GH_INTENT_TOKEN: ${{ github.token }}
+          TILEWRIGHT_PUBLISH_RECEIPTS: ${{ runner.temp }}/crate-put-outcomes
         run: >-
           python3 tools/crate_release.py upload --release-id "$SOURCE_RELEASE_ID"
           --revision "$SOURCE_REVISION" --manifest-sha256 "$MANIFEST_SHA256"
+      - name: Preserve bounded registry PUT outcomes
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: crate-put-outcomes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/crate-put-outcomes/*.json
+          if-no-files-found: warn
+          retention-days: 90
       - if: ${{ !cancelled() && (steps.upload.outcome == 'success' || steps.upload.outcome == 'failure') }}
         run: >-
           python3 tools/crate_release.py confirm --release-id "$SOURCE_RELEASE_ID"

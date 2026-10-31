@@ -90,7 +90,7 @@ run_check "${approved_font}"
 for mutation in unrelated wrong-version forbidden-conjunct; do
   case "${mutation}" in
     unrelated) expression='(.packages[] | select(.name == "tilewright-render-ui") | .name) = "unrelated-font"' ;;
-    wrong-version) expression='(.packages[] | select(.name == "tilewright-render-ui") | .version) = "0.6.1"' ;;
+    wrong-version) expression='(.packages[] | select(.name == "tilewright-render-ui") | .version) = "0.6.0"' ;;
     forbidden-conjunct) expression='(.packages[] | select(.name == "tilewright-render-ui") | .license) = "MIT AND OFL-1.1 AND GPL-3.0-only"' ;;
   esac
   jq "${expression}" "${approved_font}" >"${temporary}/${mutation}.json"
