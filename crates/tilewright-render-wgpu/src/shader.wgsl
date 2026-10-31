@@ -137,7 +137,8 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 alpha = max(alpha, sample_inside(uv + direction * 0.5, input.frame).a);
             }
         }
-        return bytes(vec4<f32>(input.glow_color.rgb * 255.0, input.glow_color.a * alpha)) / 255.0;
+        let output = bytes(vec4<f32>(input.glow_color.rgb * 255.0, input.glow_color.a * alpha));
+        return vec4<f32>(output.rgb * output.a / 65025.0, output.a / 255.0);
     }
     var output = sample_inside(uv, input.frame) * input.color;
     if (input.grayscale > 0.0) {
@@ -147,5 +148,5 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
     output = bytes(output);
     output = bytes(vec4<f32>(fma(output.rgb, vec3<f32>(1.0 - input.effect), output.bgr * input.effect), output.a));
-    return output / 255.0;
+    return vec4<f32>(output.rgb * output.a / 65025.0, output.a / 255.0);
 }
