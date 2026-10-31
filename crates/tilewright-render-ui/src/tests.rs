@@ -408,9 +408,13 @@ fn validates_all_budgets_and_nonfinite_values() {
 
 #[test]
 fn malformed_fonts_missing_fallback_and_atlas_mismatch_are_rejected() {
-    let make = |metrics, glyphs, fallback| {
+    fn make(
+        metrics: FontMetrics,
+        glyphs: &[BitmapGlyph],
+        fallback: char,
+    ) -> Result<BitmapFont<'_>, UiError> {
         BitmapFont::new(FontId(1), texture(2), [16, 16], metrics, glyphs, fallback)
-    };
+    }
     assert_eq!(
         make(
             FontMetrics {
