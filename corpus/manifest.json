@@ -210,7 +210,7 @@
       "width": 48,
       "height": 48,
       "clock_millis": 375,
-      "maximum_rgba_channel_difference": 1,
+      "maximum_rgba_channel_difference": 2,
       "performance": {
         "maximum_cpu_micros": 75000,
         "quad_count": 11,
@@ -320,7 +320,7 @@
       "width": 400,
       "height": 240,
       "clock_millis": 375,
-      "maximum_rgba_channel_difference": 1,
+      "maximum_rgba_channel_difference": 2,
       "performance": {
         "maximum_cpu_micros": 400000,
         "quad_count": 91,

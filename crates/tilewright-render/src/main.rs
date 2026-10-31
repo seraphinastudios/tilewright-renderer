@@ -232,13 +232,14 @@ fn render_corpus() -> Result<(), String> {
             .enumerate()
             .max_by_key(|(_, difference)| *difference)
             .unwrap_or((0, 0));
-        if maximum_difference > 1 {
+        let allowance = tilewright_render_testkit::corpus_maximum_rgba_channel_difference(name);
+        if maximum_difference > allowance {
             failures.push(format!(
-                "scenario {name}: GPU/reference RGBA difference {maximum_difference} exceeds 1 at byte {maximum_index} (GPU {}, reference {})", frame.rgba8[maximum_index], reference.rgba8[maximum_index]
+                "scenario {name}: GPU/reference RGBA difference {maximum_difference} exceeds {allowance} at byte {maximum_index} (GPU {}, reference {})", frame.rgba8[maximum_index], reference.rgba8[maximum_index]
             ));
         }
         println!(
-            "scenario={name} exact_planes={exact_planes} maximum_rgba_difference={maximum_difference} quads={} vertices={} uploads={} readback_bytes={} frame_cpu_micros={}",
+            "scenario={name} exact_planes={exact_planes} maximum_rgba_difference={maximum_difference} maximum_rgba_channel_difference={allowance} quads={} vertices={} uploads={} readback_bytes={} frame_cpu_micros={}",
             scene.quads().len(),
             frame.metrics.vertex_count,
             frame.metrics.uploaded_bytes,

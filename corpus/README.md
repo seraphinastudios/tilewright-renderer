@@ -26,7 +26,13 @@ clock removes animation nondeterminism. Missing, digest-mismatched, corrupt, and
 oversized resource cases, and a frame outside its texture, have exact expected
 error classes.
 
-RGBA comparisons permit at most one 8-bit channel of backend rounding variance.
+RGBA comparisons use a measured per-case allowance in absolute RGBA8 channel
+steps: `structural-fog-ui` and `shared-ui-dpi-125` permit at most 2/255;
+the other seven cases retain at most 1/255. The testkit's
+`corpus_maximum_rgba_channel_difference` supplies the same named contract to
+the manifest producer, CLI comparison and affected backend regression test.
+Unknown names default to one step. Other backend and sampling regression tests
+retain their existing one-step assertions.
 Semantic ID, depth, and coverage planes are exact. No masks hide a pixel: each
 semantic plane is itself the full comparison mask. Changes to a digest or
 tolerance require visual, semantic, performance, and provenance review.
@@ -61,7 +67,7 @@ MIT/source/author checks. There is no general OFL fixture exception.
 `tools/validate.sh` regenerates all nine deterministic manifests with the public
 example, then runs all nine through the existing wgpu CLI corpus loop. That
 loop compares every semantic/depth/coverage value exactly and every RGBA
-channel within the existing tolerance of one. GPU evidence must record the
+channel within its named manifest allowance. GPU evidence must record the
 actual adapter/backend/driver from `tilewright-render probe`; software Vulkan
 coverage is not hardware or native interactive UI acceptance.
 
@@ -70,3 +76,29 @@ coverage planes with shared CPU coverage. Exact returned-plane comparison
 verifies that public contract; it does not establish GPU-rasterized picking.
 RGBA comparisons exercise actual GPU rasterization and remain independently
 required.
+
+The owner selected this contract on 2026-10-31: “Document and test a measured
+2/255 colour allowance where needed (supports both tested backends).” This is
+limited to the two measured cases; it changes no reference pixels, image/plane
+digests, resource bytes, provenance, performance budgets or exact-plane checks.
+
+The measurements used sampling candidate
+`f19d232f3c90a82734167a085fb3b0bcc5246063`; its backend source, shader and crate
+manifest are identical to integration base
+`a172e3d88b20bfc23c207b1dea84aca04b25d7c5`. Software Vulkan llvmpipe
+(LLVM 21.1.8, 256 bits, CPU adapter) measured maxima of 1, 1, 2, 1, 1, 0, 1,
+2 and 1 in manifest order. NVIDIA GeForce RTX 3090 Vulkan, driver 595.91.07,
+measured 0, 0, 0, 1, 0, 0, 0, 1 and 1 with the retained exact-candidate binary.
+Those NVIDIA results qualify that binary and matching backend code, not a
+fresh build of later integration changes or all possible adapters. Task-private
+receipts are retained as `gpu-fix/HANDOFF.md` and `gpu-fix/hardware/README.md`
+under the editor-usability evidence for 2026-10-31.
+
+The structural residual is fixed-function source-over rounding: separately
+rounded GPU blend contributions can differ from the reference's single integer
+round, then accumulate through fog. At (19, 22), GPU red is 22 and reference
+red is 24. The 1.25 DPI UI residual occurs near a floating-point filtering tie:
+a one-step sample/alpha discrepancy can become two color steps over an opaque
+panel. At (231, 140), GPU red is 28 and reference red is 26. The allowance
+records those observed backend differences; it does not assert bit-exact
+floating-point blending or excuse missing glyph ink, coverage or identities.

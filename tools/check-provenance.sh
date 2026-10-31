@@ -46,7 +46,8 @@ jq -e --slurpfile font crates/tilewright-render-ui/assets/manifest.json '
   and all(.cases[];
     .width > 0 and .height > 0
     and (.clock_millis | type == "number" and . >= 0 and . == floor)
-    and .maximum_rgba_channel_difference == 1
+    and .maximum_rgba_channel_difference ==
+      (if .name == "structural-fog-ui" or .name == "shared-ui-dpi-125" then 2 else 1 end)
     and .performance.maximum_cpu_micros > 0
     and .performance.quad_count > 0
     and .performance.resource_requests > 0

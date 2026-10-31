@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod atlas;
+mod corpus;
 mod crowd;
 #[cfg(test)]
 mod seams;
@@ -13,6 +14,7 @@ pub use atlas::{
     ATLAS_FRAME_SIZE, ATLAS_ID, ATLAS_SHEET, atlas_digest, atlas_provider, atlas_resource,
     atlas_scene, character_sheet,
 };
+pub use corpus::corpus_maximum_rgba_channel_difference;
 pub use crowd::{
     CROWD_ATLAS_ID, CROWD_FRAME, CROWD_LAYER_IDS, CROWD_SHEET, CROWD_TILE, CROWD_TILES_ID, Crowd,
     CrowdSheets, crowd_provider, crowd_scene, crowd_textures,

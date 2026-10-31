@@ -5,10 +5,10 @@ use sha2::{Digest, Sha256};
 use std::{fmt::Write as _, time::Instant};
 use tilewright_render_api::{RenderRequest, Renderer};
 use tilewright_render_testkit::{
-    ATLAS_ID, ReferenceRenderer, atlas_digest, atlas_provider, atlas_scene, dense_scene,
-    iso_world_scene, offscreen_target, shared_ui_provider, shared_ui_scene, structural_scene,
-    synthetic_digest, synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
-    world_texture,
+    ATLAS_ID, ReferenceRenderer, atlas_digest, atlas_provider, atlas_scene,
+    corpus_maximum_rgba_channel_difference, dense_scene, iso_world_scene, offscreen_target,
+    shared_ui_provider, shared_ui_scene, structural_scene, synthetic_digest, synthetic_provider,
+    synthetic_scene, top_down_world_scene, world_provider, world_texture,
 };
 use tilewright_scene::{Digest256, SceneBundle};
 
@@ -160,12 +160,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .flat_map(|value| value.to_le_bytes())
             .collect::<Vec<_>>();
         println!(
-            "{}{{\"name\":\"{}\",\"width\":{},\"height\":{},\"clock_millis\":{},\"maximum_rgba_channel_difference\":1,\"performance\":{{\"maximum_cpu_micros\":{},\"quad_count\":{},\"resource_requests\":{},\"uploaded_bytes\":{},\"vertex_count\":{},\"vertex_allocation_bytes\":{},\"target_allocation_bytes\":{}}},\"digests\":{{\"rgba8\":\"{}\",\"semantic_u32le\":\"{}\",\"depth_i16le\":\"{}\",\"coverage_u8\":\"{}\"}}}}",
+            "{}{{\"name\":\"{}\",\"width\":{},\"height\":{},\"clock_millis\":{},\"maximum_rgba_channel_difference\":{},\"performance\":{{\"maximum_cpu_micros\":{},\"quad_count\":{},\"resource_requests\":{},\"uploaded_bytes\":{},\"vertex_count\":{},\"vertex_allocation_bytes\":{},\"target_allocation_bytes\":{}}},\"digests\":{{\"rgba8\":\"{}\",\"semantic_u32le\":\"{}\",\"depth_i16le\":\"{}\",\"coverage_u8\":\"{}\"}}}}",
             if index == 0 { "" } else { "," },
             name,
             viewport.width,
             viewport.height,
             scene.clock_millis(),
+            corpus_maximum_rgba_channel_difference(name),
             maximum_cpu_micros,
             scene.quads().len(),
             frame.metrics.resource_requests,

@@ -2323,6 +2323,14 @@ mod tests {
         scene: &tilewright_scene::SceneBundle,
         resources: &std::sync::Arc<tilewright_render_testkit::FakeResourceProvider>,
     ) -> Option<tilewright_render_api::FrameOutput> {
+        assert_matches_reference_with_allowance(scene, resources, 1)
+    }
+
+    fn assert_matches_reference_with_allowance(
+        scene: &tilewright_scene::SceneBundle,
+        resources: &std::sync::Arc<tilewright_render_testkit::FakeResourceProvider>,
+        allowance: u8,
+    ) -> Option<tilewright_render_api::FrameOutput> {
         let viewport = scene.viewport();
         let target = offscreen_target(viewport.width, viewport.height);
         let Ok(mut renderer) = WgpuRenderer::new(target) else {
@@ -2350,8 +2358,8 @@ mod tests {
             .max_by_key(|(_, difference)| *difference)
             .unwrap_or((0, 0));
         assert!(
-            difference <= 1,
-            "{}x{} scene differs from the reference by {difference} at byte {index}: GPU={}, reference={}",
+            difference <= allowance,
+            "{}x{} scene differs from the reference by {difference} (allowance {allowance}) at byte {index}: GPU={}, reference={}",
             viewport.width,
             viewport.height,
             frame.rgba8[index],
@@ -2615,9 +2623,10 @@ mod tests {
         use tilewright_render_testkit::{shared_ui_provider, shared_ui_scene, structural_scene};
         // Whole-texture nearest v=.5 at (28,22), plus staged filtered/tinted
         // colors formerly differing by two channels in the unaligned target.
-        assert_matches_reference(
+        assert_matches_reference_with_allowance(
             &structural_scene(48, 48).unwrap(),
             &synthetic_provider().unwrap(),
+            tilewright_render_testkit::corpus_maximum_rgba_channel_difference("structural-fog-ui"),
         );
         assert_matches_reference(
             &synthetic_scene(31, 17).unwrap(),
@@ -2626,10 +2635,14 @@ mod tests {
         // Real font frames have ink exactly at included top pixel centers,
         // including (250,134) at 1.25 DPI and (370,82) at 1.5 DPI. The same
         // fixtures exercise cropped glyphs and arbitrary filter fractions.
-        for (width, height) in [(400, 240), (480, 288)] {
-            assert_matches_reference(
+        for (name, width, height) in [
+            ("shared-ui-dpi-125", 400, 240),
+            ("shared-ui-dpi-150", 480, 288),
+        ] {
+            assert_matches_reference_with_allowance(
                 &shared_ui_scene(width, height).unwrap(),
                 &shared_ui_provider().unwrap(),
+                tilewright_render_testkit::corpus_maximum_rgba_channel_difference(name),
             );
         }
     }
