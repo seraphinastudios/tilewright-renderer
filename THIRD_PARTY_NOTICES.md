@@ -58,3 +58,27 @@ The 20 px bitmap conversion selects common-Latin scalars and a visible U+FFFD
 fallback; it does not change or relicense the source font. Preserve `OFL.txt`
 with these assets in source and binary distributions. `PROVENANCE.md`, the
 asset manifest and `tools/ui-font/README.md` record the exact transformation.
+
+## Separate Unicode Noto source font pack (OFL-1.1)
+
+The unmodified source font files in `assets/unicode/fonts/` remain under SIL Open
+Font License 1.1. Their exact original licenses are retained at each family's
+`OFL.txt`; `assets/unicode/manifest.json` records every original source/notice
+path, author, copyright, digest and embedded name/license record from pinned
+`google/fonts` revision `6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec`.
+
+Noto Sans, Noto Sans Arabic/Hebrew/Devanagari/Bengali/Gujarati/Gurmukhi/Tamil/
+Telugu/Kannada/Malayalam/Oriya/Sinhala/Thai: Copyright 2022 The Noto Project
+Authors, with the original per-family upstream project URLs in their notices.
+No Reserved Font Names are declared in those notices.
+
+Noto Sans SC and KR: Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved
+Font Name 'Source'.
+
+Noto Emoji: Copyright 2013 Google LLC. No Reserved Font Names are declared.
+
+These fonts have no transformations. Their original names, embedded copyright
+records and full notices are retained. OFL font data are not relicensed MIT.
+Redistribution/embedding must retain the relevant copyright and full OFL notice;
+see the exact per-family `OFL.txt` files. The independently authored acquisition
+and offline verification tools in `tools/unicode-fonts/` are MIT.

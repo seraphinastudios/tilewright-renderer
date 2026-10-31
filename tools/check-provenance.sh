@@ -7,6 +7,11 @@ cd "${repository}"
 test -s PROVENANCE.md
 test -s THIRD_PARTY_NOTICES.md
 python3 tools/ui-font/check.py
+python3 tools/unicode-fonts/check.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/unicode-fonts -p 'test_*.py'
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.test_font_pack
+# Registry consumers receive the same immutable manifest, never font payloads.
+cmp assets/unicode/manifest.json crates/tilewright-render-ui/assets/unicode-font-pack.json
 jq -e --slurpfile font crates/tilewright-render-ui/assets/manifest.json '
   .schema_version == 1
   and (.provenance | contains("synthetic MIT"))

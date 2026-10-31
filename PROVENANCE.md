@@ -63,3 +63,46 @@ parsing/rasterization, remote fetch or new Rust dependency is introduced.
 Pillow (HPND) and FreeType (FTL) are isolated development tools only; none of
 their source is copied or linked into the renderer. See the generator README
 and retained OFL notice for the full record.
+
+## Unicode shaping font source pack
+
+`assets/unicode/` is a separate trusted source/editor font pack, not a large
+embedded dependency of a public renderer crate. It retains 17 unmodified upright
+variable TrueType fonts from the OFL directories of
+[`google/fonts` revision `6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec`](https://github.com/google/fonts/tree/6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec/ofl).
+`assets/unicode/manifest.json` (SHA-256
+`94b81a712fb41a66eb744c88ae2ed312cc5d0ec1a491e9821fcc278d99410f13`)
+records exact upstream paths, destination paths, byte counts/digests, copyright,
+author, original notice identities, Reserved Font Names and transformation
+(`none; original upstream font bytes retained`). Each font's original upstream
+OFL.txt is beside it. All 34 source/notice files also matched the pinned GitHub
+tree's Git blob identities during acquisition verification.
+
+The stable insertion order is Noto Sans, Arabic, Hebrew, Devanagari, Bengali,
+Gujarati, Gurmukhi, Tamil, Telugu, Kannada, Malayalam, Oriya, Sinhala, Thai,
+SC CJK, KR Hangul and monochrome Noto Emoji. Fonts total 39,611,796 bytes; notices total
+74,478 bytes. Font bytes are ordinary Git blobs with an exact source-pack
+attribute exception, not LFS pointers. No font is subsetted, renamed, modified,
+rasterized or relicensed. Runtime shaping/rasterization occurs in the renderer
+from explicitly supplied digest-verified immutable bytes; it does not search
+system fonts or fetch network fonts. Consumers explicitly load the separate
+trusted pack; public crates do not implicitly embed it.
+
+The source data are OFL-1.1, not MIT. Noto Sans SC and KR declare Reserved Font Name
+`Source` in its original Adobe notice; the other notices declare none. Exact
+embedded name/copyright/license records are inventoried rather than rewritten.
+The pack's 49,070 mapped scalars cover common Latin/Greek/Cyrillic and combining
+marks, Arabic/Hebrew, the named Indic/Sinhala families, Thai, available SC CJK, Korean Hangul
+and monochrome emoji. This finite cmap repertoire does not claim every Unicode
+scalar or shaping/variation sequence; missing-glyph diagnostics remain required.
+
+`tools/unicode-fonts/` is independently authored MIT Python tooling. The offline
+checker verifies the pinned manifest first, exact font/notice bytes, full
+cmap/name inventory, license/RFN records, bounded sizes, representative script
+scalars and exact file sets. Adversarial tests cover altered manifests, corrupt
+or truncated font/LFS-pointer bytes, path traversal, symlinks and malformed SFNT
+bounds. The explicit opt-in acquisition script allows only the fixed revision on
+the public raw.githubusercontent.com host, rejects redirects, sends no
+credentials/cookies, bounds each download and publishes only a checked staged
+pack. It is never invoked by a build/runtime. No upstream implementation code,
+GPL/AGPL font, external rasterizer or host font is bundled by this tooling.
