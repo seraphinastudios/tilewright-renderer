@@ -92,7 +92,7 @@ jobs:
           python3 tools/crate_release.py upload --release-id "$SOURCE_RELEASE_ID"
           --revision "$SOURCE_REVISION" --manifest-sha256 "$MANIFEST_SHA256"
       - name: Preserve bounded registry PUT outcomes
-        if: ${{ always() && (steps.upload.outcome == 'success' || steps.upload.outcome == 'failure') }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: crate-put-outcomes-${{ github.run_id }}-${{ github.run_attempt }}
