@@ -254,6 +254,10 @@ impl TextSystem {
             return Ok(layout);
         }
         let line_height = size * 1.5;
+        if self.shape_misses >= 256 {
+            self.reset_shaping();
+        }
+        self.shape_misses += 1;
         let mut buffer = Buffer::new_empty(Metrics::new(size, line_height));
         buffer.set_size(width, None);
         buffer.set_wrap(if width.is_some() {

@@ -168,6 +168,7 @@ pub struct TextSystem {
     raster_bytes: usize,
     last_atlas: Option<UnicodeTexture>,
     next_revision: u64,
+    shape_misses: u16,
 }
 
 impl TextSystem {
@@ -212,6 +213,7 @@ impl TextSystem {
             raster_bytes: 0,
             last_atlas: None,
             next_revision: 1,
+            shape_misses: 0,
         })
     }
 
@@ -230,6 +232,20 @@ impl TextSystem {
         self.raster_order.clear();
         self.raster_bytes = 0;
         self.last_atlas = None;
+        self.reset_shaping();
+    }
+
+    fn reset_shaping(&mut self) {
+        // Cloning the immutable database retains its exact face IDs and bytes,
+        // so layouts held by callers remain valid. Rebuilding discards all
+        // library-private shape/font caches and their retained high-water marks.
+        self.fonts = FontSystem::new_with_locale_and_db_and_fallback(
+            "en-US".into(),
+            self.fonts.db().clone(),
+            ExplicitFallback,
+        );
+        self.swash = SwashCache::new();
+        self.shape_misses = 0;
     }
 
     #[must_use]
