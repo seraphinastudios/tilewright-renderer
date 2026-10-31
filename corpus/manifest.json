@@ -314,6 +314,50 @@
         "depth_i16le": "9a7a519e0e25ca63e280709ace8f4da0932c10b5ca2c9abfd98562caa3b2be91",
         "coverage_u8": "d0428c6c2aa3cd276064506d4059c2a8cc8837b6cbbb0c5ad6568fffa9f5c959"
       }
+    },
+    {
+      "name": "shared-ui-dpi-125",
+      "width": 400,
+      "height": 240,
+      "clock_millis": 375,
+      "maximum_rgba_channel_difference": 1,
+      "performance": {
+        "maximum_cpu_micros": 400000,
+        "quad_count": 91,
+        "resource_requests": 3,
+        "uploaded_bytes": 525316,
+        "vertex_count": 546,
+        "vertex_allocation_bytes": 45864,
+        "target_allocation_bytes": 1056000
+      },
+      "digests": {
+        "rgba8": "bac4be2f7b398ee2d61742de2c4e909a54b9ad7303cd4df61518f8a1cb1512a4",
+        "semantic_u32le": "07eafa68ce28524e8e5717b3e20ad86655576de7423bca20a7278a9445ed9d69",
+        "depth_i16le": "cd28bb3f1b443edab3173d58d94b71f3167b350a1cbe1c36510ab328b4ad4f45",
+        "coverage_u8": "53fc3cb3312d0abfa71af7c70d987d2c55647d44f28ae2d1d185a8c9ffaa18bb"
+      }
+    },
+    {
+      "name": "shared-ui-dpi-150",
+      "width": 480,
+      "height": 288,
+      "clock_millis": 375,
+      "maximum_rgba_channel_difference": 1,
+      "performance": {
+        "maximum_cpu_micros": 500000,
+        "quad_count": 91,
+        "resource_requests": 3,
+        "uploaded_bytes": 525316,
+        "vertex_count": 546,
+        "vertex_allocation_bytes": 45864,
+        "target_allocation_bytes": 1520640
+      },
+      "digests": {
+        "rgba8": "da51ea6b0d6e2715ce4bb2e52c9701526162de24599a02a641b42c80b14bb342",
+        "semantic_u32le": "f33db0af5ee37f793799f411d343ca7cb52d7eed1d41b65d7b4c5461b52cffc8",
+        "depth_i16le": "62ab39d99159dc0e273b7b2d1c49723d02a127a4c3bdf0880b9c418bf63f1d76",
+        "coverage_u8": "afe2c17fb6ccec9430f2652528a1be831c4e62c89a133ac1de757d46ca41795c"
+      }
     }
   ]
 }
