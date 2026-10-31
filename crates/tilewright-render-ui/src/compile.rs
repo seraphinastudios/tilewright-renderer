@@ -29,7 +29,7 @@ pub struct UiRect {
 }
 
 impl UiRect {
-    fn valid(self) -> bool {
+    pub(crate) fn valid(self) -> bool {
         [
             self.x,
             self.y,
@@ -44,7 +44,7 @@ impl UiRect {
             && self.height >= 0.0
     }
 
-    fn intersect(self, other: Self) -> Option<Self> {
+    pub(crate) fn intersect(self, other: Self) -> Option<Self> {
         let x = self.x.max(other.x);
         let y = self.y.max(other.y);
         let right = (self.x + self.width).min(other.x + other.width);
@@ -538,7 +538,7 @@ fn emit_quad(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn clipped_quad(
+pub(crate) fn clipped_quad(
     bounds: UiRect,
     clip: Option<UiRect>,
     scale: [f32; 2],

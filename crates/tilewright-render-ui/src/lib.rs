@@ -7,11 +7,14 @@ use tilewright_scene::SemanticId;
 
 mod compile;
 mod font;
+mod unicode;
 
 pub mod builtin;
+pub mod unicode_fonts;
 
 pub use compile::*;
 pub use font::*;
+pub use unicode::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiQuad {
