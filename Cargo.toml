@@ -23,6 +23,9 @@ rust-version = "1.97.1"
 version = "0.6.0"
 
 [workspace.dependencies]
+cosmic-text = { version = "=0.19.0", default-features = false, features = ["std", "swash"] }
+unicode-segmentation = "1.12.0"
+unicode-script = "0.5.8"
 tilewright-render-api = { path = "crates/tilewright-render-api", version = "=0.6.0" }
 tilewright-render-resources = { path = "crates/tilewright-render-resources", version = "=0.6.0" }
 tilewright-render-sdl3 = { path = "crates/tilewright-render-sdl3", version = "=0.6.0" }

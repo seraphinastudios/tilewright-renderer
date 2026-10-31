@@ -12,6 +12,10 @@ publish = ["crates-io"]
 
 [dependencies]
 tilewright-scene.workspace = true
+cosmic-text.workspace = true
+sha2.workspace = true
+unicode-segmentation.workspace = true
+unicode-script.workspace = true
 
 [lints]
 workspace = true
