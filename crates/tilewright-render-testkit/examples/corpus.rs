@@ -10,7 +10,7 @@ use tilewright_render_testkit::{
     synthetic_digest, synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
     world_texture,
 };
-use tilewright_scene::Digest256;
+use tilewright_scene::{Digest256, SceneBundle};
 
 /// The resources a corpus scenario draws from.
 #[derive(Clone, Copy)]
@@ -64,11 +64,10 @@ fn print_resources() {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("{{\"schema_version\":1,\"resources\":[");
-    print_resources();
-    println!("],\"cases\":[");
-    let cases = [
+type Case = (&'static str, SceneBundle, u64, Resources);
+
+fn cases() -> Result<[Case; 9], tilewright_scene::Error> {
+    Ok([
         (
             "overlap-square",
             synthetic_scene(16, 16)?,
@@ -123,8 +122,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             500_000,
             Resources::Ui,
         ),
-    ];
-    for (index, (name, scene, maximum_cpu_micros, resources)) in cases.into_iter().enumerate() {
+    ])
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("{{\"schema_version\":1,\"resources\":[");
+    print_resources();
+    println!("],\"cases\":[");
+    for (index, (name, scene, maximum_cpu_micros, resources)) in cases()?.into_iter().enumerate() {
         let viewport = scene.viewport();
         let started = Instant::now();
         let frame = ReferenceRenderer::new(offscreen_target(viewport.width, viewport.height))?
