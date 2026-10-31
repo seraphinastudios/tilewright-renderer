@@ -64,3 +64,9 @@ loop compares every semantic/depth/coverage value exactly and every RGBA
 channel within the existing tolerance of one. GPU evidence must record the
 actual adapter/backend/driver from `tilewright-render probe`; software Vulkan
 coverage is not hardware or native interactive UI acceptance.
+
+The current wgpu implementation computes the returned semantic, depth and
+coverage planes with shared CPU coverage. Exact returned-plane comparison
+verifies that public contract; it does not establish GPU-rasterized picking.
+RGBA comparisons exercise actual GPU rasterization and remain independently
+required.
