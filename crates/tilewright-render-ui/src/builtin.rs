@@ -17,6 +17,8 @@ pub use generated::{ATLAS_SHA256, ATLAS_SIZE, FALLBACK, GLYPHS, METRICS, SOLID_S
 pub const FONT_ID: FontId = FontId(1);
 pub const ATLAS_BYTES: &[u8] = include_bytes!("../assets/atlas.atx");
 pub const SOLID_BYTES: &[u8] = include_bytes!("../assets/solid.atx");
+/// Font copyright and OFL notice for consumer redistribution.
+pub const BUILTIN_FONT_LICENSE: &str = include_str!("../assets/OFL.txt");
 
 /// Binds the immutable built-in metrics to a caller-reserved resource ID and
 /// revision. The resource provider must supply `ATLAS_BYTES` at this identity.

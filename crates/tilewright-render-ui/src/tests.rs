@@ -280,6 +280,7 @@ fn unsupported_combining_bidi_and_unknown_scalars_are_visible_and_lossless() {
     );
     // Even an explicitly supplied mark/control glyph cannot claim shaping.
     assert!(!font().supports_text("\u{301}\u{202e}"));
+    assert!(!font().supports_text("\u{ad}"));
     assert_eq!(
         compile(&[text("Z")], 100, UiLimits::default())
             .unwrap()
@@ -494,4 +495,93 @@ fn builtin_immutable_font_validates_common_latin_and_exact_digest() {
     );
     assert_eq!(&builtin::ATLAS_BYTES[..4], b"ATX1");
     assert_eq!(builtin::SOLID_BYTES.len(), 16);
+    assert!(builtin::BUILTIN_FONT_LICENSE.contains("SIL OPEN FONT LICENSE"));
+}
+
+#[test]
+fn absolute_caps_and_derived_overflow_hold_even_under_permissive_caller_limits() {
+    let defaults = UiLimits::default();
+    let primitives = vec![solid(1); 4097];
+    assert_eq!(
+        compile(
+            &primitives,
+            100,
+            UiLimits {
+                maximum_primitives: usize::MAX,
+                ..defaults
+            }
+        ),
+        Err(UiError::LimitExceeded)
+    );
+    let limits = UiLimits {
+        maximum_text_bytes: 1,
+        ..defaults
+    };
+    assert_eq!(
+        compile(&[text("é")], 100, limits),
+        Err(UiError::LimitExceeded)
+    );
+    assert_eq!(
+        compile(
+            &[text("A\nA")],
+            100,
+            UiLimits {
+                maximum_lines: 1,
+                ..defaults
+            }
+        ),
+        Err(UiError::LimitExceeded)
+    );
+    // No ink means no output quad allocation or quota use.
+    assert!(
+        compile(
+            &[text(" ")],
+            100,
+            UiLimits {
+                maximum_quads: 0,
+                ..defaults
+            }
+        )
+        .is_ok()
+    );
+    let font = BitmapFont::new(
+        FontId(1),
+        texture(2),
+        [16, 16],
+        FontMetrics {
+            native_size: f32::MIN_POSITIVE,
+            ..metrics()
+        },
+        GLYPHS,
+        '\u{fffd}',
+    )
+    .unwrap();
+    let fonts = [font];
+    assert_eq!(
+        compile_ui(
+            UiViewport {
+                logical_size: [100; 2],
+                physical_size: [100; 2]
+            },
+            UiDisplayList {
+                primitives: &[text("A")]
+            },
+            &BitmapFontSet::new(&fonts).unwrap(),
+            texture(1),
+            defaults
+        ),
+        Err(UiError::InvalidValue)
+    );
+    let glyphs = vec![GLYPHS[0]; 65_537];
+    assert_eq!(
+        BitmapFont::new(
+            FontId(1),
+            texture(2),
+            [16, 16],
+            metrics(),
+            &glyphs,
+            '\u{fffd}'
+        ),
+        Err(UiError::InvalidFont)
+    );
 }

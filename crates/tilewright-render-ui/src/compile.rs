@@ -212,7 +212,8 @@ impl std::error::Error for UiError {}
 /// A deliberately bounded unshaped repertoire. Glyph availability alone does
 /// not imply support for combining sequences, bidirectional or complex scripts.
 pub(crate) fn simple_scalar(character: char) -> bool {
-    matches!(character, ' '..='~' | '\u{a0}'..='\u{24f}' | '\u{1e00}'..='\u{1eff}'
+    character != '\u{ad}'
+        && matches!(character, ' '..='~' | '\u{a0}'..='\u{24f}' | '\u{1e00}'..='\u{1eff}'
         | '\u{2010}'..='\u{2027}' | '\u{2030}'..='\u{205e}'
         | '\u{20a0}'..='\u{20cf}' | '\u{fffd}')
 }
