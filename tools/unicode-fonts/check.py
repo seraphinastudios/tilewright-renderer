@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from sfnt import inventory, require
 
 REVISION = '6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec'
-MANIFEST_SHA256 = 'a332b35dcb2874f8517552a9ee6e3a6509e6728dfdbe71b1efbde270069aa2d8'
+MANIFEST_SHA256 = '94b81a712fb41a66eb744c88ae2ed312cc5d0ec1a491e9821fcc278d99410f13'
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -33,7 +33,7 @@ def checked_file(root, name, size, expected):
 
 
 def load_manifest(path):
-    require(not path.is_symlink() and path.stat().st_size <= 256 * 1024, 'manifest bounds/symlink')
+    require(not path.is_symlink() and path.stat().st_size <= 1024 * 1024, 'manifest bounds/symlink')
     data = path.read_bytes()
     require(digest(data) == MANIFEST_SHA256, 'pinned manifest checksum')
     manifest = json.loads(data)
@@ -45,7 +45,7 @@ def check(root):
     require(not root.is_symlink(), 'symlink asset root')
     manifest = load_manifest(root / 'manifest.json')
     fonts = manifest['fonts']
-    require(len(fonts) == manifest['limits']['fonts'] == 16, 'exact font count')
+    require(len(fonts) == manifest['limits']['fonts'] == 17, 'exact font count')
     expected_files = set()
     total = notices = 0
     union = set()
@@ -76,9 +76,9 @@ def check(root):
         if path.is_file():
             actual_files.add(path.relative_to(root).as_posix())
     require(actual_files == expected_files, 'exact font/notice file set')
-    require(total == manifest['total_font_bytes'] == 29197208 and total <= manifest['limits']['total_font_bytes'], 'total font byte bound')
+    require(total == manifest['total_font_bytes'] == 39611796 and total <= manifest['limits']['total_font_bytes'], 'total font byte bound')
     require(notices == manifest['total_notice_bytes'], 'total notice bytes')
-    require(all(s in union for s in (0x0301, 0x0627, 0x05E9, 0x0915, 0x4E2D, 0x304B, 0x1F600, 0xFFFD)), 'core scalar coverage')
+    require(all(s in union for s in (0x0301, 0x0627, 0x05E9, 0x0915, 0x4E2D, 0x304B, 0x30A2, 0xD55C, 0x1112, 0x1161, 0x11AB, 0x1F600, 0xFFFD)), 'core scalar coverage')
     # Demonstrate the documented finite repertoire, rather than universal coverage.
     require(0x10FFFF not in union, 'finite repertoire contract')
     return {'font_count': len(fonts), 'font_bytes': total, 'notice_bytes': notices,

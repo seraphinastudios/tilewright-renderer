@@ -1,36 +1,38 @@
 # Pinned Unicode font source pack
 
 The separate trusted font pack in `assets/unicode/` is input to the renderer's
-explicit immutable font-byte API. It contains 16 **unmodified** upright variable
+explicit immutable font-byte API. It contains 17 **unmodified** upright variable
 TrueType faces from one `google/fonts` revision,
 [`6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec`](https://github.com/google/fonts/tree/6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec/ofl).
-The original fonts total **29,197,208 bytes**; their exact full OFL notices add
-70,090 bytes. A deterministic USTAR/gzip level-9 transport of the manifest and
-source/notice paths is 17,805,052 bytes (measured with Python 3.14). Neither a public renderer crate nor its normal build embeds this
+The original fonts total **39,611,796 bytes**; their exact full OFL notices add
+74,478 bytes. A deterministic USTAR/gzip level-9 transport of the manifest and
+source/notice paths is 23,166,710 bytes (measured with Python 3.14). Neither a public renderer crate nor its normal build embeds this
 large pack. No font is downloaded during builds or runtime.
 
 `assets/unicode/manifest.json` is the immutable pack identity. Its SHA-256 is
-`a332b35dcb2874f8517552a9ee6e3a6509e6728dfdbe71b1efbde270069aa2d8`.
+`94b81a712fb41a66eb744c88ae2ed312cc5d0ec1a491e9821fcc278d99410f13`.
 It records the ordered fallback inventory, per-file upstream paths/byte lengths/
 SHA-256, author, copyright, full notice identity, Reserved Font Names,
 transformation (`none`), exact Unicode cmap ranges and selected embedded SFNT
 name/license records. `fonts` array order defines insertion order; it starts
-with Noto Sans and ends with Noto Sans SC and Noto Emoji. Weight 400 must be
+with Noto Sans and ends with Noto Sans SC, Noto Sans KR and Noto Emoji. Weight 400 must be
 selected explicitly for normal text; some upstream legacy family records name
 the minimum variable weight “Thin”. Font source/licensing data remain OFL-1.1;
 these new Python tools are MIT.
 
 The pack supplies Latin, Greek, Cyrillic and combining marks; Arabic and Hebrew;
 Devanagari, Bengali, Gujarati, Gurmukhi, Tamil, Telugu, Kannada, Malayalam, Oriya
-and Sinhala; Thai; SC CJK (including available kana); and monochrome emoji.
-Its exact union contains **37,236 mapped scalars**. This is a finite repertoire,
+and Sinhala; Thai; SC CJK (including available kana), Korean Hangul (including conjoining Jamo);
+and monochrome emoji.
+The checker explicitly requires precomposed Hangul 한 and decomposed 한, as
+well as Han 中 and kana か/ア. Its exact union contains **49,070 mapped scalars**. This is a finite repertoire,
 not a promise of every Unicode character, language, regional CJK appearance or
 emoji sequence. In particular, cmap presence is not proof that a shaping or
 variation sequence works. The text engine must preserve the original UTF-8 and
 report uncovered scalars explicitly. Runtime shaping/rasterization belongs to
 the renderer, not this acquisition/checking tool.
 
-All notices declare SIL OFL 1.1. Noto Sans SC's upstream notice retains
+All notices declare SIL OFL 1.1. Noto Sans SC and KR's upstream notices retain
 `Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'`.
 No other bundled notice declares Reserved Font Names. Noto Emoji's notice is
 `Copyright 2013 Google LLC`; the other notices identify the respective Noto
@@ -73,6 +75,7 @@ private staging directory. No host packages, tools or fonts are installed.
 The distributable pack is a directory preserving `manifest.json` and every
 manifest font/notice relative path. Consumers load that explicit local directory
 or package their trusted bytes; runtime ZIP/TAR extraction is unnecessary.
+The total source-font limit is 64 MiB; each font is bounded to 24 MiB.
 Release compression is transport only and does not change manifest identity.
 Source Git attributes exempt exactly the `assets/unicode/fonts/*/*.ttf` pack
 from LFS, retaining actual source bytes in normal offline checkouts/archives.

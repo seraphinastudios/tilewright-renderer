@@ -12,8 +12,8 @@ from sfnt import inventory
 class FontPackTests(unittest.TestCase):
     def test_complete_offline_inventory(self):
         result = check(ROOT / 'assets/unicode')
-        self.assertEqual(result['font_count'], 16)
-        self.assertEqual(result['union_scalar_count'], 37236)
+        self.assertEqual(result['font_count'], 17)
+        self.assertEqual(result['union_scalar_count'], 49070)
 
     def test_altered_manifest_rejected_before_paths_are_used(self):
         with tempfile.TemporaryDirectory() as directory:
