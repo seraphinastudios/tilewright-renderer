@@ -5,6 +5,14 @@
 
 use tilewright_scene::SemanticId;
 
+mod compile;
+mod font;
+
+pub mod builtin;
+
+pub use compile::*;
+pub use font::*;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiQuad {
     pub semantic_id: SemanticId,
@@ -20,7 +28,8 @@ pub struct TextRun<'a> {
     pub size_milli: u32,
 }
 
-/// Consumer-owned layout output. This crate deliberately performs no font,
+/// Legacy consumer-owned unpositioned layout output. Use [`compile_ui`] for
+/// positioned text and clipping. This crate performs no ambient font,
 /// filesystem, window, or GPU discovery.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UiFrame<'a> {
@@ -62,3 +71,6 @@ impl UiFrame<'_> {
 pub enum Error {
     InvalidLayout,
 }
+
+#[cfg(test)]
+mod tests;
