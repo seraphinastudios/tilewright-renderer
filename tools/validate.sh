@@ -10,6 +10,9 @@ export TILEWRIGHT_UNICODE_FONT_ROOT="${repository}/assets/unicode"
 test "$(rustc --version | cut -d' ' -f2)" = 1.97.1
 python3 -m unittest tools.test_crate_release
 python3 tools/crate_prepare.py check-version --base "${CRATE_RELEASE_BASE:-$(git rev-parse HEAD)}"
+tools/check-architecture.sh
+tools/check-dependencies.sh
+tools/test-check-dependencies.sh
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-targets --all-features
@@ -17,9 +20,6 @@ cargo test --locked --workspace --doc
 cargo build --locked --release --package tilewright-render --features sdl3
 cargo run --locked --quiet --package tilewright-render -- --version
 
-tools/check-architecture.sh
-tools/check-dependencies.sh
-tools/test-check-dependencies.sh
 tools/check-provenance.sh
 jq empty corpus/*.json policy/*.json
 
