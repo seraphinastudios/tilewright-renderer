@@ -10,3 +10,5 @@
 *.woff filter=lfs diff=lfs merge=lfs -text
 *.woff2 filter=lfs diff=lfs merge=lfs -text
 *.zip filter=lfs diff=lfs merge=lfs -text
+# Keep the small pinned UI font source available in offline checkouts/archives.
+/crates/tilewright-render-ui/assets/RobotoMono-Regular.ttf -filter -diff -merge -text
