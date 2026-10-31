@@ -10,8 +10,9 @@ use tilewright_render_api::{
     BackendPreference, FrameOutput, RenderRequest, Renderer, TargetDescriptor, TargetKind,
 };
 use tilewright_render_testkit::{
-    ReferenceRenderer, atlas_provider, atlas_scene, dense_scene, iso_world_scene, structural_scene,
-    synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
+    ReferenceRenderer, atlas_provider, atlas_scene, dense_scene, iso_world_scene,
+    shared_ui_provider, shared_ui_scene, structural_scene, synthetic_provider, synthetic_scene,
+    top_down_world_scene, world_provider,
 };
 use tilewright_render_wgpu::WgpuRenderer;
 use tilewright_scene::SceneLimits;
@@ -187,20 +188,55 @@ fn render_corpus() -> Result<(), String> {
             atlas_scene(112, 64),
             atlas_provider(),
         ),
+        (
+            "shared-ui-dpi-125",
+            shared_ui_scene(400, 240),
+            shared_ui_provider(),
+        ),
+        (
+            "shared-ui-dpi-150",
+            shared_ui_scene(480, 288),
+            shared_ui_provider(),
+        ),
     ];
     for (name, scene, resources) in cases {
         let scene = scene.map_err(|error| error.to_string())?;
         let viewport = scene.viewport();
         let mut renderer = WgpuRenderer::new(target(viewport.width, viewport.height))
             .map_err(|error| error.to_string())?;
-        let frame = renderer
-            .render(RenderRequest {
-                scene: &scene,
-                resources: resources.map_err(|error| error.to_string())?,
-            })
+        let request = RenderRequest {
+            scene: &scene,
+            resources: resources.map_err(|error| error.to_string())?,
+        };
+        let reference = ReferenceRenderer::new(target(viewport.width, viewport.height))
+            .map_err(|error| error.to_string())?
+            .render(request.clone())
             .map_err(|error| error.to_string())?;
+        let frame = renderer
+            .render(request)
+            .map_err(|error| error.to_string())?;
+        if frame.semantic_ids != reference.semantic_ids
+            || frame.depth != reference.depth
+            || frame.coverage != reference.coverage
+        {
+            return Err(format!(
+                "scenario {name}: GPU/reference exact planes differ"
+            ));
+        }
+        let maximum_difference = frame
+            .rgba8
+            .iter()
+            .zip(&reference.rgba8)
+            .map(|(actual, expected)| actual.abs_diff(*expected))
+            .max()
+            .unwrap_or(0);
+        if maximum_difference > 1 {
+            return Err(format!(
+                "scenario {name}: GPU/reference RGBA difference {maximum_difference} exceeds 1"
+            ));
+        }
         println!(
-            "scenario={name} quads={} vertices={} uploads={} readback_bytes={} frame_cpu_micros={}",
+            "scenario={name} exact_planes=true maximum_rgba_difference={maximum_difference} quads={} vertices={} uploads={} readback_bytes={} frame_cpu_micros={}",
             scene.quads().len(),
             frame.metrics.vertex_count,
             frame.metrics.uploaded_bytes,

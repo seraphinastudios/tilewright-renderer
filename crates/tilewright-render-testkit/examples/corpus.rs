@@ -6,8 +6,9 @@ use std::{fmt::Write as _, time::Instant};
 use tilewright_render_api::{RenderRequest, Renderer};
 use tilewright_render_testkit::{
     ATLAS_ID, ReferenceRenderer, atlas_digest, atlas_provider, atlas_scene, dense_scene,
-    iso_world_scene, offscreen_target, structural_scene, synthetic_digest, synthetic_provider,
-    synthetic_scene, top_down_world_scene, world_provider, world_texture,
+    iso_world_scene, offscreen_target, shared_ui_provider, shared_ui_scene, structural_scene,
+    synthetic_digest, synthetic_provider, synthetic_scene, top_down_world_scene, world_provider,
+    world_texture,
 };
 use tilewright_scene::Digest256;
 
@@ -17,6 +18,7 @@ enum Resources {
     Synthetic,
     World,
     Atlas,
+    Ui,
 }
 
 /// Every fixture texture the scenarios draw: its name, identity, size and
@@ -35,6 +37,20 @@ fn resources() -> Vec<(&'static str, u64, u32, u32, Digest256)> {
         resources.push((name, id, texture.width, texture.height, texture.digest));
     }
     resources.push(("atlas-character-sheet", ATLAS_ID.0, 64, 64, atlas_digest()));
+    resources.push((
+        "ui-roboto-mono-atlas",
+        301,
+        512,
+        256,
+        Digest256(tilewright_render_ui::builtin::ATLAS_SHA256),
+    ));
+    resources.push((
+        "ui-solid",
+        302,
+        1,
+        1,
+        Digest256(tilewright_render_ui::builtin::SOLID_SHA256),
+    ));
     resources
 }
 
@@ -95,6 +111,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             200_000,
             Resources::Atlas,
         ),
+        (
+            "shared-ui-dpi-125",
+            shared_ui_scene(400, 240)?,
+            400_000,
+            Resources::Ui,
+        ),
+        (
+            "shared-ui-dpi-150",
+            shared_ui_scene(480, 288)?,
+            500_000,
+            Resources::Ui,
+        ),
     ];
     for (index, (name, scene, maximum_cpu_micros, resources)) in cases.into_iter().enumerate() {
         let viewport = scene.viewport();
@@ -106,6 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Resources::Synthetic => synthetic_provider()?,
                     Resources::World => world_provider()?,
                     Resources::Atlas => atlas_provider()?,
+                    Resources::Ui => shared_ui_provider()?,
                 },
             })?;
         let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
