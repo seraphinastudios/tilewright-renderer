@@ -36,7 +36,7 @@ class AssetChecks(unittest.TestCase):
             blob = json.dumps(metrics).encode()
             (assets / "metrics.json").write_bytes(blob)
             manifest = json.loads((assets / "manifest.json").read_text())
-            manifest["files"]["metrics.json"] = {"bytes": len(blob), "sha256": digest(blob)}
+            manifest["files"]["metrics.json"].update({"bytes": len(blob), "sha256": digest(blob)})
             (assets / "manifest.json").write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, "frame bounds"):
                 check(assets)

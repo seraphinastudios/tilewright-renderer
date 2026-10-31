@@ -33,6 +33,9 @@ def check(assets):
     for name, entry in manifest["files"].items():
         blob = (assets / name).read_bytes()
         require(len(blob) == entry["bytes"] and digest(blob) == entry["sha256"], f"generated checksum: {name}")
+        require(entry["license"] == ("MIT" if name == "solid.atx" else "OFL-1.1"), f"asset license: {name}")
+        require(entry["author"] == ("Seraphina Studios" if name == "solid.atx" else "The Roboto Mono Project Authors"), f"asset author: {name}")
+        require(entry["source"] and entry["transformation"] and entry["notice"], f"asset provenance: {name}")
     cmap, names = read_source(assets / "RobotoMono-Regular.ttf")
     require(json.loads((assets / "source-cmap.json").read_text()) == {"scalars": cmap, "name_records": names}, "source cmap/name records")
     require(names["0"] == [manifest["copyright"]], "embedded copyright")

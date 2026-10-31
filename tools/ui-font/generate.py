@@ -168,7 +168,17 @@ def generate(source_dir, output_dir):
                              "source_cmap_count": len(cmap), "selected_count": len(selected),
                              "unsupported": "Other scalars including combining marks, bidi controls and shaped scripts require explicit diagnostics; original UTF-8 is preserved by consumers.",
                              "omitted_requested_scalars": sorted(set(requested_scalars()) - set(selected))},
-                "files": {name: {"sha256": digest(blob), "bytes": len(blob)} for name, blob in files.items()}}
+                "files": {name: {"sha256": digest(blob), "bytes": len(blob),
+                                 "license": "MIT" if name == "solid.atx" else "OFL-1.1",
+                                 "author": "Seraphina Studios" if name == "solid.atx" else "The Roboto Mono Project Authors",
+                                 "source": "tools/ui-font/generate.py synthetic white RGBA constant" if name == "solid.atx" else f"https://github.com/googlefonts/RobotoMono/blob/{UPSTREAM}/fonts/ttf/RobotoMono-Regular.ttf",
+                                 "transformation": {"atlas.atx": "Selected independent 20 px grayscale glyph masks packed as white RGBA8 ATX1",
+                                                    "solid.atx": "Original synthetic 1x1 opaque white RGBA8 ATX1",
+                                                    "metrics.json": "Selected scalar frames, baseline bearings and advances",
+                                                    "glyphs.rs": "Rust constants generated from the same glyph metrics and texture hashes",
+                                                    "source-cmap.json": "Exact mapped scalar and selected embedded name-table inventory"}[name],
+                                 "notice": "Renderer MIT LICENSE" if name == "solid.atx" else "OFL.txt"}
+                          for name, blob in files.items()}}
     files["manifest.json"] = json_bytes(manifest)
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, blob in files.items():
