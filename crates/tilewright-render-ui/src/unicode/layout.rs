@@ -125,15 +125,15 @@ impl UnicodeLayout {
                 && point[1] < rect.y + rect.height
         }) {
             let left_half = point[0] < segment.bounds.x + segment.bounds.width * 0.5;
-            return if left_half != segment.rtl {
-                TextCursor {
-                    byte: segment.bytes.start,
-                    affinity: TextAffinity::After,
-                }
-            } else {
+            return if left_half == segment.rtl {
                 TextCursor {
                     byte: segment.bytes.end,
                     affinity: TextAffinity::Before,
+                }
+            } else {
+                TextCursor {
+                    byte: segment.bytes.start,
+                    affinity: TextAffinity::After,
                 }
             };
         }

@@ -94,7 +94,7 @@ fn explicit_font_pack_shapes_multilingual_original_text() {
         "नमस्ते क्षि",
         "বাংলা",
         "தமிழ்",
-        "简体中文 日本語 한국어 한",
+        "简体中文 日本語 한국어 \u{1112}\u{1161}\u{11ab}",
         "👩🏽‍💻 🇺🇳 👨‍👩‍👧‍👦",
     ] {
         let layout = system.layout(text, 20.0, None).unwrap();
@@ -290,7 +290,8 @@ fn cache_eviction_and_shaping_reset_preserve_retained_layouts() {
 fn unknown_roles_limits_and_missing_scalars_are_explicit() {
     let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
     let layout = system.layout("a\u{10ffff}b", 20.0, None).unwrap();
-    assert_eq!(layout.missing_glyphs(), &[1..5]);
+    assert_eq!(layout.missing_glyphs().len(), 1);
+    assert_eq!(layout.missing_glyphs()[0], 1..5);
     assert_eq!(layout.text(), "a\u{10ffff}b");
     let viewport = crate::UiViewport {
         logical_size: [128, 128],
@@ -516,6 +517,7 @@ fn rtl_ligature_hit_and_partial_selection_share_caret_geometry() {
 /// Run with --release --nocapture and the explicit test font root for evidence.
 /// Timings are measured output, not machine-dependent pass/fail thresholds.
 #[test]
+#[allow(clippy::too_many_lines)] // One measured fixture keeps cold/warm phases adjacent.
 fn performance_international_ui() {
     let Some(pack) = explicit_pack() else {
         return;
