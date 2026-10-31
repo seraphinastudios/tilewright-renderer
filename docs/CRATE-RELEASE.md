@@ -288,10 +288,17 @@ publication require the same authoritative, explicit owner recovery above.
 The owner subsequently selected preparation of a new reviewed 0.6.1 cohort,
 retaining the unresolved 0.6.0 intent. All eight public libraries and their
 internal exact dependency requirements advance together; this does not replace
-the immutable 0.6.0 archives or establish their missing upload outcome. The next
-source release after v1.19.0 is expected to be v1.20.0 under the `main` minor
-release policy, subject to the final release plan. Preparation is not approval
-to publish: the owner must review the concrete new release artifacts first.
+the immutable 0.6.0 archives or establish their missing upload outcome. The
+0.6.1 cohort belongs to immutable source release v1.20.0 (`429893199`).
+
+After the 0.6.1 testkit upload received HTTP 403, the owner selected preparation
+of a fresh reviewed 0.6.2 cohort, retaining the 0.6.1 records and unresolved
+testkit intent. All eight public libraries and their internal exact dependency
+requirements advance together again; the source-only CLI and web packages
+inherit the same workspace version. This preparation does not alter older
+release artifacts or intents, retry older coordinates, or authorize publication
+or activation of the hourly reconciler. The owner must review the concrete new
+release artifacts before authorizing publication.
 
 From then on, merges release normally. A release that changes no packaged
 crate content reuses the published archives, owns no new coordinates and
