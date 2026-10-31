@@ -760,6 +760,8 @@ class PutOutcome(typing.NamedTuple):
     accepted: bool
     rate_limited: bool = False
     retry_after: str | None = None  # normalized UTC time, never registry text
+    http_status: int | None = None
+    category: str = 'unknown'  # fixed local label, never exception/response text
 
     def __bool__(self):
         # Keeps the former boolean meaning: true only for an acknowledged upload.
@@ -789,6 +791,12 @@ def retry_time(headers, body):
     return moment.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC') if moment else None
 
 
+class PutNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # urllib raises HTTPError with the original status when this returns None.
+        return None
+
+
 def put_once(data, metadata_value, token):
     encoded = canonical(metadata_value)
     payload = struct.pack('<I', len(encoded)) + encoded + struct.pack('<I', len(data)) + data
@@ -796,11 +804,17 @@ def put_once(data, metadata_value, token):
     request = urllib.request.Request(endpoint, data=payload, method='PUT', headers={
         'Authorization': token, 'Content-Type': 'application/octet-stream', 'Accept': 'application/json',
         'User-Agent': 'tilewright-crate-release/1 (https://github.com/seraphinastudios)'})
+    status = None
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=30) as response:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), PutNoRedirect()).open(request, timeout=30) as response:
+            status = response.status
             raw = response.read(65537)
-            return PutOutcome(response.geturl() == endpoint and 200 <= response.status < 300 and len(raw) <= 65536
-                              and 'errors' not in json.loads(raw))
+            if response.geturl() != endpoint or not 200 <= status < 300 or len(raw) > 65536:
+                return PutOutcome(False, http_status=status, category='invalid_response')
+            value = json.loads(raw)
+            accepted = isinstance(value, dict) and 'errors' not in value
+            return PutOutcome(accepted, http_status=status,
+                              category='acknowledged' if accepted else 'invalid_response')
     except urllib.error.HTTPError as error:
         retry_after = None
         if error.code == 429:
@@ -808,11 +822,66 @@ def put_once(data, metadata_value, token):
                 retry_after = retry_time(error.headers, error.read(65536))
             except Exception:
                 pass  # The status alone is definite; its retry time is optional.
-        error.close()
-        return PutOutcome(False, error.code == 429, retry_after)
+        try:
+            error.close()
+        except Exception:
+            pass  # Cleanup cannot erase the observed HTTP status.
+        return PutOutcome(False, error.code == 429, retry_after, error.code, 'http_error')
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        category = 'invalid_response'
+    except TimeoutError:
+        category = 'timeout'
+    except ConnectionError:
+        category = 'connection_error'
+    except urllib.error.URLError as error:
+        category = ('timeout' if isinstance(error.reason, TimeoutError) else
+                    'connection_error' if isinstance(error.reason, ConnectionError) else 'transport_error')
     except Exception:
-        pass
-    return PutOutcome(False)
+        category = 'unexpected_error'
+    return PutOutcome(False, http_status=status, category=category)
+
+
+def publication_receipts():
+    """Validate local receipt configuration before reserving or uploading."""
+    attempt = {}
+    for key, variable in (('run_id', 'GITHUB_RUN_ID'), ('run_attempt', 'GITHUB_RUN_ATTEMPT')):
+        value = os.environ.get(variable, '')
+        require(re.fullmatch(r'[1-9][0-9]{0,19}', value), 'publication run identity')
+        attempt[key] = int(value)
+    revision = os.environ.get('GITHUB_SHA', '')
+    require(SHA.fullmatch(revision), 'publication workflow revision')
+    attempt['workflow_revision'] = revision
+    directory = os.environ.get('TILEWRIGHT_PUBLISH_RECEIPTS', '')
+    require(directory and Path(directory).is_absolute(), 'publication receipt directory required')
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory, attempt
+
+
+def record_put_outcome(directory, attempt, config, release, row, revision, manifest_sha256, intent, outcome):
+    """Diagnostic evidence only: never permission to retry or retire an intent."""
+    receipt = {'schema_version': 1, 'kind': 'tilewright-crate-put-outcome',
+        'repository_id': config['repository_id'], 'name': row['name'], 'version': row['version'],
+        'source_release_id': release['id'], 'source_revision': revision,
+        'manifest_sha256': manifest_sha256, 'archive_sha256': row['sha256'],
+        'intent_ref': f"refs/tags/crate-upload-intent/{row['name']}/{row['version']}",
+        'intent_commit': intent, 'producer': release['_verified_producer'], 'publisher': attempt,
+        'http_status': outcome.http_status, 'category': outcome.category,
+        'result': 'acknowledged' if outcome.accepted else 'rate_limited' if outcome.rate_limited else 'uncertain',
+        'retry_after': outcome.retry_after}
+    try:
+        encoded = canonical(receipt).decode('ascii') + '\n'
+        # No raw server bodies, headers, URLs or exception strings enter the receipt.
+        print(encoded, end='', file=sys.stderr, flush=True)
+        path = directory / f"{row['name']}-{row['version']}.json"
+        with path.open('x', encoding='ascii') as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        print('Publication receipt persistence failed after a PUT. Its outcome remains unresolved;'
+              ' keep the upload intent reserved.', file=sys.stderr)
+        raise ValueError('publication receipt persistence failed; intent retained') from None
 
 
 def release_snapshot(release):
@@ -843,6 +912,7 @@ def upload(config, release_id, revision, manifest_sha256):
     boundary(config, upload=True)
     require(isinstance(token, str) and 0 < len(token) <= 8192 and all(33 <= ord(c) <= 126 for c in token), 'missing upload credential')
     release, manifest, snapshots = release_evidence(config, release_id, revision, manifest_sha256)
+    receipts, attempt = publication_receipts()
     for row in ordered(manifest['crates']):
         state = registry_state(row)
         if state == 'present':
@@ -851,8 +921,9 @@ def upload(config, release_id, revision, manifest_sha256):
         # No source execution, registry credential subprocess or repackaging.
         require(release_snapshot(api(config, f'releases/{release_id}')) == release_snapshot(release),
                 'release changed during upload preflight')
-        reserve_upload(config, release, row, revision, manifest_sha256, intent_token)
-        put_once(snapshots[row['name']], row['metadata'], token)
+        intent = reserve_upload(config, release, row, revision, manifest_sha256, intent_token)
+        outcome = put_once(snapshots[row['name']], row['metadata'], token)
+        record_put_outcome(receipts, attempt, config, release, row, revision, manifest_sha256, intent, outcome)
         # Both acknowledged and uncertain PUTs are reconciled by reads only.
         # A timeout aborts this graph; never perform a second PUT in this run.
         confirm([row])

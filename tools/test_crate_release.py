@@ -188,6 +188,14 @@ class GraphTests(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(R, 'publication_receipts', return_value=(Path('/unused'), {}))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(R, 'record_put_outcome')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def observations(self, entry, data, api=True, index=True, checksum=None, yanked=False):
         checksum = checksum or entry['sha256']
         return [R.canonical({'version': {'crate': entry['name'], 'num': entry['version'], 'checksum': checksum, 'yanked': yanked}}) if api else None,
@@ -1084,7 +1092,7 @@ class PutOnceTests(unittest.TestCase):
                 (None, b'not json', None)]:
             with self.subTest(retry_after=retry_after, body=body):
                 outcome = self.put(self.refusal(429, retry_after, body))
-                self.assertEqual(outcome, R.PutOutcome(False, True, expected))
+                self.assertEqual(outcome, R.PutOutcome(False, True, expected, 429, 'http_error'))
                 self.assertFalse(outcome)
         self.assertRegex(self.put(self.refusal(429, '120')).retry_after,
                          r'[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC')
@@ -1092,24 +1100,149 @@ class PutOnceTests(unittest.TestCase):
     def test_unreadable_rate_limit_details_are_still_a_refusal(self):
         error = self.refusal(429, 'Mon, 26 Oct 2026 12:34:56 GMT')
         with patch.object(error, 'read', side_effect=ConnectionResetError('reset')):
-            self.assertEqual(self.put(error), R.PutOutcome(False, True, None))
+            self.assertEqual(self.put(error), R.PutOutcome(False, True, None, 429, 'http_error'))
+
+    def test_cleanup_failure_does_not_erase_http_status(self):
+        error = self.refusal(403, body=b'secret-token')
+        with patch.object(error, 'close', side_effect=OSError('secret-token')):
+            self.assertEqual(self.put(error), R.PutOutcome(False, http_status=403, category='http_error'))
 
     def test_other_failures_stay_ambiguous(self):
-        for failure in (self.refusal(500, 'Mon, 26 Oct 2026 12:34:56 GMT'), self.refusal(403),
-                        TimeoutError('lost'), urllib.error.URLError('reset'), ValueError('redirect refused')):
+        for failure, status, category in (
+                (self.refusal(500, 'Mon, 26 Oct 2026 12:34:56 GMT'), 500, 'http_error'),
+                (self.refusal(403, body=b'secret-token'), 403, 'http_error'),
+                (self.refusal(307), 307, 'http_error'),
+                (TimeoutError('secret-token'), None, 'timeout'),
+                (ConnectionResetError('secret-token'), None, 'connection_error'),
+                (urllib.error.URLError(TimeoutError('secret-token')), None, 'timeout'),
+                (urllib.error.URLError('secret-token'), None, 'transport_error'),
+                (ValueError('secret-token'), None, 'unexpected_error')):
             with self.subTest(failure=failure):
-                self.assertEqual(self.put(failure), R.PutOutcome(False))
+                self.assertEqual(self.put(failure), R.PutOutcome(False, http_status=status, category=category))
 
     def test_only_acknowledged_success_is_accepted(self):
-        for body, accepted in [(b'{"warnings":{}}', True), (b'{"errors":[{"detail":"refused"}]}', False)]:
+        for body, accepted in [(b'{"warnings":{"secret-token":[]}}', True),
+                               (b'{"errors":[{"detail":"secret-token"}]}', False),
+                               (b'not json secret-token', False), (b'null', False), (b'[]', False),
+                               (b'{"secret-token":"' + b'a' * 65536, False)]:
             response = MagicMock()
             response.__enter__.return_value = response
             response.status = 200
             response.read.return_value = body
             response.geturl.return_value = R.REGISTRY + '/api/v1/crates/new'
             outcome = self.put(response)
-            self.assertEqual(outcome, R.PutOutcome(accepted))
+            self.assertEqual(outcome, R.PutOutcome(accepted, http_status=200,
+                category='acknowledged' if accepted else 'invalid_response'))
             self.assertEqual(bool(outcome), accepted)
+
+    def test_response_read_failure_retains_status(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.status = 201
+        response.read.side_effect = ConnectionResetError('secret-token')
+        self.assertEqual(self.put(response), R.PutOutcome(False, http_status=201, category='connection_error'))
+
+    def test_redirect_handler_retains_status_without_following(self):
+        for status in (301, 302, 303, 307, 308):
+            requests = []
+
+            class InMemoryHTTPS(R.urllib.request.HTTPSHandler):
+                def https_open(self, request):
+                    requests.append(request)
+                    headers = email.message.Message()
+                    headers['Location'] = 'https://attacker.invalid/secret-token'
+                    response = R.urllib.request.addinfourl(io.BytesIO(b'secret-token'), headers,
+                                                         request.full_url, status)
+                    response.msg = 'redirect'
+                    return response
+
+            opener = R.urllib.request.build_opener(R.urllib.request.ProxyHandler({}), R.PutNoRedirect(), InMemoryHTTPS())
+            with self.subTest(status=status), patch.object(R.urllib.request, 'build_opener', return_value=opener):
+                outcome = R.put_once(b'archive', {}, 'test-token')
+                self.assertEqual(outcome, R.PutOutcome(False, http_status=status, category='http_error'))
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0].full_url, R.REGISTRY + '/api/v1/crates/new')
+
+
+class PublicationReceiptTests(unittest.TestCase):
+    def run_upload(self, directory, outcome, confirmation=None, persistence_failure=False):
+        entry, data = row()
+        release = {'id': 10, '_verified_producer': {'run_id': 100, 'run_attempt': 2}}
+        output = io.StringIO()
+        events = []
+
+        def put(*args):
+            events.append('put')
+            return outcome
+
+        def confirm(rows):
+            events.append('confirm')
+            receipt = json.loads((Path(directory) / 'example-0.1.0.json').read_text())
+            self.assertEqual(receipt['http_status'], outcome.http_status)
+            if confirmation:
+                raise confirmation
+
+        error = None
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(R, 'boundary'))
+            stack.enter_context(patch.object(R, 'reserve_upload', return_value='c' * 40))
+            stack.enter_context(patch.object(R, 'release_evidence', return_value=(release, {'crates': [entry]}, {'example': data})))
+            stack.enter_context(patch.object(R, 'registry_state', return_value='absent'))
+            stack.enter_context(patch.object(R, 'api', return_value=release))
+            stack.enter_context(patch.object(R, 'put_once', side_effect=put))
+            stack.enter_context(patch.object(R, 'confirm', side_effect=confirm))
+            stack.enter_context(patch.object(R.sys, 'stderr', output))
+            stack.enter_context(patch.dict(os.environ, {'CARGO_REGISTRY_TOKEN': 'secret-token',
+                'GH_INTENT_TOKEN': 'secret-intent-token', 'GITHUB_RUN_ID': '200', 'GITHUB_RUN_ATTEMPT': '3',
+                'GITHUB_SHA': REVISION, 'TILEWRIGHT_PUBLISH_RECEIPTS': str(directory)}))
+            if persistence_failure:
+                stack.enter_context(patch.object(R.os, 'fsync', side_effect=OSError('secret-token')))
+            try:
+                R.upload(CONFIG, 10, REVISION, 'b' * 64)
+            except ValueError as caught:
+                error = caught
+        self.assertNotIn('secret', output.getvalue())
+        return entry, output.getvalue(), events, error
+
+    def test_automatic_outcome_persisted_before_confirmation_even_on_failure(self):
+        for outcome in (R.PutOutcome(True, http_status=200, category='acknowledged'),
+                        R.PutOutcome(False, True, '2026-10-27 01:02:03 UTC', 429, 'http_error'),
+                        R.PutOutcome(False, http_status=403, category='http_error'),
+                        R.PutOutcome(False, http_status=200, category='invalid_response'),
+                        R.PutOutcome(False, category='timeout')):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                entry, output, events, error = self.run_upload(directory, outcome, ValueError('not visible'))
+                self.assertEqual(events, ['put', 'confirm'])
+                self.assertEqual(str(error), 'not visible')
+                receipt = json.loads((Path(directory) / 'example-0.1.0.json').read_text())
+                self.assertEqual(json.loads(output), receipt)
+                self.assertEqual(receipt, {
+                    'schema_version': 1, 'kind': 'tilewright-crate-put-outcome', 'repository_id': '123',
+                    'name': 'example', 'version': '0.1.0', 'source_release_id': 10, 'source_revision': REVISION,
+                    'manifest_sha256': 'b' * 64, 'archive_sha256': entry['sha256'],
+                    'intent_ref': 'refs/tags/crate-upload-intent/example/0.1.0', 'intent_commit': 'c' * 40,
+                    'producer': {'run_id': 100, 'run_attempt': 2},
+                    'publisher': {'run_id': 200, 'run_attempt': 3, 'workflow_revision': REVISION},
+                    'http_status': outcome.http_status, 'category': outcome.category,
+                    'result': 'acknowledged' if outcome.accepted else 'rate_limited' if outcome.rate_limited else 'uncertain',
+                    'retry_after': outcome.retry_after})
+
+    def test_receipt_failure_stops_without_confirmation_or_another_put(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, output, events, error = self.run_upload(directory, R.PutOutcome(True, http_status=200,
+                category='acknowledged'), persistence_failure=True)
+            self.assertEqual(events, ['put'])
+            self.assertIn('receipt persistence failed; intent retained', str(error))
+            self.assertIn('keep the upload intent reserved', output)
+
+    def test_missing_receipt_configuration_stops_before_intent_or_put(self):
+        with patch.object(R, 'boundary'), patch.object(R, 'release_evidence', return_value=({}, {'crates': []}, {})), \
+             patch.object(R, 'reserve_upload') as reserve, patch.object(R, 'put_once') as put, \
+             patch.dict(os.environ, {'CARGO_REGISTRY_TOKEN': 'secret-token'}, clear=True), \
+             self.assertRaisesRegex(ValueError, 'publication run identity'):
+            R.upload(CONFIG, 10, REVISION, 'b' * 64)
+        reserve.assert_not_called()
+        put.assert_not_called()
 
 
 class ExclusionTests(unittest.TestCase):
@@ -1204,6 +1337,7 @@ class ExclusionTests(unittest.TestCase):
                 release, {'crates': [entry]}, {'example': data})), patch.object(R, 'registry_state', return_value='absent'), \
              patch.object(R, 'api', return_value=release), patch.object(R, 'get') as get, \
              patch.object(R, 'github_write') as write, patch.object(R, 'put_once') as put, \
+             patch.object(R, 'publication_receipts', return_value=(Path('/unused'), {})), \
              patch.dict(os.environ, {'CARGO_REGISTRY_TOKEN': 'test-token', 'GH_INTENT_TOKEN': 'test-intent'}), \
              self.assertRaisesRegex(ValueError, 'excluded crate coordinate'):
             R.upload(config, 10, REVISION, 'b' * 64)
