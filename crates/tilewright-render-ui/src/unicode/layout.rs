@@ -47,6 +47,13 @@ struct CaretStop {
     rect: UiRect,
 }
 
+#[derive(Clone, Debug)]
+struct GraphemeSegment {
+    bytes: Range<usize>,
+    bounds: UiRect,
+    rtl: bool,
+}
+
 #[derive(Debug)]
 pub(super) struct LayoutData {
     pub(super) buffer: Buffer,
@@ -54,11 +61,11 @@ pub(super) struct LayoutData {
     font_size: f32,
     width: Option<f32>,
     size: [f32; 2],
-    line_offsets: Vec<usize>,
     boundaries: Vec<usize>,
     clusters: Vec<UnicodeCluster>,
     missing: Vec<Range<usize>>,
     carets: Vec<CaretStop>,
+    segments: Vec<GraphemeSegment>,
     pub(super) retained_bytes: usize,
 }
 
@@ -110,14 +117,25 @@ impl UnicodeLayout {
         if !point.iter().all(|v| v.is_finite()) {
             return TextCursor::default();
         }
-        if let Some(cursor) = self.0.buffer.hit(point[0], point[1]) {
-            let wanted = TextCursor {
-                byte: self.0.line_offsets.get(cursor.line).copied().unwrap_or(0) + cursor.index,
-                affinity: from_affinity(cursor.affinity),
+        if let Some(segment) = self.0.segments.iter().find(|segment| {
+            let rect = segment.bounds;
+            point[0] >= rect.x
+                && point[0] < rect.x + rect.width
+                && point[1] >= rect.y
+                && point[1] < rect.y + rect.height
+        }) {
+            let left_half = point[0] < segment.bounds.x + segment.bounds.width * 0.5;
+            return if left_half != segment.rtl {
+                TextCursor {
+                    byte: segment.bytes.start,
+                    affinity: TextAffinity::After,
+                }
+            } else {
+                TextCursor {
+                    byte: segment.bytes.end,
+                    affinity: TextAffinity::Before,
+                }
             };
-            if self.0.carets.iter().any(|stop| stop.cursor == wanted) {
-                return wanted;
-            }
         }
         self.0
             .carets
@@ -175,33 +193,31 @@ impl UnicodeLayout {
         } else {
             (focus, anchor)
         };
-        let start = self.cosmic_cursor(start);
-        let end = self.cosmic_cursor(end);
-        self.0
-            .buffer
-            .layout_runs()
-            .flat_map(|run| {
-                run.highlight(start, end).map(move |(x, width)| UiRect {
-                    x,
-                    y: run.line_top,
-                    width,
-                    height: run.line_height,
-                })
-            })
-            .collect()
-    }
-
-    fn cosmic_cursor(&self, cursor: TextCursor) -> Cursor {
-        let line = self
+        let mut rectangles: Vec<_> = self
             .0
-            .line_offsets
-            .partition_point(|offset| *offset <= cursor.byte)
-            .saturating_sub(1);
-        Cursor::new_with_affinity(
-            line,
-            cursor.byte - self.0.line_offsets[line],
-            to_affinity(cursor.affinity),
-        )
+            .segments
+            .iter()
+            .filter(|segment| {
+                segment.bytes.start < end.byte
+                    && segment.bytes.end > start.byte
+                    && segment.bounds.width > 0.0
+            })
+            .map(|segment| segment.bounds)
+            .collect();
+        rectangles.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+        let mut merged: Vec<UiRect> = Vec::new();
+        for rect in rectangles {
+            if let Some(last) = merged.last_mut().filter(|last| {
+                last.y.to_bits() == rect.y.to_bits()
+                    && last.height.to_bits() == rect.height.to_bits()
+                    && rect.x <= last.x + last.width
+            }) {
+                last.width = (rect.x + rect.width).max(last.x + last.width) - last.x;
+            } else {
+                merged.push(rect);
+            }
+        }
+        merged
     }
 }
 
@@ -212,18 +228,6 @@ fn distance(rect: UiRect, point: [f32; 2]) -> f32 {
         (point[1] - rect.y - rect.height).max(0.0)
     };
     vertical * 16_777_216.0 + (rect.x - point[0]).abs()
-}
-const fn from_affinity(value: Affinity) -> TextAffinity {
-    match value {
-        Affinity::Before => TextAffinity::Before,
-        Affinity::After => TextAffinity::After,
-    }
-}
-const fn to_affinity(value: TextAffinity) -> Affinity {
-    match value {
-        TextAffinity::Before => Affinity::Before,
-        TextAffinity::After => Affinity::After,
-    }
 }
 
 impl TextSystem {
@@ -295,6 +299,7 @@ impl TextSystem {
         let mut clusters = Vec::new();
         let mut missing = std::collections::BTreeSet::new();
         let mut carets = Vec::new();
+        let mut segments = Vec::new();
         let mut extent = [0.0_f32, line_height];
         let mut lines = 0;
         for run in buffer.layout_runs() {
@@ -358,6 +363,32 @@ impl TextSystem {
                 let first = boundaries.partition_point(|b| *b < start);
                 let last = boundaries.partition_point(|b| *b <= end);
                 let stops = &boundaries[first..last];
+                let segment_first = boundaries
+                    .partition_point(|byte| *byte <= start)
+                    .saturating_sub(1);
+                let segment_last = boundaries.partition_point(|byte| *byte < end);
+                let count = segment_last.saturating_sub(segment_first);
+                for index in segment_first..segment_last {
+                    #[allow(clippy::cast_precision_loss)]
+                    let fraction = (index - segment_first) as f32 / count as f32;
+                    #[allow(clippy::cast_precision_loss)]
+                    let width = (right - left) / count as f32;
+                    let x = if rtl {
+                        right - (right - left) * fraction - width
+                    } else {
+                        left + (right - left) * fraction
+                    };
+                    segments.push(GraphemeSegment {
+                        bytes: boundaries[index]..boundaries[index + 1],
+                        bounds: UiRect {
+                            x,
+                            y: run.line_top,
+                            width,
+                            height: run.line_height,
+                        },
+                        rtl,
+                    });
+                }
                 let local_boundaries: Vec<_> = text[start..end]
                     .grapheme_indices(true)
                     .map(|(byte, _)| start + byte)
@@ -462,11 +493,11 @@ impl TextSystem {
             font_size: size,
             width,
             size: extent,
-            line_offsets,
             boundaries,
             clusters,
             missing: missing.into_iter().map(|(start, end)| start..end).collect(),
             carets,
+            segments,
             retained_bytes,
         }));
         let budget = self.limits.maximum_layout_cache_bytes.min(8 * 1024 * 1024);

@@ -418,6 +418,97 @@ fn primitive_order_survives_equal_painter_order_and_clipping() {
     assert_eq!(output.quads[1].part, 1);
 }
 
+#[test]
+fn selection_stays_on_selected_hard_lines_and_wrap_fragments() {
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let layout = system.layout("a\nb\nc", 20.0, None).unwrap();
+    let start = TextCursor {
+        byte: 2,
+        affinity: TextAffinity::After,
+    };
+    let end = TextCursor {
+        byte: 3,
+        affinity: TextAffinity::Before,
+    };
+    let rectangles = layout.selection_rects(start, end);
+    assert_eq!(rectangles.len(), 1);
+    assert_eq!(
+        rectangles[0].y.to_bits(),
+        layout.caret(start).unwrap().y.to_bits()
+    );
+    let wrapped = system
+        .layout("first line\nabcdefghi\nlast line", 20.0, Some(40.0))
+        .unwrap();
+    let rectangles = wrapped.selection_rects(
+        TextCursor {
+            byte: 11,
+            affinity: TextAffinity::After,
+        },
+        TextCursor {
+            byte: 18,
+            affinity: TextAffinity::Before,
+        },
+    );
+    assert!(rectangles.len() > 1);
+    let start_y = wrapped
+        .caret(TextCursor {
+            byte: 11,
+            affinity: TextAffinity::After,
+        })
+        .unwrap()
+        .y;
+    let end_y = wrapped
+        .caret(TextCursor {
+            byte: 18,
+            affinity: TextAffinity::Before,
+        })
+        .unwrap()
+        .y;
+    assert!(
+        rectangles
+            .iter()
+            .all(|rect| rect.y >= start_y && rect.y <= end_y)
+    );
+}
+
+#[test]
+fn rtl_ligature_hit_and_partial_selection_share_caret_geometry() {
+    let Some(pack) = explicit_pack() else {
+        return;
+    };
+    let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
+    let layout = system.layout("لا", 32.0, None).unwrap();
+    assert!(
+        layout
+            .clusters()
+            .iter()
+            .any(|cluster| cluster.bytes == (0..4)),
+        "fixture must exercise lam-alef ligature"
+    );
+    let start = TextCursor {
+        byte: 0,
+        affinity: TextAffinity::After,
+    };
+    let middle = TextCursor {
+        byte: 2,
+        affinity: TextAffinity::Before,
+    };
+    let end = TextCursor {
+        byte: 4,
+        affinity: TextAffinity::Before,
+    };
+    let right = layout.caret(start).unwrap();
+    let center = layout.caret(middle).unwrap();
+    let left = layout.caret(end).unwrap();
+    assert!(right.x > center.x && center.x > left.x);
+    assert_eq!(layout.hit([right.x - 0.1, right.y + 5.0]).byte, 0);
+    assert_eq!(layout.hit([left.x + 0.1, left.y + 5.0]).byte, 4);
+    let selected = layout.selection_rects(start, middle);
+    assert_eq!(selected.len(), 1);
+    assert!((selected[0].x - center.x).abs() < 0.001);
+    assert!((selected[0].x + selected[0].width - right.x).abs() < 0.001);
+}
+
 /// Run with --release --nocapture and the explicit test font root for evidence.
 /// Timings are measured output, not machine-dependent pass/fail thresholds.
 #[test]
@@ -428,8 +519,17 @@ fn performance_international_ui() {
     let start = std::time::Instant::now();
     let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
     let initialization = start.elapsed();
+    let samples = [
+        "العربية",
+        "שלום",
+        "नमस्ते",
+        "日本語",
+        "한국어",
+        "👩🏽‍💻",
+        "e\u{301}",
+    ];
     let mut labels: Vec<_> = (0..100)
-        .map(|index| format!("Panel {index}: العربية שלום नमस्ते 日本語 한국어 👩🏽‍💻 e\u{301}"))
+        .map(|index| format!("Panel {index}: {}", samples[index % samples.len()]))
         .collect();
     let sample = "العربية שלום नमस्ते 日本語 한국어 👩🏽‍💻 e\u{301} ";
     let mut draft = String::new();
@@ -451,7 +551,7 @@ fn performance_international_ui() {
             origin: [0.0, f32::from(u16::try_from(index).unwrap()) * 19.0],
             clip,
             paint: crate::UiPaint {
-                semantic_id: tilewright_scene::SemanticId(u64::try_from(index + 1).unwrap()),
+                semantic_id: tilewright_scene::SemanticId(u32::try_from(index + 1).unwrap()),
                 painter_order: u32::try_from(index).unwrap(),
                 color: [1.0; 4],
             },
