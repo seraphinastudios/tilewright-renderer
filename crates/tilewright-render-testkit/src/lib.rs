@@ -44,8 +44,8 @@ use tilewright_scene::{
 
 /// Bytes per GPU vertex: position (3), colour (4), uv (2), effect, greyscale,
 /// glow colour (4) and glow radius (2) as `f32`, a `u32` of flags, the
-/// texture frame as four `u16` and the texture size as two `u16`.
-pub const VERTEX_BYTES: u64 = 84;
+/// texture frame as four `u16`, and physical/UV rectangles as eight `f32`.
+pub const VERTEX_BYTES: u64 = 112;
 
 #[derive(Default)]
 pub struct FakeResourceProvider {

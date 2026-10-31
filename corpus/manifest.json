@@ -173,7 +173,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 1512,
+        "vertex_allocation_bytes": 2016,
         "target_allocation_bytes": 2816
       },
       "digests": {
@@ -195,7 +195,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 18,
-        "vertex_allocation_bytes": 1512,
+        "vertex_allocation_bytes": 2016,
         "target_allocation_bytes": 5797
       },
       "digests": {
@@ -217,7 +217,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 66,
-        "vertex_allocation_bytes": 5544,
+        "vertex_allocation_bytes": 7392,
         "target_allocation_bytes": 25344
       },
       "digests": {
@@ -239,7 +239,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16,
         "vertex_count": 6144,
-        "vertex_allocation_bytes": 516096,
+        "vertex_allocation_bytes": 688128,
         "target_allocation_bytes": 180224
       },
       "digests": {
@@ -261,7 +261,7 @@
         "resource_requests": 4,
         "uploaded_bytes": 11792,
         "vertex_count": 3030,
-        "vertex_allocation_bytes": 254520,
+        "vertex_allocation_bytes": 339360,
         "target_allocation_bytes": 270336
       },
       "digests": {
@@ -283,7 +283,7 @@
         "resource_requests": 4,
         "uploaded_bytes": 5008,
         "vertex_count": 168,
-        "vertex_allocation_bytes": 14112,
+        "vertex_allocation_bytes": 18816,
         "target_allocation_bytes": 67584
       },
       "digests": {
@@ -305,7 +305,7 @@
         "resource_requests": 1,
         "uploaded_bytes": 16384,
         "vertex_count": 204,
-        "vertex_allocation_bytes": 17136,
+        "vertex_allocation_bytes": 22848,
         "target_allocation_bytes": 78848
       },
       "digests": {
@@ -327,7 +327,7 @@
         "resource_requests": 3,
         "uploaded_bytes": 525316,
         "vertex_count": 546,
-        "vertex_allocation_bytes": 45864,
+        "vertex_allocation_bytes": 61152,
         "target_allocation_bytes": 1056000
       },
       "digests": {
@@ -349,7 +349,7 @@
         "resource_requests": 3,
         "uploaded_bytes": 525316,
         "vertex_count": 546,
-        "vertex_allocation_bytes": 45864,
+        "vertex_allocation_bytes": 61152,
         "target_allocation_bytes": 1520640
       },
       "digests": {
