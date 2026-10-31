@@ -83,10 +83,7 @@ fi
 
 # Font data is permitted for precisely the reviewed UI package/version.
 approved_font="${temporary}/approved-font.json"
-jq '.packages += [{"id":"path+file:///renderer#tilewright-render-ui@0.6.0",
-  "name":"tilewright-render-ui", "version":"0.6.0", "license":"MIT AND OFL-1.1",
-  "source":null, "dependencies":[]}]
-  | .workspace_members += ["path+file:///renderer#tilewright-render-ui@0.6.0"]' \
+jq '(.packages[] | select(.name == "tilewright-render-ui") | .license) = "MIT AND OFL-1.1"' \
   "${updated}" >"${approved_font}"
 run_check "${approved_font}"
 
