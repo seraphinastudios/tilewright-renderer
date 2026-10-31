@@ -3,12 +3,12 @@
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    @location(0) @interpolate(flat) color: vec4<f32>,
     // The frame-relative texture coordinate: 0-1 spans the frame.
     @location(1) uv: vec2<f32>,
-    @location(2) effect: f32,
-    @location(3) grayscale: f32,
-    @location(4) glow_color: vec4<f32>,
+    @location(2) @interpolate(flat) effect: f32,
+    @location(3) @interpolate(flat) grayscale: f32,
+    @location(4) @interpolate(flat) glow_color: vec4<f32>,
     @location(5) @interpolate(flat) glow_radius: vec2<f32>,
     @location(6) @interpolate(flat) flags: u32,
     // The frame's origin and size in texels.
