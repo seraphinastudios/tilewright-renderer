@@ -13,6 +13,7 @@
   "allowed_registry_sources": ["registry+https://github.com/rust-lang/crates.io-index"],
   "direct_dependencies": [
     {"name":"bytemuck","purpose":"checked vertex byte views"},
+    {"name":"cosmic-text","purpose":"shared Unicode shaping, bidirectional layout and glyph rasterization from explicit verified font data"},
     {"name":"js-sys","purpose":"browser timers and promises for the wasm32 renderer"},
     {"name":"naga","purpose":"offline WGSL validation"},
     {"name":"png","purpose":"CLI world-view texture input and frame output"},
@@ -23,6 +24,8 @@
     {"name":"serde_json","purpose":"CLI world-view file parsing"},
     {"name":"sha2","purpose":"resource and corpus identity"},
     {"name":"tempfile","purpose":"atomic no-clobber CLI output"},
+    {"name":"unicode-script","purpose":"deterministic script fallback for shared Unicode text"},
+    {"name":"unicode-segmentation","purpose":"Unicode grapheme boundaries for shared layout and caret geometry"},
     {"name":"wasm-bindgen","purpose":"browser bindings for the wasm32 renderer"},
     {"name":"wasm-bindgen-futures","purpose":"browser promises for asynchronous device setup and readback"},
     {"name":"web-sys","purpose":"browser canvas surfaces"},

@@ -4,7 +4,7 @@
     "tilewright-scene": [],
     "tilewright-render-resources": ["sha2", "tilewright-scene"],
     "tilewright-render-api": ["tilewright-render-resources", "tilewright-scene"],
-    "tilewright-render-ui": ["tilewright-scene"],
+    "tilewright-render-ui": ["cosmic-text", "sha2", "tilewright-scene", "unicode-script", "unicode-segmentation"],
     "tilewright-render-world": ["tilewright-scene"],
     "tilewright-render-testkit": ["sha2", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-ui", "tilewright-render-world", "tilewright-scene"],
     "tilewright-render-wgpu": ["bytemuck", "js-sys", "naga", "pollster", "tilewright-render-api", "tilewright-render-resources", "tilewright-render-testkit", "tilewright-scene", "wasm-bindgen", "wasm-bindgen-futures", "web-sys", "wgpu"],
