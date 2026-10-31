@@ -499,6 +499,76 @@ fn builtin_immutable_font_validates_common_latin_and_exact_digest() {
 }
 
 #[test]
+fn every_builtin_metric_scalar_agrees_with_support_and_compilation() {
+    let font = builtin::builtin_font(UiTexture {
+        digest: Digest256(builtin::ATLAS_SHA256),
+        ..texture(2)
+    })
+    .unwrap();
+    let font_values = [font];
+    let fonts = BitmapFontSet::new(&font_values).unwrap();
+    assert!(font.supports_text("™−"));
+    for glyph in builtin::GLYPHS {
+        let mut bytes = [0; 4];
+        let scalar = glyph.character.encode_utf8(&mut bytes);
+        assert!(
+            font.supports_text(scalar),
+            "unsupported advertised glyph: {:?}",
+            glyph.character
+        );
+        let primitives = [UiPrimitive::Text {
+            origin: [0.0; 2],
+            clip: clip(),
+            paint: paint(1),
+            font: builtin::FONT_ID,
+            size: 20.0,
+            text: scalar,
+        }];
+        let compiled = compile_ui(
+            UiViewport {
+                logical_size: [100; 2],
+                physical_size: [100; 2],
+            },
+            UiDisplayList {
+                primitives: &primitives,
+            },
+            &fonts,
+            texture(1),
+            UiLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            compiled.unsupported.is_empty(),
+            "diagnosed advertised glyph: {:?}",
+            glyph.character
+        );
+        assert_eq!(compiled.quads.len(), usize::from(glyph.frame.is_some()));
+        if let Some(quad) = compiled.quads.first() {
+            assert_eq!(quad.frame, glyph.frame);
+        }
+        assert_eq!(
+            compiled.text_layouts[0].glyphs[0].character,
+            glyph.character
+        );
+    }
+    for rejected in ["\u{301}", "\u{202e}", "\u{ad}", "\r", "😀"] {
+        assert!(!font.supports_text(rejected));
+    }
+    // An independently supplied font still needs the actual symbol glyph.
+    for missing in ["™", "−"] {
+        let compiled = compile(&[text(missing)], 100, UiLimits::default()).unwrap();
+        assert_eq!(
+            compiled.unsupported[0].reason,
+            UnsupportedReason::MissingGlyph
+        );
+        assert_eq!(
+            &missing[compiled.unsupported[0].byte_start..compiled.unsupported[0].byte_end],
+            missing
+        );
+    }
+}
+
+#[test]
 fn absolute_caps_and_derived_overflow_hold_even_under_permissive_caller_limits() {
     let defaults = UiLimits::default();
     let primitives = vec![solid(1); 4097];

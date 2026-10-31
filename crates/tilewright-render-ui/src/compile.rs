@@ -215,7 +215,7 @@ pub(crate) fn simple_scalar(character: char) -> bool {
     character != '\u{ad}'
         && matches!(character, ' '..='~' | '\u{a0}'..='\u{24f}' | '\u{1e00}'..='\u{1eff}'
         | '\u{2010}'..='\u{2027}' | '\u{2030}'..='\u{205e}'
-        | '\u{20a0}'..='\u{20cf}' | '\u{fffd}')
+        | '\u{20a0}'..='\u{20cf}' | '\u{2122}' | '\u{2212}' | '\u{fffd}')
 }
 
 /// Compiles positioned logical UI into existing Interface-layer scene quads.
