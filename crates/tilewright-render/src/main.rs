@@ -224,16 +224,17 @@ fn render_corpus() -> Result<(), String> {
                 "scenario {name}: GPU/reference exact planes differ"
             ));
         }
-        let maximum_difference = frame
+        let (maximum_index, maximum_difference) = frame
             .rgba8
             .iter()
             .zip(&reference.rgba8)
             .map(|(actual, expected)| actual.abs_diff(*expected))
-            .max()
-            .unwrap_or(0);
+            .enumerate()
+            .max_by_key(|(_, difference)| *difference)
+            .unwrap_or((0, 0));
         if maximum_difference > 1 {
             failures.push(format!(
-                "scenario {name}: GPU/reference RGBA difference {maximum_difference} exceeds 1"
+                "scenario {name}: GPU/reference RGBA difference {maximum_difference} exceeds 1 at byte {maximum_index} (GPU {}, reference {})", frame.rgba8[maximum_index], reference.rgba8[maximum_index]
             ));
         }
         println!(
