@@ -2607,7 +2607,7 @@ mod tests {
         );
         // The ten user varyings contain 27 scalar components; no storage
         // buffers, float64, or additional inter-stage locations are needed.
-        assert!(27 <= limits.max_inter_stage_shader_components);
+        assert!(10 <= limits.max_inter_stage_shader_variables);
     }
 
     #[test]

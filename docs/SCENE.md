@@ -96,18 +96,17 @@ of each layer's sheet: body, then clothing, then hair, each a `part` of one
 semantic ID with increasing painter order. When all layers share one atlas
 texture, consecutive quads of the same texture and sampling that all draw
 frames smaller than the texture are drawn in one GPU batch, whatever their
-frames; a quad drawing the whole texture uses another pipeline and starts a
-new batch. The corpus scenario
+frames; a quad drawing the whole texture can share that batch too. The corpus scenario
 `atlas-layered-characters` draws such characters from a procedural atlas.
 
 ## Cost
 
 Frames cost nothing on the CPU reference. The GPU vertex carries the frame
-and its texture's size as six 16-bit integers, so a vertex is 84 bytes and a
-quad 504 bytes. The fragment shader tests the frame-relative coordinate.
-A frame smaller than its texture is drawn by one of two pipelines: nearest
-sampling picks the frame texel in frame space and samples its centre, and
-linear sampling maps the coordinate onto the frame and clamps it half a texel
-inside the frame before the hardware sampler filters it. Whole textures skip
-both steps. See
-[architecture](ARCHITECTURE.md#cost-and-memory) for measured fill costs.
+as four 16-bit integers, plus flat physical/UV rectangles for stable sampling;
+a vertex is 112 bytes and a quad 672 bytes. Eleven vertex attributes and ten
+inter-stage variables fit the WebGL2 downlevel limits. The fragment shader
+checks frame-relative coordinates and directly loads texels inside that frame.
+The nearest and linear pipelines serve both atlas frames and whole textures.
+Linear sampling rounds horizontal then vertical blends to RGBA8, like the
+reference, rather than depending on hardware filtering precision. See
+[architecture](ARCHITECTURE.md#cost-and-memory) for cost and sampling details.

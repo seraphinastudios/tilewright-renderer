@@ -50,25 +50,24 @@ other quad is split into the triangles (0, 1, 2) and (0, 2, 3), snapped to 1/256
 px, and filled with an exact integer edge test. Only pixel centres inside each
 triangle's clipped bounding box are tested, and the top-left tie rule gives each
 pixel on a shared edge to exactly one triangle, as GPU rasterisers do. The CPU
-reference and the GPU picking planes share this rasteriser, so semantic, depth,
-and coverage planes match exactly on every backend and cover the pixels the GPU
-colours. The GPU backend submits positions already rounded to the same 1/256 px
+reference and the GPU backend's returned picking planes share this CPU
+rasteriser, so semantic, depth, and coverage planes match exactly. These planes
+are not independent GPU coverage measurements; GPU colour comparisons separately
+check that visible sampling agrees with the contract. The GPU backend submits positions already rounded to the same 1/256 px
 grid, so drivers with different snapping and rounding rules start from identical
 fixed-point corners.
 
 Texture lookups outside 0–1 are transparent, and no lookup reads a texel
 outside the quad's frame: nearest and linear sampling clamp to the frame's
-edge, and renderers reject a frame that does not lie inside its texture. The
-GPU tests the frame-relative coordinate against 0–1 exactly as the
-reference does and lets the hardware sampler filter. A frame smaller than
-its texture is drawn by its own pipelines: nearest sampling picks the frame
-texel `floor(clamp(u, 0, 1 − ε) × width)` in frame space, as the reference
-does, and samples its centre; linear sampling maps the coordinate onto the
-frame and clamps the sample point half a texel inside it, which keeps the
-filter on the frame's own texels exactly as the reference's edge clamp does.
-Hardware filtering quantises its weights, so linear sampling is within the
-shared tolerance only where filter fractions are multiples of 1/256, as in
-every fixture. A glow quad extends its art by
+edge, and renderers reject a frame that does not lie inside its texture. The GPU uses two sampling pipelines for whole textures and atlas frames.
+Nearest sampling loads the texel `floor(clamp(u, 0, 1 − ε) × width)` in frame
+space. Linear sampling loads four frame-clamped texels and rounds the horizontal
+then vertical blends to RGBA8, matching the reference. Tint, grayscale, effect
+and glow staging also preserve the reference's byte rounding before blending.
+Axis-aligned geometry with aligned (possibly flipped) UVs computes coordinates
+from the fragment's physical pixel center and flat snapped bounds, avoiding UV
+roundoff at included edges and exact nearest-texel ties. Rotated/skewed geometry
+and non-aligned UV mappings retain triangle interpolation. A glow quad extends its art by
 the glow radius and draws a halo from 16 fixed sample directions around the
 art's alpha (a zero radius samples only the centre); it is never pickable,
 and scene validation rejects a pickable glow quad. Greyscale uses Rec. 601 luma
@@ -174,7 +173,7 @@ CPU work is O(pixels + quads), GPU vertex generation is O(quads), and GPU
 readback is O(pixels). A completed frame owns 11 bytes per pixel across RGBA,
 semantic, depth, and coverage planes. The GPU path additionally owns a color
 target, private depth/stencil target, at most 255 bytes of readback row padding
-per row, and 504 bytes of transient vertices per quad (six 84-byte vertices).
+per row, and 672 bytes of transient vertices per quad (six 112-byte vertices).
 Checked arithmetic precedes every size-derived allocation. Offscreen
 targets/readback buffers are reused until resize; immutable textures are reused
 by ID/revision/digest with a hard 4,096-entry cache. A scene's missing textures
@@ -191,9 +190,12 @@ next power of two, capped at the device's largest buffer (larger streams are
 rejected before they are generated), and is reused by offscreen and surface
 presentation until a larger scene is submitted; per-texture nearest/linear bind
 groups are created only on cache misses, and consecutive quads of one texture
-with the same sampling and frame class (the whole texture, or a smaller frame
-drawn by the framed pipelines), such as layered characters drawn from one
-atlas, share a draw call whatever their frames.
+with the same sampling, such as layered characters drawn from one atlas, share
+a draw call whether they draw the whole texture or different frames.
+
+The following historical fill-cost measurements describe the 0.3 sampling
+implementation, before staged RGBA8 sampling and physical-coordinate UVs.
+Current performance evidence must be measured for the new implementation.
 
 Fill cost is measured with the `fill_rate` example of `tilewright-render-wgpu`
 (32 translucent 1,024 × 1,024 layers, or 7 glow layers, readback included;
