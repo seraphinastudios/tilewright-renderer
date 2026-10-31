@@ -285,7 +285,7 @@ impl TextSystem {
         let mut boundaries: Vec<_> = text.grapheme_indices(true).map(|(byte, _)| byte).collect();
         boundaries.push(text.len());
         let mut clusters = Vec::new();
-        let mut missing = Vec::new();
+        let mut missing = std::collections::BTreeSet::new();
         let mut carets = Vec::new();
         let mut extent = [0.0_f32, line_height];
         let mut lines = 0;
@@ -321,8 +321,8 @@ impl TextSystem {
                 // Formatting controls and default-ignorable selectors need no ink.
                 let absent =
                     glyph.glyph_id == 0 && text[bytes.clone()].chars().any(visible_character);
-                if absent && !missing.contains(&bytes) {
-                    missing.push(bytes.clone());
+                if absent {
+                    missing.insert((bytes.start, bytes.end));
                 }
                 clusters.push(UnicodeCluster {
                     bytes,
@@ -350,9 +350,13 @@ impl TextSystem {
                 let first = boundaries.partition_point(|b| *b < start);
                 let last = boundaries.partition_point(|b| *b <= end);
                 let stops = &boundaries[first..last];
-                let units = text[start..end].graphemes(true).count().max(1);
+                let local_boundaries: Vec<_> = text[start..end]
+                    .grapheme_indices(true)
+                    .map(|(byte, _)| start + byte)
+                    .collect();
+                let units = local_boundaries.len().max(1);
                 for byte in stops {
-                    let before = text[start..*byte].graphemes(true).count();
+                    let before = local_boundaries.partition_point(|offset| offset < byte);
                     #[allow(clippy::cast_precision_loss)]
                     let fraction = before as f32 / units as f32;
                     let x = if rtl {
@@ -406,8 +410,10 @@ impl TextSystem {
         }
         // Invisible-only lines can lack glyph stops; retain a legitimate
         // original boundary at the nearest known line position.
+        let present: std::collections::BTreeSet<_> =
+            carets.iter().map(|stop| stop.cursor.byte).collect();
         for byte in &boundaries {
-            if !carets.iter().any(|stop| stop.cursor.byte == *byte) {
+            if !present.contains(byte) {
                 let line = line_offsets
                     .partition_point(|offset| *offset <= *byte)
                     .saturating_sub(1);
@@ -451,7 +457,7 @@ impl TextSystem {
             line_offsets,
             boundaries,
             clusters,
-            missing,
+            missing: missing.into_iter().map(|(start, end)| start..end).collect(),
             carets,
             retained_bytes,
         }));

@@ -28,6 +28,11 @@ pub struct CompiledUnicodeUi {
     pub unsupported: Vec<(usize, Range<usize>)>,
 }
 
+enum PendingQuad {
+    Solid(Quad),
+    Image(ImageQuad),
+}
+
 struct ImageQuad {
     bounds: UiRect,
     clip: Option<UiRect>,
@@ -74,7 +79,8 @@ impl TextSystem {
         };
         let mut output = CompiledUnicodeUi::default();
         let mut parts = HashMap::<SemanticId, usize>::new();
-        let mut images = Vec::<ImageQuad>::new();
+        let mut pending = Vec::<PendingQuad>::new();
+        let mut has_images = false;
         let mut atlas = Atlas::new(self.limits.maximum_raster_pixels.min(16 * 1024 * 1024));
         let mut placed = HashMap::<CacheKey, TextureRect>::new();
         let mut glyph_count = 0_usize;
@@ -97,7 +103,7 @@ impl TextSystem {
                         None,
                         pickable,
                     )? {
-                        output.quads.push(quad);
+                        pending.push(PendingQuad::Solid(quad));
                     }
                 }
                 UiPrimitive::Text {
@@ -108,7 +114,13 @@ impl TextSystem {
                     text,
                     ..
                 } => {
+                    if size * raster_scale > 1024.0 {
+                        return Err(TextError::LimitExceeded);
+                    }
                     let layout = self.layout(text, size, None)?;
+                    if layout.0.buffer.layout_runs().count() > limits.maximum_lines.min(4096) {
+                        return Err(TextError::LimitExceeded);
+                    }
                     glyph_count = glyph_count
                         .checked_add(layout.clusters().len())
                         .ok_or(TextError::LimitExceeded)?;
@@ -128,6 +140,20 @@ impl TextSystem {
                         for glyph in run.glyphs {
                             // Offsets are physical in cosmic's API; its own
                             // x/y advances are scaled exactly once.
+                            let raster_position = [
+                                (glyph.x + glyph.font_size * glyph.x_offset + origin[0])
+                                    * raster_scale,
+                                (glyph.y - glyph.font_size * glyph.y_offset
+                                    + origin[1]
+                                    + run.line_y)
+                                    * raster_scale,
+                            ];
+                            if raster_position
+                                .iter()
+                                .any(|value| !value.is_finite() || value.abs() > 16_777_216.0)
+                            {
+                                return Err(TextError::InvalidValue);
+                            }
                             let physical = glyph.physical(
                                 (
                                     origin[0] * raster_scale,
@@ -156,13 +182,14 @@ impl TextSystem {
                                     placed.insert(physical.cache_key, frame);
                                     frame
                                 };
-                                images.push(ImageQuad {
+                                has_images = true;
+                                pending.push(PendingQuad::Image(ImageQuad {
                                     bounds,
                                     clip: visible,
                                     paint,
                                     part: first_part + ordinal,
                                     frame,
-                                });
+                                }));
                             }
                             ordinal += 1;
                         }
@@ -170,11 +197,11 @@ impl TextSystem {
                     output.layouts.push((index, layout));
                 }
             }
-            if output.quads.len().saturating_add(images.len()) > limits.maximum_quads.min(262_144) {
+            if pending.len() > limits.maximum_quads.min(262_144) {
                 return Err(TextError::LimitExceeded);
             }
         }
-        if !images.is_empty() {
+        if has_images {
             let bytes = atlas.finish()?;
             let digest = Digest256(Sha256::digest(&bytes).into());
             let id = ResourceId(first_resource);
@@ -198,7 +225,13 @@ impl TextSystem {
                 self.next_revision = next;
                 texture
             };
-            for image in images {
+            for item in pending {
+                let PendingQuad::Image(image) = item else {
+                    if let PendingQuad::Solid(quad) = item {
+                        output.quads.push(quad);
+                    }
+                    continue;
+                };
                 if let Some(quad) = clipped_quad(
                     image.bounds,
                     image.clip,
@@ -214,10 +247,14 @@ impl TextSystem {
             }
             self.last_atlas = Some(texture.clone());
             output.resources.push(texture);
+        } else {
+            output
+                .quads
+                .extend(pending.into_iter().filter_map(|item| match item {
+                    PendingQuad::Solid(quad) => Some(quad),
+                    PendingQuad::Image(_) => None,
+                }));
         }
-        // Preserve painter order across solids/text; primitive semantic IDs may
-        // repeat, but every part remains distinct. Stable sort retains ties.
-        output.quads.sort_by_key(|quad| quad.painter_order);
         Ok(output)
     }
 
@@ -404,7 +441,9 @@ impl Atlas {
         if height > 8192 || pixels > self.budget {
             return Err(TextError::LimitExceeded);
         }
-        self.rows.resize(pixels * 4, 0);
+        if self.rows.len() < pixels * 4 {
+            self.rows.resize(pixels * 4, 0);
+        }
         for y in 0..h {
             for x in 0..w {
                 let src = (y * w + x) as usize;

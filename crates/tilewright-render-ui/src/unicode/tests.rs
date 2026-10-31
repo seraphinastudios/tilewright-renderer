@@ -61,3 +61,196 @@ fn digest_and_budget_fail_closed() {
         Err(TextError::InvalidValue)
     ));
 }
+
+fn explicit_pack() -> Option<FontPack> {
+    // Test-only explicit fixture root. Production text code never reads env/FS.
+    let root = std::env::var_os("TILEWRIGHT_UNICODE_FONT_ROOT")?;
+    let root = std::path::Path::new(&root);
+    let fonts = crate::unicode_fonts::FONTS
+        .iter()
+        .map(|spec| {
+            let bytes = std::fs::read(root.join(spec.path)).unwrap();
+            assert_eq!(bytes.len(), spec.bytes);
+            FontBlob {
+                family: spec.family.into(),
+                bytes: bytes.into(),
+                sha256: spec.sha256,
+            }
+        })
+        .collect();
+    Some(FontPack::new(fonts, TextLimits::default()).unwrap())
+}
+
+#[test]
+fn explicit_font_pack_shapes_multilingual_original_text() {
+    let Some(pack) = explicit_pack() else {
+        return;
+    };
+    let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
+    for text in [
+        "office e\u{301}",
+        "العربية مرحبا 123",
+        "שלום abc 123",
+        "नमस्ते क्षि",
+        "বাংলা",
+        "தமிழ்",
+        "简体中文 日本語 한국어",
+        "👩🏽‍💻 🇺🇳 👨‍👩‍👧‍👦",
+    ] {
+        let layout = system.layout(text, 20.0, None).unwrap();
+        assert_eq!(layout.text(), text);
+        assert!(
+            layout.missing_glyphs().is_empty(),
+            "missing in {text:?}: {:?}",
+            layout.missing_glyphs()
+        );
+        assert!(layout.size()[0] > 0.0);
+        for boundary in layout.grapheme_boundaries() {
+            let cursor = TextCursor {
+                byte: *boundary,
+                affinity: TextAffinity::After,
+            };
+            assert!(
+                layout.caret(cursor).is_some(),
+                "no caret {text:?} {boundary}"
+            );
+        }
+        for x in 0..100 {
+            let cursor = layout.hit([x as f32, 10.0]);
+            assert!(layout.grapheme_boundaries().contains(&cursor.byte));
+        }
+    }
+}
+
+fn compile_label(system: &mut TextSystem, text: &str) -> CompiledUnicodeUi {
+    let rect = crate::UiRect {
+        x: 0.0,
+        y: 0.0,
+        width: 512.0,
+        height: 128.0,
+    };
+    system
+        .compile(
+            crate::UiViewport {
+                logical_size: [512, 128],
+                physical_size: [512, 128],
+            },
+            crate::UiDisplayList {
+                primitives: &[crate::UiPrimitive::Text {
+                    origin: [0.0, 0.0],
+                    clip: rect,
+                    paint: crate::UiPaint {
+                        semantic_id: tilewright_scene::SemanticId(1),
+                        painter_order: 0,
+                        color: [1.0; 4],
+                    },
+                    font: crate::builtin::FONT_ID,
+                    size: 20.0,
+                    text,
+                }],
+            },
+            crate::UiTexture {
+                id: tilewright_scene::ResourceId(2),
+                revision: 1,
+                digest: tilewright_scene::Digest256(crate::builtin::SOLID_SHA256),
+            },
+            3,
+            crate::UiLimits::default(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn atlas_is_immutable_deterministic_and_keeps_larger_previous_glyphs() {
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let first = compile_label(&mut system, "W.i");
+    let second = compile_label(&mut system, "W.i");
+    assert_eq!(first.resources[0].identity, second.resources[0].identity);
+    assert_eq!(first.resources[0].bytes, second.resources[0].bytes);
+    let changed = compile_label(&mut system, "different");
+    assert_ne!(
+        first.resources[0].identity.digest,
+        changed.resources[0].identity.digest
+    );
+    assert!(changed.resources[0].identity.revision > first.resources[0].identity.revision);
+    let bytes = &first.resources[0].bytes;
+    let width = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let height = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    for quad in first.quads {
+        assert!(quad.frame.unwrap().fits(width, height));
+        assert!(!quad.pickable);
+    }
+    assert_eq!(
+        first.resources[0].identity.digest.0,
+        <[u8; 32]>::from(Sha256::digest(bytes))
+    );
+}
+
+#[test]
+fn bidi_affinities_visual_motion_ligature_and_wrapping() {
+    let Some(pack) = explicit_pack() else {
+        return;
+    };
+    let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
+    let layout = system.layout("abc אבג xyz", 20.0, None).unwrap();
+    let left = layout
+        .caret(TextCursor {
+            byte: 4,
+            affinity: TextAffinity::Before,
+        })
+        .unwrap();
+    let right = layout
+        .caret(TextCursor {
+            byte: 4,
+            affinity: TextAffinity::After,
+        })
+        .unwrap();
+    assert_ne!(left.x, right.x);
+    let start = TextCursor {
+        byte: 0,
+        affinity: TextAffinity::After,
+    };
+    let mut cursor = start;
+    for _ in 0..30 {
+        let next = layout.move_visual(cursor, VisualMotion::Right);
+        assert!(layout.caret(next).unwrap().x >= layout.caret(cursor).unwrap().x);
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    assert_eq!(layout.move_visual(cursor, VisualMotion::Home).byte, 0);
+    let segments = layout.selection_rects(
+        TextCursor {
+            byte: 2,
+            affinity: TextAffinity::After,
+        },
+        TextCursor {
+            byte: 6,
+            affinity: TextAffinity::Before,
+        },
+    );
+    assert!(
+        segments.len() >= 2,
+        "mixed selection must stay disconnected: {segments:?}"
+    );
+    let ligature = system.layout("ffi", 20.0, None).unwrap();
+    let a = ligature
+        .caret(TextCursor {
+            byte: 1,
+            affinity: TextAffinity::After,
+        })
+        .unwrap();
+    let b = ligature
+        .caret(TextCursor {
+            byte: 2,
+            affinity: TextAffinity::After,
+        })
+        .unwrap();
+    assert!(a.x < b.x);
+    let wrapped = system
+        .layout("one two three\r\nfour", 20.0, Some(50.0))
+        .unwrap();
+    assert_eq!(wrapped.text(), "one two three\r\nfour");
+    assert!(wrapped.size()[1] > 30.0);
+}
