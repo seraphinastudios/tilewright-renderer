@@ -179,7 +179,8 @@ impl TextSystem {
     pub fn new(pack: FontPack, limits: TextLimits) -> Result<Self, TextError> {
         // Revalidate tighter construction limits even if the pack was built
         // with different caller budgets.
-        let pack = FontPack::new(pack.fonts.to_vec(), limits)?;
+        let FontPack { fonts, .. } = pack;
+        let pack = FontPack::new(fonts.to_vec(), limits)?;
         let mut db = fontdb::Database::new();
         for font in pack.fonts.iter() {
             let before = db.faces().count();

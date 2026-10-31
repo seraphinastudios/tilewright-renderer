@@ -129,6 +129,7 @@ impl UnicodeLayout {
     /// Moves by visual positions. Adjacent affinities sharing the same position
     /// do not require a redundant key press. Home/End refer to the visual line.
     #[must_use]
+    #[allow(clippy::float_cmp)] // Positions are exact identities from one immutable layout.
     pub fn move_visual(&self, cursor: TextCursor, motion: VisualMotion) -> TextCursor {
         let Some(rect) = self.caret(cursor) else {
             return cursor;
@@ -231,6 +232,7 @@ impl TextSystem {
     ///
     /// # Errors
     /// Rejects invalid metrics or text/glyph/line budgets without partial output.
+    #[allow(clippy::too_many_lines)] // Keep validated shaping and geometry publication atomic.
     pub fn layout(
         &mut self,
         text: &str,
@@ -247,7 +249,9 @@ impl TextSystem {
             return Err(TextError::LimitExceeded);
         }
         if let Some(index) = self.layouts.iter().position(|layout| {
-            layout.0.text == text && layout.0.font_size == size && layout.0.width == width
+            layout.0.text == text
+                && layout.0.font_size.to_bits() == size.to_bits()
+                && layout.0.width == width
         }) {
             let layout = self.layouts.remove(index).ok_or(TextError::InvalidValue)?;
             self.layouts.push_back(layout.clone());

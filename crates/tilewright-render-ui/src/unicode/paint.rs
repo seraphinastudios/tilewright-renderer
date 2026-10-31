@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
-use cosmic_text::{CacheKey, SwashContent, SwashImage};
+use cosmic_text::{CacheKey, Command, SwashContent, SwashImage};
 use sha2::{Digest, Sha256};
 use tilewright_scene::{Digest256, Quad, ResourceId, SemanticId, TextureRect};
 
@@ -13,7 +13,7 @@ use crate::{
     compile::clipped_quad,
 };
 
-/// Immutable ATX1 atlas bytes, ready for a bounded ResourceProvider.
+/// Immutable ATX1 atlas bytes, ready for a bounded `ResourceProvider`.
 #[derive(Clone, Debug)]
 pub struct UnicodeTexture {
     pub identity: UiTexture,
@@ -259,6 +259,7 @@ impl TextSystem {
     }
 
     fn raster_image(&mut self, key: CacheKey) -> Result<Option<Arc<SwashImage>>, TextError> {
+        const CACHE_BYTES: usize = 16 * 1024 * 1024;
         if let Some(image) = self.raster.get(&key) {
             return Ok(Some(image.clone()));
         }
@@ -268,8 +269,57 @@ impl TextSystem {
         if f32::from_bits(key.font_size_bits) > 1024.0 {
             return Err(TextError::LimitExceeded);
         }
-        let Some(image) = self.swash.get_image_uncached(&mut self.fonts, key) else {
+        let font = self
+            .fonts
+            .get_font(key.font_id, key.font_weight)
+            .ok_or(TextError::InvalidFont)?;
+        // This path deliberately supports monochrome outlines. Reject color
+        // tables before Swash can decode an embedded bitmap of arbitrary size.
+        for tag in [*b"CBDT", *b"CBLC", *b"sbix", *b"COLR", *b"SVG "] {
+            if font.as_swash().table(u32::from_be_bytes(tag)).is_some() {
+                return Err(TextError::Rasterization);
+            }
+        }
+        let Some(outline) = self
+            .swash
+            .get_outline_commands_uncached(&mut self.fonts, key)
+        else {
             return Ok(None);
+        };
+        if outline.len() > 262_144 {
+            return Err(TextError::LimitExceeded);
+        }
+        let mut low = [f32::MAX; 2];
+        let mut high = [f32::MIN; 2];
+        for command in &*outline {
+            let points = match command {
+                Command::MoveTo(a) | Command::LineTo(a) => [Some(a), None, None],
+                Command::QuadTo(a, b) => [Some(a), Some(b), None],
+                Command::CurveTo(a, b, c) => [Some(a), Some(b), Some(c)],
+                Command::Close => [None, None, None],
+            };
+            for point in points.into_iter().flatten() {
+                for (axis, value) in [point.x, point.y].into_iter().enumerate() {
+                    if !value.is_finite() || value.abs() > 8192.0 {
+                        return Err(TextError::LimitExceeded);
+                    }
+                    low[axis] = low[axis].min(value);
+                    high[axis] = high[axis].max(value);
+                }
+            }
+        }
+        if low[0] == f32::MAX {
+            return Ok(None);
+        }
+        let width = (high[0] - low[0] + 4.0).ceil();
+        let height = (high[1] - low[1] + 4.0).ceil();
+        #[allow(clippy::cast_precision_loss)]
+        let budget = self.limits.maximum_raster_pixels.min(16 * 1024 * 1024) as f32;
+        if width > 2048.0 || height > 8192.0 || width * height > budget {
+            return Err(TextError::LimitExceeded);
+        }
+        let Some(image) = self.swash.get_image_uncached(&mut self.fonts, key) else {
+            return Err(TextError::Rasterization);
         };
         let pixels = (image.placement.width as usize)
             .checked_mul(image.placement.height as usize)
@@ -287,7 +337,6 @@ impl TextSystem {
             return Ok(None);
         }
         let image = Arc::new(image);
-        const CACHE_BYTES: usize = 16 * 1024 * 1024;
         if image.data.len() <= CACHE_BYTES {
             while self.raster.len() >= 4096
                 || self.raster_bytes.saturating_add(image.data.len()) > CACHE_BYTES

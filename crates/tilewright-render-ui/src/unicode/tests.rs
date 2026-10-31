@@ -115,8 +115,8 @@ fn explicit_font_pack_shapes_multilingual_original_text() {
                 "no caret {text:?} {boundary}"
             );
         }
-        for x in 0..100 {
-            let cursor = layout.hit([x as f32, 10.0]);
+        for x in 0_u16..100 {
+            let cursor = layout.hit([f32::from(x), 10.0]);
             assert!(layout.grapheme_boundaries().contains(&cursor.byte));
         }
     }
@@ -205,7 +205,7 @@ fn bidi_affinities_visual_motion_ligature_and_wrapping() {
             affinity: TextAffinity::After,
         })
         .unwrap();
-    assert_ne!(left.x, right.x);
+    assert!((left.x - right.x).abs() > 1.0);
     let start = TextCursor {
         byte: 0,
         affinity: TextAffinity::After,
