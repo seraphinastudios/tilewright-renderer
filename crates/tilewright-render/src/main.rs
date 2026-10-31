@@ -199,6 +199,7 @@ fn render_corpus() -> Result<(), String> {
             shared_ui_provider(),
         ),
     ];
+    let mut failures = Vec::new();
     for (name, scene, resources) in cases {
         let scene = scene.map_err(|error| error.to_string())?;
         let viewport = scene.viewport();
@@ -215,11 +216,11 @@ fn render_corpus() -> Result<(), String> {
         let frame = renderer
             .render(request)
             .map_err(|error| error.to_string())?;
-        if frame.semantic_ids != reference.semantic_ids
-            || frame.depth != reference.depth
-            || frame.coverage != reference.coverage
-        {
-            return Err(format!(
+        let exact_planes = frame.semantic_ids == reference.semantic_ids
+            && frame.depth == reference.depth
+            && frame.coverage == reference.coverage;
+        if !exact_planes {
+            failures.push(format!(
                 "scenario {name}: GPU/reference exact planes differ"
             ));
         }
@@ -231,12 +232,12 @@ fn render_corpus() -> Result<(), String> {
             .max()
             .unwrap_or(0);
         if maximum_difference > 1 {
-            return Err(format!(
+            failures.push(format!(
                 "scenario {name}: GPU/reference RGBA difference {maximum_difference} exceeds 1"
             ));
         }
         println!(
-            "scenario={name} exact_planes=true maximum_rgba_difference={maximum_difference} quads={} vertices={} uploads={} readback_bytes={} frame_cpu_micros={}",
+            "scenario={name} exact_planes={exact_planes} maximum_rgba_difference={maximum_difference} quads={} vertices={} uploads={} readback_bytes={} frame_cpu_micros={}",
             scene.quads().len(),
             frame.metrics.vertex_count,
             frame.metrics.uploaded_bytes,
@@ -244,7 +245,11 @@ fn render_corpus() -> Result<(), String> {
             frame.metrics.frame_cpu_micros,
         );
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 fn render_offscreen(path: &Path) -> Result<(), String> {
