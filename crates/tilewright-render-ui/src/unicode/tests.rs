@@ -94,7 +94,7 @@ fn explicit_font_pack_shapes_multilingual_original_text() {
         "नमस्ते क्षि",
         "বাংলা",
         "தமிழ்",
-        "简体中文 日本語 한국어",
+        "简体中文 日本語 한국어 한",
         "👩🏽‍💻 🇺🇳 👨‍👩‍👧‍👦",
     ] {
         let layout = system.layout(text, 20.0, None).unwrap();
@@ -105,6 +105,9 @@ fn explicit_font_pack_shapes_multilingual_original_text() {
             layout.missing_glyphs()
         );
         assert!(layout.size()[0] > 0.0);
+        let frame = compile_label(&mut system, text);
+        assert!(!frame.quads.is_empty());
+        assert!(frame.unsupported.is_empty());
         for boundary in layout.grapheme_boundaries() {
             let cursor = TextCursor {
                 byte: *boundary,
@@ -253,4 +256,164 @@ fn bidi_affinities_visual_motion_ligature_and_wrapping() {
         .unwrap();
     assert_eq!(wrapped.text(), "one two three\r\nfour");
     assert!(wrapped.size()[1] > 30.0);
+}
+
+#[test]
+fn cache_eviction_and_shaping_reset_preserve_retained_layouts() {
+    let mut system = TextSystem::new(
+        legacy_pack(),
+        TextLimits {
+            maximum_cached_layouts: 2,
+            ..TextLimits::default()
+        },
+    )
+    .unwrap();
+    let old = system.layout("retained ffi", 18.0, None).unwrap();
+    let before = old.caret(TextCursor::default());
+    for index in 0..260 {
+        system
+            .layout(&format!("label {index}"), 18.0, None)
+            .unwrap();
+    }
+    assert_eq!(system.cached_layouts(), 2);
+    assert_eq!(before, old.caret(TextCursor::default()));
+    assert_eq!(old.text(), "retained ffi");
+    let frame = compile_label(&mut system, "W.i");
+    system.clear_cache();
+    assert_eq!(system.cached_layouts(), 0);
+    let after = compile_label(&mut system, "W.i");
+    assert_eq!(frame.resources[0].bytes, after.resources[0].bytes);
+    assert!(after.resources[0].identity.revision > frame.resources[0].identity.revision);
+}
+
+#[test]
+fn unknown_roles_limits_and_missing_scalars_are_explicit() {
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let layout = system.layout("a\u{10ffff}b", 20.0, None).unwrap();
+    assert_eq!(layout.missing_glyphs(), &[1..5]);
+    assert_eq!(layout.text(), "a\u{10ffff}b");
+    let viewport = crate::UiViewport {
+        logical_size: [128, 128],
+        physical_size: [128, 128],
+    };
+    let solid = crate::UiTexture {
+        id: tilewright_scene::ResourceId(2),
+        revision: 1,
+        digest: tilewright_scene::Digest256(crate::builtin::SOLID_SHA256),
+    };
+    let rect = crate::UiRect {
+        x: 0.0,
+        y: 0.0,
+        width: 128.0,
+        height: 128.0,
+    };
+    let mut primitive = crate::UiPrimitive::Text {
+        origin: [0.0, 0.0],
+        clip: rect,
+        paint: crate::UiPaint {
+            semantic_id: tilewright_scene::SemanticId(1),
+            painter_order: 0,
+            color: [1.0; 4],
+        },
+        font: crate::FontId(2),
+        size: 20.0,
+        text: "test",
+    };
+    assert!(matches!(
+        system.compile(
+            viewport,
+            crate::UiDisplayList {
+                primitives: &[primitive]
+            },
+            solid,
+            3,
+            crate::UiLimits::default()
+        ),
+        Err(TextError::Ui(UiError::UnknownFont))
+    ));
+    if let crate::UiPrimitive::Text { font, .. } = &mut primitive {
+        *font = crate::builtin::FONT_ID;
+    }
+    assert!(matches!(
+        system.compile(
+            viewport,
+            crate::UiDisplayList {
+                primitives: &[primitive]
+            },
+            solid,
+            3,
+            crate::UiLimits {
+                maximum_quads: 0,
+                ..crate::UiLimits::default()
+            }
+        ),
+        Err(TextError::LimitExceeded)
+    ));
+    assert!(matches!(
+        system.compile(
+            viewport,
+            crate::UiDisplayList {
+                primitives: &[primitive]
+            },
+            solid,
+            solid.id.0,
+            crate::UiLimits::default()
+        ),
+        Err(TextError::InvalidValue)
+    ));
+}
+
+#[test]
+fn primitive_order_survives_equal_painter_order_and_clipping() {
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let rect = crate::UiRect {
+        x: 0.0,
+        y: 0.0,
+        width: 128.0,
+        height: 128.0,
+    };
+    let paint = crate::UiPaint {
+        semantic_id: tilewright_scene::SemanticId(1),
+        painter_order: 0,
+        color: [1.0; 4],
+    };
+    let primitives = [
+        crate::UiPrimitive::Text {
+            origin: [0.0, 0.0],
+            clip: rect,
+            paint,
+            font: crate::builtin::FONT_ID,
+            size: 20.0,
+            text: "a",
+        },
+        crate::UiPrimitive::Solid {
+            bounds: rect,
+            clip: rect,
+            paint,
+            pickable: true,
+        },
+    ];
+    let output = system
+        .compile(
+            crate::UiViewport {
+                logical_size: [128, 128],
+                physical_size: [128, 128],
+            },
+            crate::UiDisplayList {
+                primitives: &primitives,
+            },
+            crate::UiTexture {
+                id: tilewright_scene::ResourceId(2),
+                revision: 1,
+                digest: tilewright_scene::Digest256(crate::builtin::SOLID_SHA256),
+            },
+            3,
+            crate::UiLimits::default(),
+        )
+        .unwrap();
+    assert_eq!(output.quads.len(), 2);
+    assert!(!output.quads[0].pickable);
+    assert!(output.quads[1].pickable);
+    assert_eq!(output.quads[0].part, 0);
+    assert_eq!(output.quads[1].part, 1);
 }

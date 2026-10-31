@@ -308,7 +308,7 @@ impl TextSystem {
                 }
             }
         }
-        if low[0] == f32::MAX {
+        if low[0] > 8192.0 {
             return Ok(None);
         }
         let width = (high[0] - low[0] + 4.0).ceil();
