@@ -483,7 +483,7 @@ fn rtl_ligature_hit_and_partial_selection_share_caret_geometry() {
             .clusters()
             .iter()
             .any(|cluster| cluster.bytes == (0..4)),
-        "fixture must exercise lam-alef ligature"
+        "fixture must exercise lam-alef ligature: {:?}", layout.clusters()
     );
     let start = TextCursor {
         byte: 0,
