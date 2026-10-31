@@ -285,6 +285,14 @@ release `429775329` is batch-specific. It does not authorize enabling the hourly
 reconciler or publishing older cohorts. Retained intents from its interrupted
 publication require the same authoritative, explicit owner recovery above.
 
+The owner subsequently selected preparation of a new reviewed 0.6.1 cohort,
+retaining the unresolved 0.6.0 intent. All eight public libraries and their
+internal exact dependency requirements advance together; this does not replace
+the immutable 0.6.0 archives or establish their missing upload outcome. The next
+source release after v1.19.0 is expected to be v1.20.0 under the `main` minor
+release policy, subject to the final release plan. Preparation is not approval
+to publish: the owner must review the concrete new release artifacts first.
+
 From then on, merges release normally. A release that changes no packaged
 crate content reuses the published archives, owns no new coordinates and
 dispatches nothing. A release that changes packaged content bumps the Cargo
