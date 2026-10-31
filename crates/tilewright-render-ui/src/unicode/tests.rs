@@ -62,14 +62,22 @@ fn digest_and_budget_fail_closed() {
     ));
 }
 
-fn explicit_pack() -> Option<FontPack> {
+fn explicit_pack() -> FontPack {
     // Test-only explicit fixture root. Production text code never reads env/FS.
-    let root = std::env::var_os("TILEWRIGHT_UNICODE_FONT_ROOT")?;
+    let root = std::env::var_os("TILEWRIGHT_UNICODE_FONT_ROOT").expect(
+        "Unicode acceptance tests require TILEWRIGHT_UNICODE_FONT_ROOT to name the explicit verified font-pack directory",
+    );
     let root = std::path::Path::new(&root);
     let fonts = crate::unicode_fonts::FONTS
         .iter()
         .map(|spec| {
-            let bytes = std::fs::read(root.join(spec.path)).unwrap();
+            let path = root.join(spec.path);
+            let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+                panic!(
+                    "Cannot load required Unicode acceptance font {}: {error}",
+                    path.display()
+                )
+            });
             assert_eq!(bytes.len(), spec.bytes);
             FontBlob {
                 family: spec.family.into(),
@@ -78,14 +86,12 @@ fn explicit_pack() -> Option<FontPack> {
             }
         })
         .collect();
-    Some(FontPack::new(fonts, TextLimits::default()).unwrap())
+    FontPack::new(fonts, TextLimits::default()).unwrap()
 }
 
 #[test]
 fn explicit_font_pack_shapes_multilingual_original_text() {
-    let Some(pack) = explicit_pack() else {
-        return;
-    };
+    let pack = explicit_pack();
     let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
     for text in [
         "office e\u{301}",
@@ -191,9 +197,7 @@ fn atlas_is_immutable_deterministic_and_keeps_larger_previous_glyphs() {
 
 #[test]
 fn bidi_affinities_visual_motion_ligature_and_wrapping() {
-    let Some(pack) = explicit_pack() else {
-        return;
-    };
+    let pack = explicit_pack();
     let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
     let layout = system.layout("abc אבג xyz", 20.0, None).unwrap();
     let left = layout
@@ -474,9 +478,7 @@ fn selection_stays_on_selected_hard_lines_and_wrap_fragments() {
 
 #[test]
 fn rtl_ligature_hit_and_partial_selection_share_caret_geometry() {
-    let Some(pack) = explicit_pack() else {
-        return;
-    };
+    let pack = explicit_pack();
     let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
     // Explicit RTL embedding exercises a standard Latin ff ligature with an
     // odd bidi level even though the bundled Arabic face uses contextual
@@ -519,9 +521,7 @@ fn rtl_ligature_hit_and_partial_selection_share_caret_geometry() {
 #[test]
 #[allow(clippy::too_many_lines)] // One measured fixture keeps cold/warm phases adjacent.
 fn performance_international_ui() {
-    let Some(pack) = explicit_pack() else {
-        return;
-    };
+    let pack = explicit_pack();
     let start = std::time::Instant::now();
     let mut system = TextSystem::new(pack, TextLimits::default()).unwrap();
     let initialization = start.elapsed();
