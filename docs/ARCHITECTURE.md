@@ -140,17 +140,24 @@ knows nothing about any game or content format.
   and keeps its exact scaled size, so a sprite never gains or loses a pixel of
   width as it or the camera moves. Bent ground keeps its unsnapped mesh and
   overlap. Quads entirely outside the viewport are culled.
-- **What content provides.** Geometry closes every seam between ground quads
-  and keeps texels consistent between tiles, but whether art covers the
-  boundary between its own texels and a neighbour's is the art's job. Ground
-  that tiles exactly at zoom 1 with nearest sampling, such as opaque 2:1
+- **What content provides.** Geometry closes every seam between flat ground
+  quads and keeps texels consistent between tiles, but whether art covers the
+  boundary between its own texels and a neighbour's is the art's job. Flat
+  ground that tiles exactly at zoom 1 with nearest sampling, such as opaque 2:1
   diamonds one pixel shorter than the tile, leaves no gap at fractional zooms
-  either (the tests sweep 0.25× to 3× in steps of 0.01). Diamond art with soft
-  or translucent edges, art that does not tile exactly, and linearly sampled
-  art, whose edge texels blend with the transparent texels beside them, need
-  about a texel of opaque bleed past the diamond's edge to stay closed. So
-  does standing art meant to abut its neighbours, such as walls built from
-  segments.
+  either (the tests sweep 0.25× to 3× in steps of 0.01). Bent ground meets bent
+  ground without gaps too, but where flat ground meets bent ground such art can
+  still leave small specks at fractional zooms. A bent tile stretches its art
+  over its whole cell, so its stepped edges no longer interlock with those of a
+  flat neighbour. With the default mean corner rule and ramps of at most 2 px
+  per tile (the height step times pixels per unit, in zoom-1 pixels), whole
+  zooms stay clean; steeper ramps, or max or min corners, can leave specks at
+  whole zooms too.
+  Diamond art with soft or translucent edges, art that does not tile exactly,
+  and linearly sampled art, whose edge texels blend with the transparent
+  texels beside them, need about a texel of opaque bleed past the diamond's
+  edge to stay closed. So does standing art meant to abut its neighbours, such
+  as walls built from segments.
 - **Validation.** Every quad the objects and their double-draw repeats will
   emit (16 for a bent isometric tile, 2 for a glowing object) is counted
   against the scene's quad budget before anything is ordered or culled,
