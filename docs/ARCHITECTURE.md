@@ -130,12 +130,16 @@ knows nothing about any game or content format.
   corners do at zooms such as 0.5, 0.75, 1.25 and 1.5, the centre takes the
   later texel across the whole tile, as nearest sampling does. Such ties can
   still split a tile between the two texels when the camera sits exactly
-  1/128 px off a round position, and near the edges of art more than 512 px
-  across, where the margin outgrows the offset. Standing
-  art snaps its top-left corner the same way and keeps its exact scaled size,
-  so a sprite never gains or loses a pixel of width as it or the camera moves.
-  Bent ground keeps its unsnapped mesh and overlap. Quads entirely outside the
-  viewport are culled.
+  1/128 px off a round position, and in art more than 512 px across on
+  screen, whatever its texture size: 128 px tiles pass that above zoom 4, and
+  1,024 px tiles above zoom 0.5. The margin scales with the art's on-screen
+  size S along each axis. At the left and top it pushes the same way as the
+  offset. Past the middle it pushes against it, and from (S + 512) / 2 to S, in
+  the right and lower part of the art, it outweighs it, so tied centres there
+  take the earlier texel. Standing art snaps its top-left corner the same way
+  and keeps its exact scaled size, so a sprite never gains or loses a pixel of
+  width as it or the camera moves. Bent ground keeps its unsnapped mesh and
+  overlap. Quads entirely outside the viewport are culled.
 - **What content provides.** Geometry closes every seam between ground quads
   and keeps texels consistent between tiles, but whether art covers the
   boundary between its own texels and a neighbour's is the art's job. Ground

@@ -146,9 +146,15 @@ try {
       failed = true;
       continue;
     }
-    // The raf thresholds count 60 Hz refreshes, the headless default.
-    const warmupInterval = median(result.samples.warmupInterval ?? []);
-    if (result.mode === 'raf' && !(warmupInterval >= 15 && warmupInterval <= 18.5)) {
+    // The raf thresholds count 60 Hz refreshes, the headless default. A single
+    // warm-up frame records no interval, which leaves nothing to check.
+    const warmupIntervals = result.samples.warmupInterval ?? [];
+    const warmupInterval = median(warmupIntervals);
+    if (
+      result.mode === 'raf' &&
+      warmupIntervals.length > 0 &&
+      !(warmupInterval >= 15 && warmupInterval <= 18.5)
+    ) {
       console.error(
         `warning: the median warm-up interval was ${warmupInterval.toFixed(1)} ms, not about 16.7 ms; the on-time percentages assume a 60 Hz requestAnimationFrame clock`,
       );

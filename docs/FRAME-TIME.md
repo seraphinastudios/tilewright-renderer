@@ -59,7 +59,8 @@ These thresholds assume a 60 Hz `requestAnimationFrame` clock, as headless
 Chromium has; the harness warns when the median warm-up interval is not
 about 16.7 ms, as on a 120 or 144 Hz display with `--headed`. `raf` mode needs
 at least one warm-up frame, so that the first measured frame has an
-interval.
+interval. One warm-up frame records no warm-up interval, so `--warmup 1` skips
+the check.
 
 ## Run it
 
