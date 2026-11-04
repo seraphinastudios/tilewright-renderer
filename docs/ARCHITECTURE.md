@@ -147,12 +147,12 @@ knows nothing about any game or content format.
   diamonds one pixel shorter than the tile, leaves no gap at fractional zooms
   either (the tests sweep 0.25× to 3× in steps of 0.01). Bent ground meets bent
   ground without gaps too, but where flat ground meets bent ground such art can
-  still leave small specks: at fractional zooms on shallow ramps, and at any
-  zoom on steep ones. A bent tile stretches its art over its whole cell, so its
-  stepped edges no longer interlock with those of a flat neighbour. In sweeps of
-  48 × 24 and 64 × 32 diamonds, ramps whose height changes by at most 2 px per
-  tile left specks only at fractional zooms, and ramps of 4 px or more left
-  them at whole zooms too (3 px already did on 48 × 24 tiles).
+  still leave small specks at fractional zooms. A bent tile stretches its art
+  over its whole cell, so its stepped edges no longer interlock with those of a
+  flat neighbour. With the default mean corner rule and ramps of at most 2 px
+  per tile (the height step times pixels per unit, in zoom-1 pixels), whole
+  zooms stay clean; steeper ramps, or max or min corners, can leave specks at
+  whole zooms too.
   Diamond art with soft or translucent edges, art that does not tile exactly,
   and linearly sampled art, whose edge texels blend with the transparent
   texels beside them, need about a texel of opaque bleed past the diamond's
