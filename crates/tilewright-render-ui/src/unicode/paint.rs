@@ -163,6 +163,9 @@ impl TextSystem {
                     );
                     let pixel_size = (size * raster_scale).to_bits();
                     for (ordinal, glyph) in layout.0.glyphs.iter().enumerate() {
+                        if !glyph.ink {
+                            continue;
+                        }
                         // Horizontal positions keep a quarter-pixel phase;
                         // vertical positions snap to whole pixels.
                         let raster_position = [

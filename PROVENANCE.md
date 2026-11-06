@@ -69,9 +69,11 @@ and retained OFL notice for the full record.
 Unicode shaping, bidi, line breaking, font fallback and glyph rasterization
 use the crates.io packages `parley` 0.12.0 (with `fontique`) and `swash`
 0.2.10 as ordinary pinned dependencies. Versions and checksums are fixed by
-`Cargo.lock`; no upstream source is copied, vendored or modified. `fontique`
-is built without its `system` feature and its collection is created with
-system fonts disabled, so only the verified `FontPack` bytes are registered.
+`Cargo.lock`; no upstream source is copied, vendored or modified. This
+workspace builds `fontique` without its `system` feature. Independently of
+feature unification in consumers, every collection is created with system
+fonts disabled, only the verified `FontPack` bytes are registered, and shaped
+runs from any other font are rejected.
 
 The renderer-side adapter in `crates/tilewright-render-ui/src/unicode/` is new
 MIT code. It deliberately reproduces observable behavior of the previous

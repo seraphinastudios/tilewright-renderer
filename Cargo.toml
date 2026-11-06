@@ -23,8 +23,9 @@ rust-version = "1.97.1"
 version = "0.6.3"
 
 [workspace.dependencies]
-# Text layout without the "system" feature: fontique cannot enumerate or load
-# platform fonts, so only explicitly registered FontPack bytes exist.
+# Text layout without the "system" feature in this workspace. Independently,
+# every collection disables system fonts and rejects runs from non-pack fonts,
+# so a consumer that unifies the feature on still loads only FontPack bytes.
 parley = { version = "=0.12.0", default-features = false, features = ["std"] }
 swash = { version = "=0.2.10", default-features = false, features = ["std", "render", "scale"] }
 unicode-segmentation = "=1.13.3"

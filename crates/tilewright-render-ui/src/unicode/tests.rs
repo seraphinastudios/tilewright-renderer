@@ -745,3 +745,76 @@ fn engine_and_layouts_stay_thread_portable() {
     send_sync::<UnicodeLayout>();
     send_sync::<CompiledUnicodeUi>();
 }
+
+#[test]
+fn tabs_keep_their_bidi_class_and_stop_positions() {
+    let mut system = TextSystem::new(explicit_pack(), TextLimits::default()).unwrap();
+    // A tab resets to the paragraph level (UAX #9 L1): in an LTR paragraph
+    // the digit after it stays left-to-right on the tab stop. The expected
+    // geometry is the previous shaping stack's output.
+    let layout = system.layout("x \u{5d0}\t1", 16.0, None).unwrap();
+    let cluster = |bytes: std::ops::Range<usize>| {
+        layout
+            .clusters()
+            .iter()
+            .find(|cluster| cluster.bytes == bytes)
+            .unwrap()
+            .clone()
+    };
+    let alef = cluster(2..4);
+    let tab = cluster(4..5);
+    let one = cluster(5..6);
+    assert!(alef.right_to_left && !tab.right_to_left && !one.right_to_left);
+    assert!((alef.bounds.x - 12.62).abs() < 0.01, "{alef:?}");
+    assert!((tab.bounds.x - 22.74).abs() < 0.01, "{tab:?}");
+    assert!((tab.bounds.width - 10.54).abs() < 0.01, "{tab:?}");
+    assert!((one.bounds.x - 33.28).abs() < 0.01, "{one:?}");
+    // In an RTL paragraph, tab-separated columns run right to left.
+    let layout = system.layout("\u{5d0} ab\tcd", 16.0, None).unwrap();
+    let x = |bytes: std::ops::Range<usize>| {
+        layout
+            .clusters()
+            .iter()
+            .find(|cluster| cluster.bytes == bytes)
+            .unwrap()
+            .bounds
+            .x
+    };
+    assert!(
+        x(6..7) < x(5..6) && x(5..6) < x(3..4),
+        "{:?}",
+        layout.clusters()
+    );
+    // Tabs never draw their shaped glyph.
+    let frame = compile_label(&mut system, "a\t\t\tb");
+    assert_eq!(frame.quads.len(), 2);
+    assert!(frame.unsupported.is_empty());
+}
+
+#[test]
+fn font_registration_fails_closed() {
+    let roboto = legacy_pack().fonts()[0].clone();
+    let blob = |family: &str, bytes: Arc<[u8]>| FontBlob {
+        family: family.into(),
+        sha256: Sha256::digest(&bytes).into(),
+        bytes,
+    };
+    let garbage: Arc<[u8]> = Arc::from(&b"not a font at all"[..]);
+    let truncated: Arc<[u8]> = Arc::from(&roboto.bytes[..512]);
+    for fonts in [
+        vec![blob("Roboto", roboto.bytes.clone())],
+        vec![blob("roboto mono", roboto.bytes.clone())],
+        vec![blob("Garbage", garbage)],
+        vec![blob("Roboto Mono", truncated)],
+        vec![
+            blob("Roboto Mono", roboto.bytes.clone()),
+            blob("Second Name", roboto.bytes.clone()),
+        ],
+    ] {
+        let pack = FontPack::new(fonts, TextLimits::default()).unwrap();
+        assert!(matches!(
+            TextSystem::new(pack, TextLimits::default()),
+            Err(TextError::InvalidFont)
+        ));
+    }
+}

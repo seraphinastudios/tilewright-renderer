@@ -176,9 +176,10 @@ pub struct TextSystem {
 impl TextSystem {
     /// Creates the text engine exclusively from verified in-memory fonts.
     ///
-    /// The font collection is built without platform font access (the
-    /// `system` feature is not compiled in, and the collection disables it),
-    /// so no installed font can be enumerated, loaded or used as fallback.
+    /// The font collection is created with system fonts disabled and only
+    /// pack blobs registered, and shaped runs from any other font are
+    /// rejected. No installed font can be enumerated, loaded or used as
+    /// fallback, even if a consumer enables fontique's `system` feature.
     ///
     /// # Errors
     /// Rejects font parse failures, unexpected faces and missing family names.

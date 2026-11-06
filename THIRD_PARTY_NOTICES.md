@@ -16,11 +16,12 @@ bridge, adds explicit safety invariants, and exposes no wgpu handle.
 `tilewright-render-ui` shapes, lays out and rasterizes Unicode text with the
 unmodified crates.io packages `parley`, `fontique`, `parley_engine`,
 `parley_data`, `parley_emoji`, `parlance`, `harfrust`, `skrifa`, `read-fonts`,
-`font-types`, `swash` and `zeno` (`MIT`, or `Apache-2.0 OR MIT`). `fontique` is
-built without its `system` feature, so no platform font enumeration code is
-linked. Line breaking, word segmentation and character properties come from
+`font-types`, `swash` and `zeno` (`MIT`, or `Apache-2.0 OR MIT`). This
+workspace builds `fontique` without its `system` feature, and every collection
+disables system fonts. Line breaking, word segmentation and character properties come from
 the ICU4X crates (`icu_segmenter`, `icu_properties`, `icu_normalizer`,
-`icu_collections`, `icu_locale_core`, `icu_provider` and their compiled `*_data`
+`icu_collections`, `icu_locale_core`, `icu_locale_fallback`, `icu_provider` and
+their compiled `*_data`
 crates, with `zerovec`, `zerotrie`, `zerofrom`, `yoke`, `litemap`, `tinystr`,
 `writeable` and `potential_utf`). Those crates and the Unicode data compiled
 into renderer binaries and the browser bundles are distributed under the

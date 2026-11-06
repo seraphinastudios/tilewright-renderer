@@ -70,6 +70,8 @@ pub(super) struct PlacedGlyph {
     pub(super) y_offset: f32,
     /// Variation coordinates, for example the synthesized regular `wght`.
     pub(super) coords: Arc<[i16]>,
+    /// Tabs are spacing only; their shaped glyph is never drawn.
+    pub(super) ink: bool,
 }
 
 #[derive(Debug)]
@@ -313,9 +315,18 @@ fn build(
 }
 
 /// Tab stops every eight space advances, measured along the paragraph in
-/// logical order before wrapping. Tabs are shaped as spaces of the same byte
-/// length; this returns the extra advance each tab needs to reach its stop.
-fn tab_advances(layout: &parley::Layout<[u8; 4]>, text: &str) -> Vec<(Range<usize>, f32)> {
+/// logical order before wrapping. Tabs stay U+0009 in the shaped text, so
+/// they keep bidi class S (reset to the paragraph level by UAX #9 rule L1);
+/// this returns the letter spacing each tab needs to reach its stop.
+fn tab_advances(
+    layout: &parley::Layout<[u8; 4]>,
+    text: &str,
+    space: f32,
+) -> Vec<(Range<usize>, f32)> {
+    let stop_width = space * 8.0;
+    if stop_width <= 0.0 || !stop_width.is_finite() {
+        return Vec::new();
+    }
     let mut clusters: Vec<(usize, f32)> = layout
         .lines()
         .flat_map(|line| line.runs())
@@ -325,8 +336,7 @@ fn tab_advances(layout: &parley::Layout<[u8; 4]>, text: &str) -> Vec<(Range<usiz
     let mut tabs = Vec::new();
     let mut x = 0.0_f32;
     for (start, advance) in clusters {
-        let stop_width = advance * 8.0;
-        if text.as_bytes().get(start) == Some(&b'\t') && stop_width > 0.0 {
+        if text.as_bytes().get(start) == Some(&b'\t') {
             let stop = ((x / stop_width).floor() + 1.0) * stop_width;
             tabs.push((start..start + 1, stop - x - advance));
             x = stop;
@@ -399,24 +409,31 @@ impl TextSystem {
                 top += line_height;
                 continue;
             }
-            // A tab is shaped as a space; both are one byte, so every
-            // original byte offset is preserved.
-            let shaped: Cow<'_, str> = if original.contains('\t') {
-                Cow::Owned(original.replace('\t', " "))
-            } else {
-                Cow::Borrowed(original)
-            };
             let tabs = if original.contains('\t') {
+                // A tab advances like eight shaped spaces, as before.
+                let space = build(
+                    &mut self.layout_context,
+                    &mut self.fonts,
+                    &self.families,
+                    " ",
+                    size,
+                    None,
+                    &[],
+                )
+                .lines()
+                .flat_map(|line| line.runs())
+                .flat_map(|run| run.clusters().map(|c| c.advance()))
+                .sum::<f32>();
                 let unwrapped = build(
                     &mut self.layout_context,
                     &mut self.fonts,
                     &self.families,
-                    &shaped,
+                    original,
                     size,
                     None,
                     &[],
                 );
-                tab_advances(&unwrapped, original)
+                tab_advances(&unwrapped, original, space)
             } else {
                 Vec::new()
             };
@@ -424,7 +441,7 @@ impl TextSystem {
                 &mut self.layout_context,
                 &mut self.fonts,
                 &self.families,
-                &shaped,
+                original,
                 size,
                 width,
                 &tabs,
@@ -487,6 +504,7 @@ impl TextSystem {
                                 baseline,
                                 y_offset: glyph.y,
                                 coords: coords.clone(),
+                                ink: &text[bytes.clone()] != "\t",
                             });
                             pen += glyph.advance;
                         }
