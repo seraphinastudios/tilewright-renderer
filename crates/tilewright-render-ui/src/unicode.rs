@@ -15,12 +15,16 @@ use std::{
     sync::Arc,
 };
 
-use cosmic_text::{CacheKey, Fallback, FontSystem, SwashCache, SwashImage, fontdb};
+use parley::{
+    FontContext, FontFamilyName, LayoutContext,
+    fontique::{Blob, Collection, CollectionOptions, GenericFamily, SourceCache},
+};
 use sha2::{Digest, Sha256};
-use unicode_script::Script;
+use swash::scale::{ScaleContext, image::Image as SwashImage};
 
 use crate::UiError;
 pub use layout::{TextAffinity, TextCursor, UnicodeCluster, UnicodeLayout, VisualMotion};
+use paint::GlyphKey;
 pub use paint::{CompiledUnicodeUi, UnicodeTexture};
 
 /// Explicit immutable font input. `sha256` identifies the original font bytes.
@@ -138,33 +142,31 @@ impl From<UiError> for TextError {
     }
 }
 
-// Empty explicit lists disable all platform-specific fallback preferences.
-// The remaining fontdb candidates are deterministically ranked by fixed style,
-// weight and database IDs, assigned in verified FontPack order.
-struct ExplicitFallback;
-impl Fallback for ExplicitFallback {
-    fn common_fallback(&self) -> &[&'static str] {
-        &[]
-    }
-    fn forbidden_fallback(&self) -> &[&'static str] {
-        &[]
-    }
-    fn script_fallback(&self, _: Script, _: &str) -> &[&'static str] {
-        &[]
-    }
+/// A verified pack font as registered with the layout engine.
+pub(crate) struct RegisteredFont {
+    /// Identity of the exact byte blob Parley reports for shaped runs.
+    blob: u64,
+    /// Face index within the font bytes.
+    pub(crate) index: u32,
 }
 
 /// A renderer session's text engine. Mutability is confined to shaping scratch
 /// and bounded layout caches; returned layouts and textures remain immutable.
 pub struct TextSystem {
-    pub(crate) fonts: FontSystem,
-    pub(crate) swash: SwashCache,
+    fonts: FontContext,
+    /// The collection exactly as registered, before any query cache grew.
+    registered: Collection,
+    layout_context: LayoutContext,
+    pub(crate) scale: ScaleContext,
+    /// Ordered pack families; every layout queries this complete stack.
+    families: Arc<[FontFamilyName<'static>]>,
+    pub(crate) faces: Vec<RegisteredFont>,
     pack: FontPack,
     limits: TextLimits,
     layouts: VecDeque<UnicodeLayout>,
     layout_bytes: usize,
-    raster: HashMap<CacheKey, Arc<SwashImage>>,
-    raster_order: VecDeque<CacheKey>,
+    raster: HashMap<GlyphKey, Arc<SwashImage>>,
+    raster_order: VecDeque<GlyphKey>,
     raster_bytes: usize,
     last_atlas: Option<UnicodeTexture>,
     next_revision: u64,
@@ -174,6 +176,10 @@ pub struct TextSystem {
 impl TextSystem {
     /// Creates the text engine exclusively from verified in-memory fonts.
     ///
+    /// The font collection is built without platform font access (the
+    /// `system` feature is not compiled in, and the collection disables it),
+    /// so no installed font can be enumerated, loaded or used as fallback.
+    ///
     /// # Errors
     /// Rejects font parse failures, unexpected faces and missing family names.
     pub fn new(pack: FontPack, limits: TextLimits) -> Result<Self, TextError> {
@@ -181,30 +187,56 @@ impl TextSystem {
         // with different caller budgets.
         let FontPack { fonts, .. } = pack;
         let pack = FontPack::new(fonts.to_vec(), limits)?;
-        let mut db = fontdb::Database::new();
+        let mut collection = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        });
+        let mut faces = Vec::with_capacity(pack.fonts.len());
+        let mut primary = None;
         for font in pack.fonts.iter() {
-            let before = db.faces().count();
-            db.load_font_source(fontdb::Source::Binary(Arc::new(font.bytes.clone())));
-            if db.faces().count() != before + 1 {
+            let blob = Blob::new(Arc::new(font.bytes.clone()));
+            let id = blob.id();
+            let registered = collection.register_fonts(blob, None);
+            // Exactly one face, published under the declared family name.
+            let [(family, infos)] = registered.as_slice() else {
+                return Err(TextError::InvalidFont);
+            };
+            let [info] = infos.as_slice() else {
+                return Err(TextError::InvalidFont);
+            };
+            if collection.family_name(*family) != Some(font.family.as_str()) {
                 return Err(TextError::InvalidFont);
             }
-            if !db
-                .faces()
-                .skip(before)
-                .any(|face| face.families.iter().any(|(name, _)| name == &font.family))
-            {
-                return Err(TextError::InvalidFont);
-            }
+            primary.get_or_insert(*family);
+            faces.push(RegisteredFont {
+                blob: id,
+                index: info.index(),
+            });
         }
-        let primary = &pack.fonts[0].family;
-        db.set_sans_serif_family(primary);
-        db.set_serif_family(primary);
-        db.set_monospace_family(primary);
-        let fonts =
-            FontSystem::new_with_locale_and_db_and_fallback("en-US".into(), db, ExplicitFallback);
+        let primary = primary.ok_or(TextError::InvalidFont)?;
+        // Generic roles resolve only to the primary pack family.
+        for generic in [
+            GenericFamily::SansSerif,
+            GenericFamily::Serif,
+            GenericFamily::Monospace,
+        ] {
+            collection.set_generic_families(generic, std::iter::once(primary));
+        }
+        let families = pack
+            .fonts
+            .iter()
+            .map(|font| FontFamilyName::Named(font.family.clone().into()))
+            .collect();
         Ok(Self {
-            fonts,
-            swash: SwashCache::new(),
+            fonts: FontContext {
+                collection: collection.clone(),
+                source_cache: SourceCache::default(),
+            },
+            registered: collection,
+            layout_context: LayoutContext::new(),
+            scale: ScaleContext::new(),
+            families,
+            faces,
             pack,
             limits,
             layouts: VecDeque::new(),
@@ -228,7 +260,6 @@ impl TextSystem {
     pub fn clear_cache(&mut self) {
         self.layouts.clear();
         self.layout_bytes = 0;
-        self.swash = SwashCache::new();
         self.raster.clear();
         self.raster_order.clear();
         self.raster_bytes = 0;
@@ -237,16 +268,26 @@ impl TextSystem {
     }
 
     fn reset_shaping(&mut self) {
-        // Cloning the immutable database retains its exact face IDs and bytes,
-        // so layouts held by callers remain valid. Rebuilding discards all
-        // library-private shape/font caches and their retained high-water marks.
-        self.fonts = FontSystem::new_with_locale_and_db_and_fallback(
-            "en-US".into(),
-            self.fonts.db().clone(),
-            ExplicitFallback,
-        );
-        self.swash = SwashCache::new();
+        // Layouts own their glyph data and never refer to engine state, so
+        // callers' layouts stay valid. Restoring the registered collection
+        // discards all library-private query, shaping and scaling caches and
+        // their retained high-water marks.
+        self.fonts = FontContext {
+            collection: self.registered.clone(),
+            source_cache: SourceCache::default(),
+        };
+        self.layout_context = LayoutContext::new();
+        self.scale = ScaleContext::new();
         self.shape_misses = 0;
+    }
+
+    /// The pack index of a shaped run's font; only registered pack bytes match.
+    fn pack_font(&self, blob: u64) -> Result<u16, TextError> {
+        self.faces
+            .iter()
+            .position(|face| face.blob == blob)
+            .and_then(|index| u16::try_from(index).ok())
+            .ok_or(TextError::InvalidFont)
     }
 
     #[must_use]

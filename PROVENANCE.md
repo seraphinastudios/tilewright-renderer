@@ -64,6 +64,23 @@ Pillow (HPND) and FreeType (FTL) are isolated development tools only; none of
 their source is copied or linked into the renderer. See the generator README
 and retained OFL notice for the full record.
 
+## Unicode text layout engine
+
+Unicode shaping, bidi, line breaking, font fallback and glyph rasterization
+use the crates.io packages `parley` 0.12.0 (with `fontique`) and `swash`
+0.2.10 as ordinary pinned dependencies. Versions and checksums are fixed by
+`Cargo.lock`; no upstream source is copied, vendored or modified. `fontique`
+is built without its `system` feature and its collection is created with
+system fonts disabled, so only the verified `FontPack` bytes are registered.
+
+The renderer-side adapter in `crates/tilewright-render-ui/src/unicode/` is new
+MIT code. It deliberately reproduces observable behavior of the previous
+`cosmic-text` 0.19.0 integration without copying its source: tab stops every
+eight space advances measured in logical order, quarter-pixel horizontal glyph
+phases with whole-pixel vertical snapping, hinted alpha-mask outlines, and
+right-to-left glyph publication order. The pinned snapshot in
+`src/unicode/baseline.txt` records the resulting output and its review.
+
 ## Unicode shaping font source pack
 
 `assets/unicode/` is a separate trusted source/editor font pack, not a large

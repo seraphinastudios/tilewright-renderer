@@ -649,3 +649,99 @@ fn performance_international_ui() {
         cold.quads.len()
     );
 }
+
+#[test]
+fn mixed_direction_paragraph_separators_lay_out_each_paragraph() {
+    // The previous shaping stack panicked on these inputs.
+    let mut system = TextSystem::new(explicit_pack(), TextLimits::default()).unwrap();
+    for text in [
+        "a\u{2029}\u{5d0}",
+        "\u{5d0}\u{2029}a",
+        "a\u{2029}\u{5d0}\u{2029}b",
+        "\u{5d0} a\u{2029}b \u{5d1}",
+    ] {
+        let layout = system.layout(text, 20.0, None).unwrap();
+        assert_eq!(layout.text(), text);
+        assert!(layout.missing_glyphs().is_empty());
+        let paragraphs = text.split('\u{2029}').count();
+        #[allow(clippy::cast_precision_loss)]
+        let height = 30.0 * paragraphs as f32;
+        assert!((layout.size()[1] - height).abs() < 0.001, "{text:?}");
+        // Each paragraph takes its own direction from its first strong letter.
+        for cluster in layout.clusters() {
+            let paragraph = text[..cluster.bytes.start].matches('\u{2029}').count();
+            let first = text.split('\u{2029}').nth(paragraph).unwrap();
+            if first.starts_with('\u{5d0}') || first.starts_with('\u{5d1}') {
+                assert!(cluster.right_to_left || text[cluster.bytes.clone()].is_ascii());
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let top = 30.0 * paragraph as f32;
+            assert!(
+                (cluster.bounds.y - top).abs() < 0.001,
+                "{text:?} {cluster:?}"
+            );
+        }
+        for boundary in layout.grapheme_boundaries() {
+            for affinity in [TextAffinity::Before, TextAffinity::After] {
+                let cursor = TextCursor {
+                    byte: *boundary,
+                    affinity,
+                };
+                assert!(layout.caret(cursor).is_some(), "{text:?} {cursor:?}");
+                let moved = layout.move_visual(cursor, VisualMotion::Right);
+                assert!(layout.caret(moved).is_some());
+            }
+        }
+        let end = TextCursor {
+            byte: text.len(),
+            affinity: TextAffinity::Before,
+        };
+        assert!(
+            !layout
+                .selection_rects(TextCursor::default(), end)
+                .is_empty()
+        );
+        for y in [5.0, 35.0, 65.0] {
+            let cursor = layout.hit([4.0, y]);
+            assert!(layout.grapheme_boundaries().contains(&cursor.byte));
+        }
+        let frame = compile_label(&mut system, text);
+        assert!(!frame.quads.is_empty());
+        assert!(frame.unsupported.is_empty());
+    }
+}
+
+#[test]
+fn coverage_never_falls_back_beyond_the_verified_pack() {
+    // Roboto Mono has no Hebrew, CJK or emoji. Platform fonts must never
+    // fill the gap, so every such scalar stays a missing-glyph diagnostic.
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let text = "a \u{5e9}\u{5dc} \u{4e2d}\u{6587} \u{1f44d}";
+    let layout = system.layout(text, 20.0, None).unwrap();
+    let missing: Vec<_> = layout
+        .missing_glyphs()
+        .iter()
+        .map(|range| &text[range.clone()])
+        .collect();
+    assert_eq!(
+        missing,
+        ["\u{5e9}", "\u{5dc}", "\u{4e2d}", "\u{6587}", "\u{1f44d}"]
+    );
+    assert!(
+        layout
+            .clusters()
+            .iter()
+            .filter(|cluster| cluster.bytes == (0..1))
+            .all(|cluster| !cluster.missing)
+    );
+    let frame = compile_label(&mut system, text);
+    assert_eq!(frame.unsupported.len(), 5);
+}
+
+#[test]
+fn engine_and_layouts_stay_thread_portable() {
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<TextSystem>();
+    send_sync::<UnicodeLayout>();
+    send_sync::<CompiledUnicodeUi>();
+}

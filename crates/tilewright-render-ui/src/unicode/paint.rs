@@ -3,8 +3,15 @@
 
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
-use cosmic_text::{CacheKey, Command, SwashContent, SwashImage};
 use sha2::{Digest, Sha256};
+use swash::{
+    FontRef,
+    scale::{
+        Render, Source,
+        image::{Content, Image as SwashImage},
+    },
+    zeno::{Command, Format, PathData as _, Vector},
+};
 use tilewright_scene::{Digest256, Quad, ResourceId, SemanticId, TextureRect};
 
 use super::{TextError, TextSystem, UnicodeLayout};
@@ -26,6 +33,25 @@ pub struct CompiledUnicodeUi {
     pub layouts: Vec<(usize, UnicodeLayout)>,
     pub resources: Vec<UnicodeTexture>,
     pub unsupported: Vec<(usize, Range<usize>)>,
+}
+
+/// Exact raster identity: pack font, glyph, physical size, horizontal
+/// quarter-pixel phase and variation coordinates.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct GlyphKey {
+    font: u16,
+    glyph: u16,
+    size_bits: u32,
+    x_phase: u8,
+    coords: Arc<[i16]>,
+}
+
+/// Splits a physical coordinate into a whole pixel and a quarter-pixel phase,
+/// rounding to the nearest quarter with halves away from zero.
+#[allow(clippy::cast_possible_truncation)] // Callers bound positions to 2^24.
+fn quarter_pixel(position: f32) -> (i32, u8) {
+    let quarters = (position * 4.0).round() as i32;
+    (quarters.div_euclid(4), quarters.rem_euclid(4) as u8)
 }
 
 enum PendingQuad {
@@ -82,7 +108,7 @@ impl TextSystem {
         let mut pending = Vec::<PendingQuad>::new();
         let mut has_images = false;
         let mut atlas = Atlas::new(self.limits.maximum_raster_pixels.min(16 * 1024 * 1024));
-        let mut placed = HashMap::<CacheKey, TextureRect>::new();
+        let mut placed = HashMap::<GlyphKey, TextureRect>::new();
         let mut glyph_count = 0_usize;
         for (index, primitive) in list.primitives.iter().enumerate() {
             match *primitive {
@@ -118,7 +144,7 @@ impl TextSystem {
                         return Err(TextError::LimitExceeded);
                     }
                     let layout = self.layout(text, size, None)?;
-                    if layout.0.buffer.layout_runs().count() > limits.maximum_lines.min(4096) {
+                    if layout.0.lines > limits.maximum_lines.min(4096) {
                         return Err(TextError::LimitExceeded);
                     }
                     glyph_count = glyph_count
@@ -135,63 +161,60 @@ impl TextSystem {
                             .cloned()
                             .map(|range| (index, range)),
                     );
-                    let mut ordinal = 0;
-                    for run in layout.0.buffer.layout_runs() {
-                        for glyph in run.glyphs {
-                            // Offsets are physical in cosmic's API; its own
-                            // x/y advances are scaled exactly once.
-                            let raster_position = [
-                                (glyph.x + glyph.font_size * glyph.x_offset + origin[0])
-                                    * raster_scale,
-                                (glyph.y - glyph.font_size * glyph.y_offset
-                                    + origin[1]
-                                    + run.line_y)
-                                    * raster_scale,
-                            ];
-                            if raster_position
-                                .iter()
-                                .any(|value| !value.is_finite() || value.abs() > 16_777_216.0)
-                            {
-                                return Err(TextError::InvalidValue);
-                            }
-                            let physical = glyph.physical(
-                                (
-                                    origin[0] * raster_scale,
-                                    (origin[1] + run.line_y) * raster_scale,
-                                ),
-                                raster_scale,
-                            );
-                            let image = self.raster_image(physical.cache_key)?;
-                            let Some(image) = image else {
-                                ordinal += 1;
-                                continue;
+                    let pixel_size = (size * raster_scale).to_bits();
+                    for (ordinal, glyph) in layout.0.glyphs.iter().enumerate() {
+                        // Horizontal positions keep a quarter-pixel phase;
+                        // vertical positions snap to whole pixels.
+                        let raster_position = [
+                            glyph.x.mul_add(raster_scale, origin[0] * raster_scale),
+                            glyph
+                                .y_offset
+                                .mul_add(raster_scale, (origin[1] + glyph.baseline) * raster_scale)
+                                .trunc(),
+                        ];
+                        if raster_position
+                            .iter()
+                            .any(|value| !value.is_finite() || value.abs() > 16_777_216.0)
+                        {
+                            return Err(TextError::InvalidValue);
+                        }
+                        let (x, x_phase) = quarter_pixel(raster_position[0]);
+                        #[allow(clippy::cast_possible_truncation)] // Bounded above.
+                        let y = raster_position[1] as i32;
+                        let key = GlyphKey {
+                            font: glyph.font,
+                            glyph: glyph.glyph,
+                            size_bits: pixel_size,
+                            x_phase,
+                            coords: glyph.coords.clone(),
+                        };
+                        let Some(image) = self.raster_image(&key)? else {
+                            continue;
+                        };
+                        let placement = image.placement;
+                        let bounds = UiRect {
+                            x: (x as f32 + placement.left as f32) / raster_scale,
+                            y: (y as f32 - placement.top as f32) / raster_scale,
+                            width: placement.width as f32 / raster_scale,
+                            height: placement.height as f32 / raster_scale,
+                        };
+                        let visible = clip.intersect(target);
+                        if visible.and_then(|c| bounds.intersect(c)).is_some() {
+                            let frame = if let Some(frame) = placed.get(&key) {
+                                *frame
+                            } else {
+                                let frame = atlas.insert(&image)?;
+                                placed.insert(key, frame);
+                                frame
                             };
-                            let placement = image.placement;
-                            let bounds = UiRect {
-                                x: (physical.x as f32 + placement.left as f32) / raster_scale,
-                                y: (physical.y as f32 - placement.top as f32) / raster_scale,
-                                width: placement.width as f32 / raster_scale,
-                                height: placement.height as f32 / raster_scale,
-                            };
-                            let visible = clip.intersect(target);
-                            if visible.and_then(|c| bounds.intersect(c)).is_some() {
-                                let frame = if let Some(frame) = placed.get(&physical.cache_key) {
-                                    *frame
-                                } else {
-                                    let frame = atlas.insert(&image)?;
-                                    placed.insert(physical.cache_key, frame);
-                                    frame
-                                };
-                                has_images = true;
-                                pending.push(PendingQuad::Image(ImageQuad {
-                                    bounds,
-                                    clip: visible,
-                                    paint,
-                                    part: first_part + ordinal,
-                                    frame,
-                                }));
-                            }
-                            ordinal += 1;
+                            has_images = true;
+                            pending.push(PendingQuad::Image(ImageQuad {
+                                bounds,
+                                clip: visible,
+                                paint,
+                                part: first_part + ordinal,
+                                frame,
+                            }));
                         }
                     }
                     output.layouts.push((index, layout));
@@ -258,59 +281,45 @@ impl TextSystem {
         Ok(output)
     }
 
-    fn raster_image(&mut self, key: CacheKey) -> Result<Option<Arc<SwashImage>>, TextError> {
+    fn raster_image(&mut self, key: &GlyphKey) -> Result<Option<Arc<SwashImage>>, TextError> {
         const CACHE_BYTES: usize = 16 * 1024 * 1024;
-        if let Some(image) = self.raster.get(&key) {
+        if let Some(image) = self.raster.get(key) {
             return Ok(Some(image.clone()));
         }
         // Font size and glyph dimensions are constrained before retaining data.
         // Swash accepts only the verified application font pack, not arbitrary
         // network fonts. Raster scratch is reset with clear_cache.
-        if f32::from_bits(key.font_size_bits) > 1024.0 {
+        let size = f32::from_bits(key.size_bits);
+        if size > 1024.0 {
             return Err(TextError::LimitExceeded);
         }
-        let font = self
-            .fonts
-            .get_font(key.font_id, key.font_weight)
+        let face = self
+            .faces
+            .get(usize::from(key.font))
+            .ok_or(TextError::InvalidFont)?;
+        let index = usize::try_from(face.index).map_err(|_| TextError::InvalidFont)?;
+        let font = FontRef::from_index(&self.pack.fonts[usize::from(key.font)].bytes, index)
             .ok_or(TextError::InvalidFont)?;
         // This path deliberately supports monochrome outlines. Reject color
         // tables before Swash can decode an embedded bitmap of arbitrary size.
         for tag in [*b"CBDT", *b"CBLC", *b"sbix", *b"COLR", *b"SVG "] {
-            if font.as_swash().table(u32::from_be_bytes(tag)).is_some() {
+            if font.table(u32::from_be_bytes(tag)).is_some() {
                 return Err(TextError::Rasterization);
             }
         }
-        let Some(outline) = self
-            .swash
-            .get_outline_commands_uncached(&mut self.fonts, key)
-        else {
+        let mut scaler = self
+            .scale
+            .builder(font)
+            .size(size)
+            .hint(true)
+            .normalized_coords(key.coords.iter())
+            .build();
+        let Some(outline) = scaler.scale_outline(key.glyph) else {
             return Ok(None);
         };
-        if outline.len() > 262_144 {
-            return Err(TextError::LimitExceeded);
-        }
-        let mut low = [f32::MAX; 2];
-        let mut high = [f32::MIN; 2];
-        for command in &*outline {
-            let points = match command {
-                Command::MoveTo(a) | Command::LineTo(a) => [Some(a), None, None],
-                Command::QuadTo(a, b) => [Some(a), Some(b), None],
-                Command::CurveTo(a, b, c) => [Some(a), Some(b), Some(c)],
-                Command::Close => [None, None, None],
-            };
-            for point in points.into_iter().flatten() {
-                for (axis, value) in [point.x, point.y].into_iter().enumerate() {
-                    if !value.is_finite() || value.abs() > 8192.0 {
-                        return Err(TextError::LimitExceeded);
-                    }
-                    low[axis] = low[axis].min(value);
-                    high[axis] = high[axis].max(value);
-                }
-            }
-        }
-        if low[0] > 8192.0 {
+        let Some((low, high)) = outline_bounds(outline.path().commands())? else {
             return Ok(None);
-        }
+        };
         let width = (high[0] - low[0] + 4.0).ceil();
         let height = (high[1] - low[1] + 4.0).ceil();
         #[allow(clippy::cast_precision_loss)]
@@ -318,7 +327,11 @@ impl TextSystem {
         if width > 2048.0 || height > 8192.0 || width * height > budget {
             return Err(TextError::LimitExceeded);
         }
-        let Some(image) = self.swash.get_image_uncached(&mut self.fonts, key) else {
+        let Some(image) = Render::new(&[Source::Outline])
+            .format(Format::Alpha)
+            .offset(Vector::new(f32::from(key.x_phase) * 0.25, 0.0))
+            .render(&mut scaler, key.glyph)
+        else {
             return Err(TextError::Rasterization);
         };
         let pixels = (image.placement.width as usize)
@@ -330,7 +343,7 @@ impl TextSystem {
         {
             return Err(TextError::LimitExceeded);
         }
-        if image.content != SwashContent::Mask || image.data.len() != pixels {
+        if image.content != Content::Mask || image.data.len() != pixels {
             return Err(TextError::Rasterization);
         }
         if pixels == 0 {
@@ -349,11 +362,43 @@ impl TextSystem {
                 }
             }
             self.raster_bytes += image.data.len();
-            self.raster_order.push_back(key);
-            self.raster.insert(key, image.clone());
+            self.raster_order.push_back(key.clone());
+            self.raster.insert(key.clone(), image.clone());
         }
         Ok(Some(image))
     }
+}
+
+type Point = [f32; 2];
+
+/// Bounds of an outline's control points, rejecting non-finite or oversized
+/// coordinates and command counts before anything is rasterized.
+fn outline_bounds(
+    commands: impl Iterator<Item = Command>,
+) -> Result<Option<(Point, Point)>, TextError> {
+    let mut low = [f32::MAX; 2];
+    let mut high = [f32::MIN; 2];
+    for (index, command) in commands.enumerate() {
+        if index >= 262_144 {
+            return Err(TextError::LimitExceeded);
+        }
+        let points = match command {
+            Command::MoveTo(a) | Command::LineTo(a) => [Some(a), None, None],
+            Command::QuadTo(a, b) => [Some(a), Some(b), None],
+            Command::CurveTo(a, b, c) => [Some(a), Some(b), Some(c)],
+            Command::Close => [None, None, None],
+        };
+        for point in points.into_iter().flatten() {
+            for (axis, value) in [point.x, point.y].into_iter().enumerate() {
+                if !value.is_finite() || value.abs() > 8192.0 {
+                    return Err(TextError::LimitExceeded);
+                }
+                low[axis] = low[axis].min(value);
+                high[axis] = high[axis].max(value);
+            }
+        }
+    }
+    Ok((low[0] <= 8192.0).then_some((low, high)))
 }
 
 fn claim(

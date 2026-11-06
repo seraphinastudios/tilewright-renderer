@@ -23,9 +23,11 @@ rust-version = "1.97.1"
 version = "0.6.2"
 
 [workspace.dependencies]
-cosmic-text = { version = "=0.19.0", default-features = false, features = ["std", "swash"] }
+# Text layout without the "system" feature: fontique cannot enumerate or load
+# platform fonts, so only explicitly registered FontPack bytes exist.
+parley = { version = "=0.12.0", default-features = false, features = ["std"] }
+swash = { version = "=0.2.10", default-features = false, features = ["std", "render", "scale"] }
 unicode-segmentation = "=1.13.3"
-unicode-script = "0.5.8"
 tilewright-render-api = { path = "crates/tilewright-render-api", version = "=0.6.2" }
 tilewright-render-resources = { path = "crates/tilewright-render-resources", version = "=0.6.2" }
 tilewright-render-sdl3 = { path = "crates/tilewright-render-sdl3", version = "=0.6.2" }
