@@ -3,7 +3,7 @@
 
 use super::*;
 
-fn legacy_pack() -> FontPack {
+pub(super) fn legacy_pack() -> FontPack {
     let bytes: Arc<[u8]> =
         Arc::from(include_bytes!("../../assets/RobotoMono-Regular.ttf").as_slice());
     let sha256 = Sha256::digest(&bytes).into();
@@ -62,7 +62,7 @@ fn digest_and_budget_fail_closed() {
     ));
 }
 
-fn explicit_pack() -> FontPack {
+pub(super) fn explicit_pack() -> FontPack {
     // Test-only explicit fixture root. Production text code never reads env/FS.
     let root = std::env::var_os("TILEWRIGHT_UNICODE_FONT_ROOT").expect(
         "Unicode acceptance tests require TILEWRIGHT_UNICODE_FONT_ROOT to name the explicit verified font-pack directory",
@@ -648,4 +648,173 @@ fn performance_international_ui() {
         system.layout_bytes,
         cold.quads.len()
     );
+}
+
+#[test]
+fn mixed_direction_paragraph_separators_lay_out_each_paragraph() {
+    // The previous shaping stack panicked on these inputs.
+    let mut system = TextSystem::new(explicit_pack(), TextLimits::default()).unwrap();
+    for text in [
+        "a\u{2029}\u{5d0}",
+        "\u{5d0}\u{2029}a",
+        "a\u{2029}\u{5d0}\u{2029}b",
+        "\u{5d0} a\u{2029}b \u{5d1}",
+    ] {
+        let layout = system.layout(text, 20.0, None).unwrap();
+        assert_eq!(layout.text(), text);
+        assert!(layout.missing_glyphs().is_empty());
+        let paragraphs = text.split('\u{2029}').count();
+        #[allow(clippy::cast_precision_loss)]
+        let height = 30.0 * paragraphs as f32;
+        assert!((layout.size()[1] - height).abs() < 0.001, "{text:?}");
+        // Each paragraph takes its own direction from its first strong letter.
+        for cluster in layout.clusters() {
+            let paragraph = text[..cluster.bytes.start].matches('\u{2029}').count();
+            let first = text.split('\u{2029}').nth(paragraph).unwrap();
+            if first.starts_with('\u{5d0}') || first.starts_with('\u{5d1}') {
+                assert!(cluster.right_to_left || text[cluster.bytes.clone()].is_ascii());
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let top = 30.0 * paragraph as f32;
+            assert!(
+                (cluster.bounds.y - top).abs() < 0.001,
+                "{text:?} {cluster:?}"
+            );
+        }
+        for boundary in layout.grapheme_boundaries() {
+            for affinity in [TextAffinity::Before, TextAffinity::After] {
+                let cursor = TextCursor {
+                    byte: *boundary,
+                    affinity,
+                };
+                assert!(layout.caret(cursor).is_some(), "{text:?} {cursor:?}");
+                let moved = layout.move_visual(cursor, VisualMotion::Right);
+                assert!(layout.caret(moved).is_some());
+            }
+        }
+        let end = TextCursor {
+            byte: text.len(),
+            affinity: TextAffinity::Before,
+        };
+        assert!(
+            !layout
+                .selection_rects(TextCursor::default(), end)
+                .is_empty()
+        );
+        for y in [5.0, 35.0, 65.0] {
+            let cursor = layout.hit([4.0, y]);
+            assert!(layout.grapheme_boundaries().contains(&cursor.byte));
+        }
+        let frame = compile_label(&mut system, text);
+        assert!(!frame.quads.is_empty());
+        assert!(frame.unsupported.is_empty());
+    }
+}
+
+#[test]
+fn coverage_never_falls_back_beyond_the_verified_pack() {
+    // Roboto Mono has no Hebrew, CJK or emoji. Platform fonts must never
+    // fill the gap, so every such scalar stays a missing-glyph diagnostic.
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let text = "a \u{5e9}\u{5dc} \u{4e2d}\u{6587} \u{1f44d}";
+    let layout = system.layout(text, 20.0, None).unwrap();
+    let missing: Vec<_> = layout
+        .missing_glyphs()
+        .iter()
+        .map(|range| &text[range.clone()])
+        .collect();
+    assert_eq!(
+        missing,
+        ["\u{5e9}", "\u{5dc}", "\u{4e2d}", "\u{6587}", "\u{1f44d}"]
+    );
+    assert!(
+        layout
+            .clusters()
+            .iter()
+            .filter(|cluster| cluster.bytes == (0..1))
+            .all(|cluster| !cluster.missing)
+    );
+    let frame = compile_label(&mut system, text);
+    assert_eq!(frame.unsupported.len(), 5);
+}
+
+#[test]
+fn engine_and_layouts_stay_thread_portable() {
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<TextSystem>();
+    send_sync::<UnicodeLayout>();
+    send_sync::<CompiledUnicodeUi>();
+}
+
+#[test]
+fn tabs_keep_their_bidi_class_and_stop_positions() {
+    let mut system = TextSystem::new(explicit_pack(), TextLimits::default()).unwrap();
+    // A tab resets to the paragraph level (UAX #9 L1): in an LTR paragraph
+    // the digit after it stays left-to-right on the tab stop. The expected
+    // geometry is the previous shaping stack's output.
+    let layout = system.layout("x \u{5d0}\t1", 16.0, None).unwrap();
+    let cluster = |bytes: std::ops::Range<usize>| {
+        layout
+            .clusters()
+            .iter()
+            .find(|cluster| cluster.bytes == bytes)
+            .unwrap()
+            .clone()
+    };
+    let alef = cluster(2..4);
+    let tab = cluster(4..5);
+    let one = cluster(5..6);
+    assert!(alef.right_to_left && !tab.right_to_left && !one.right_to_left);
+    assert!((alef.bounds.x - 12.62).abs() < 0.01, "{alef:?}");
+    assert!((tab.bounds.x - 22.74).abs() < 0.01, "{tab:?}");
+    assert!((tab.bounds.width - 10.54).abs() < 0.01, "{tab:?}");
+    assert!((one.bounds.x - 33.28).abs() < 0.01, "{one:?}");
+    // In an RTL paragraph, tab-separated columns run right to left.
+    let layout = system.layout("\u{5d0} ab\tcd", 16.0, None).unwrap();
+    let x = |bytes: std::ops::Range<usize>| {
+        layout
+            .clusters()
+            .iter()
+            .find(|cluster| cluster.bytes == bytes)
+            .unwrap()
+            .bounds
+            .x
+    };
+    assert!(
+        x(6..7) < x(5..6) && x(5..6) < x(3..4),
+        "{:?}",
+        layout.clusters()
+    );
+    // Tabs never draw their shaped glyph.
+    let frame = compile_label(&mut system, "a\t\t\tb");
+    assert_eq!(frame.quads.len(), 2);
+    assert!(frame.unsupported.is_empty());
+}
+
+#[test]
+fn font_registration_fails_closed() {
+    let roboto = legacy_pack().fonts()[0].clone();
+    let blob = |family: &str, bytes: Arc<[u8]>| FontBlob {
+        family: family.into(),
+        sha256: Sha256::digest(&bytes).into(),
+        bytes,
+    };
+    let garbage: Arc<[u8]> = Arc::from(&b"not a font at all"[..]);
+    let truncated: Arc<[u8]> = Arc::from(&roboto.bytes[..512]);
+    for fonts in [
+        vec![blob("Roboto", roboto.bytes.clone())],
+        vec![blob("roboto mono", roboto.bytes.clone())],
+        vec![blob("Garbage", garbage)],
+        vec![blob("Roboto Mono", truncated)],
+        vec![
+            blob("Roboto Mono", roboto.bytes.clone()),
+            blob("Second Name", roboto.bytes.clone()),
+        ],
+    ] {
+        let pack = FontPack::new(fonts, TextLimits::default()).unwrap();
+        assert!(matches!(
+            TextSystem::new(pack, TextLimits::default()),
+            Err(TextError::InvalidFont)
+        ));
+    }
 }

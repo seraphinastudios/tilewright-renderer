@@ -1,9 +1,12 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-use std::{ops::Range, sync::Arc};
+use std::{borrow::Cow, ops::Range, sync::Arc};
 
-use cosmic_text::{Affinity, Attrs, Buffer, Cursor, Family, Metrics, Shaping, Weight, Wrap};
+use parley::{
+    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontWeight,
+    LayoutContext, LineHeight, OverflowWrap, PositionedLayoutItem, StyleProperty,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{TextError, TextSystem};
@@ -54,9 +57,27 @@ struct GraphemeSegment {
     rtl: bool,
 }
 
+/// One shaped glyph ready for rasterization, parallel to `clusters`.
+#[derive(Debug)]
+pub(super) struct PlacedGlyph {
+    /// Index of the verified pack font that shaped this glyph.
+    pub(super) font: u16,
+    pub(super) glyph: u16,
+    /// Pen position plus horizontal shaping offset, in layout units.
+    pub(super) x: f32,
+    pub(super) baseline: f32,
+    /// Downward shaping offset from the baseline, in layout units.
+    pub(super) y_offset: f32,
+    /// Variation coordinates, for example the synthesized regular `wght`.
+    pub(super) coords: Arc<[i16]>,
+    /// Tabs are spacing only; their shaped glyph is never drawn.
+    pub(super) ink: bool,
+}
+
 #[derive(Debug)]
 pub(super) struct LayoutData {
-    pub(super) buffer: Buffer,
+    pub(super) glyphs: Vec<PlacedGlyph>,
+    pub(super) lines: usize,
     text: String,
     font_size: f32,
     width: Option<f32>,
@@ -230,9 +251,105 @@ fn distance(rect: UiRect, point: [f32; 2]) -> f32 {
     vertical * 16_777_216.0 + (rect.x - point[0]).abs()
 }
 
+/// A visual line's glyph advances, in visual order, with original bytes.
+struct VisualLine {
+    top: f32,
+    height: f32,
+    width: f32,
+    start: usize,
+    glyphs: Vec<(Range<usize>, f32, f32, bool)>,
+}
+
+/// Hard paragraphs: CR, LF, CRLF and U+2029 end one. Each paragraph receives
+/// its own automatic bidi base direction. A final terminator starts a last,
+/// empty paragraph.
+fn paragraphs(text: &str) -> Vec<Range<usize>> {
+    let mut paragraphs = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, c)) = chars.next() {
+        let end = match c {
+            '\r' if chars.peek().is_some_and(|(_, next)| *next == '\n') => {
+                chars.next();
+                index + 2
+            }
+            '\r' | '\n' | '\u{2029}' => index + c.len_utf8(),
+            _ => continue,
+        };
+        paragraphs.push(start..index);
+        start = end;
+    }
+    paragraphs.push(start..text.len());
+    paragraphs
+}
+
+/// Builds one paragraph with fixed regular weight, no locale, the complete
+/// ordered pack stack for per-cluster fallback, and the given tab advances.
+fn build(
+    layout_context: &mut LayoutContext,
+    fonts: &mut FontContext,
+    families: &[FontFamilyName<'static>],
+    text: &str,
+    size: f32,
+    width: Option<f32>,
+    tabs: &[(Range<usize>, f32)],
+) -> parley::Layout<[u8; 4]> {
+    let mut builder = layout_context.ranged_builder(fonts, text, 1.0, false);
+    builder.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Borrowed(
+        families,
+    ))));
+    builder.push_default(StyleProperty::FontSize(size));
+    builder.push_default(StyleProperty::FontWeight(FontWeight::NORMAL));
+    builder.push_default(StyleProperty::LineHeight(LineHeight::Absolute(size * 1.5)));
+    // Break inside a word only when the word alone cannot fit.
+    builder.push_default(StyleProperty::OverflowWrap(OverflowWrap::Anywhere));
+    for (range, extra) in tabs {
+        builder.push(StyleProperty::LetterSpacing(*extra), range.clone());
+    }
+    let mut layout = builder.build(text);
+    layout.break_all_lines(width);
+    // Start alignment right-aligns right-to-left paragraphs within the wrap
+    // width, or within their widest line when unwrapped.
+    layout.align(Alignment::Start, AlignmentOptions::default());
+    layout
+}
+
+/// Tab stops every eight space advances, measured along the paragraph in
+/// logical order before wrapping. Tabs stay U+0009 in the shaped text, so
+/// they keep bidi class S (reset to the paragraph level by UAX #9 rule L1);
+/// this returns the letter spacing each tab needs to reach its stop.
+fn tab_advances(
+    layout: &parley::Layout<[u8; 4]>,
+    text: &str,
+    space: f32,
+) -> Vec<(Range<usize>, f32)> {
+    let stop_width = space * 8.0;
+    if stop_width <= 0.0 || !stop_width.is_finite() {
+        return Vec::new();
+    }
+    let mut clusters: Vec<(usize, f32)> = layout
+        .lines()
+        .flat_map(|line| line.runs())
+        .flat_map(|run| run.clusters().map(|c| (c.text_range().start, c.advance())))
+        .collect();
+    clusters.sort_by_key(|cluster| cluster.0);
+    let mut tabs = Vec::new();
+    let mut x = 0.0_f32;
+    for (start, advance) in clusters {
+        if text.as_bytes().get(start) == Some(&b'\t') {
+            let stop = ((x / stop_width).floor() + 1.0) * stop_width;
+            tabs.push((start..start + 1, stop - x - advance));
+            x = stop;
+        } else {
+            x += advance;
+        }
+    }
+    tabs
+}
+
 impl TextSystem {
     /// Shapes original Unicode text with fixed regular weight, automatic bidi
-    /// direction and explicit stable locale. `None` disables wrapping.
+    /// direction per paragraph and no locale. `None` disables wrapping.
     ///
     /// # Errors
     /// Rejects invalid metrics or text/glyph/line budgets without partial output.
@@ -262,59 +379,160 @@ impl TextSystem {
             return Ok(layout);
         }
         let line_height = size * 1.5;
+        let maximum_lines = self.limits.maximum_lines.min(4096);
+        let maximum_glyphs = self.limits.maximum_glyphs.min(65_536);
+        let ranges = paragraphs(text);
+        if ranges.len() > maximum_lines {
+            return Err(TextError::LimitExceeded);
+        }
         if self.shape_misses >= 256 {
             self.reset_shaping();
         }
         self.shape_misses += 1;
-        let mut buffer = Buffer::new_empty(Metrics::new(size, line_height));
-        buffer.set_size(width, None);
-        buffer.set_wrap(if width.is_some() {
-            Wrap::WordOrGlyph
-        } else {
-            Wrap::None
-        });
-        buffer.set_text(
-            text,
-            &Attrs::new()
-                .family(Family::Name(&self.pack.fonts[0].family))
-                .weight(Weight::NORMAL),
-            Shaping::Advanced,
-            None,
-        );
-        if buffer.lines.len() > self.limits.maximum_lines.min(4096) {
-            return Err(TextError::LimitExceeded);
-        }
-        buffer.shape_until_scroll(&mut self.fonts, false);
-        let mut line_offsets = Vec::with_capacity(buffer.lines.len());
-        let mut offset = 0;
-        for line in &buffer.lines {
-            line_offsets.push(offset);
-            offset += line.text().len() + line.ending().as_str().len();
-        }
-        if offset != text.len() {
-            return Err(TextError::InvalidValue);
+        let mut lines = Vec::<VisualLine>::new();
+        let mut glyphs = Vec::<PlacedGlyph>::new();
+        let mut top = 0.0_f32;
+        for range in ranges {
+            let offset = range.start;
+            let original = &text[range];
+            if original.is_empty() {
+                if lines.len() >= maximum_lines {
+                    return Err(TextError::LimitExceeded);
+                }
+                lines.push(VisualLine {
+                    top,
+                    height: line_height,
+                    width: 0.0,
+                    start: offset,
+                    glyphs: Vec::new(),
+                });
+                top += line_height;
+                continue;
+            }
+            let tabs = if original.contains('\t') {
+                // A tab advances like eight shaped spaces, as before.
+                let space = build(
+                    &mut self.layout_context,
+                    &mut self.fonts,
+                    &self.families,
+                    " ",
+                    size,
+                    None,
+                    &[],
+                )
+                .lines()
+                .flat_map(|line| line.runs())
+                .flat_map(|run| run.clusters().map(|c| c.advance()))
+                .sum::<f32>();
+                let unwrapped = build(
+                    &mut self.layout_context,
+                    &mut self.fonts,
+                    &self.families,
+                    original,
+                    size,
+                    None,
+                    &[],
+                );
+                tab_advances(&unwrapped, original, space)
+            } else {
+                Vec::new()
+            };
+            let paragraph = build(
+                &mut self.layout_context,
+                &mut self.fonts,
+                &self.families,
+                original,
+                size,
+                width,
+                &tabs,
+            );
+            for line in paragraph.lines() {
+                if lines.len() >= maximum_lines {
+                    return Err(TextError::LimitExceeded);
+                }
+                let metrics = line.metrics();
+                let baseline = top + metrics.baseline;
+                let mut visual = VisualLine {
+                    top: top + metrics.block_min_coord,
+                    height: metrics.line_height,
+                    width: metrics.advance - metrics.hanging_advance,
+                    start: offset + line.text_range().start,
+                    glyphs: Vec::new(),
+                };
+                let line_first = glyphs.len();
+                for item in line.items() {
+                    let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                        continue;
+                    };
+                    let run = glyph_run.run();
+                    let font = self.pack_font(run.font().data.id())?;
+                    let coords: Arc<[i16]> = run
+                        .normalized_coords()
+                        .iter()
+                        .map(|coord| coord.to_bits())
+                        .collect();
+                    let rtl = run.is_rtl();
+                    // Group graphemes into shaped clusters: a ligature's
+                    // continuations join the grapheme that owns its glyphs.
+                    let mut shaped_clusters: Vec<(Range<usize>, parley::Cluster<'_, [u8; 4]>)> =
+                        Vec::new();
+                    for cluster in run.clusters() {
+                        let bytes = cluster.text_range();
+                        match shaped_clusters.last_mut() {
+                            Some(last) if cluster.is_ligature_continuation() => {
+                                last.0.end = last.0.end.max(bytes.end);
+                            }
+                            _ => shaped_clusters.push((bytes, cluster)),
+                        }
+                    }
+                    if rtl {
+                        shaped_clusters.reverse();
+                    }
+                    let mut pen = glyph_run.offset();
+                    for (bytes, cluster) in shaped_clusters {
+                        let bytes = offset + bytes.start..offset + bytes.end;
+                        for glyph in cluster.glyphs() {
+                            if glyphs.len() >= maximum_glyphs {
+                                return Err(TextError::LimitExceeded);
+                            }
+                            let id = u16::try_from(glyph.id).map_err(|_| TextError::InvalidFont)?;
+                            visual.glyphs.push((bytes.clone(), pen, glyph.advance, rtl));
+                            glyphs.push(PlacedGlyph {
+                                font,
+                                glyph: id,
+                                x: pen + glyph.x,
+                                baseline,
+                                y_offset: glyph.y,
+                                coords: coords.clone(),
+                                ink: &text[bytes.clone()] != "\t",
+                            });
+                            pen += glyph.advance;
+                        }
+                    }
+                }
+                // Publish glyphs in the paragraph's visual direction, which
+                // fixes cluster and quad part numbering for consumers.
+                if paragraph.is_rtl() {
+                    glyphs[line_first..].reverse();
+                    visual.glyphs.reverse();
+                }
+                lines.push(visual);
+            }
+            top += paragraph.height();
         }
         let mut boundaries: Vec<_> = text.grapheme_indices(true).map(|(byte, _)| byte).collect();
         boundaries.push(text.len());
-        let mut clusters = Vec::new();
+        let mut clusters = Vec::with_capacity(glyphs.len());
         let mut missing = std::collections::BTreeSet::new();
         let mut carets = Vec::new();
         let mut segments = Vec::new();
         let mut extent = [0.0_f32, line_height];
-        let mut lines = 0;
-        for run in buffer.layout_runs() {
-            lines += 1;
-            if lines > self.limits.maximum_lines.min(4096) {
-                return Err(TextError::LimitExceeded);
-            }
-            extent[0] = extent[0].max(run.line_w);
-            extent[1] = extent[1].max(run.line_top + run.line_height);
-            for glyph in run.glyphs {
-                if clusters.len() >= self.limits.maximum_glyphs.min(65_536) {
-                    return Err(TextError::LimitExceeded);
-                }
-                let bytes =
-                    line_offsets[run.line_i] + glyph.start..line_offsets[run.line_i] + glyph.end;
+        let mut placed = glyphs.iter();
+        for line in &lines {
+            extent[0] = extent[0].max(line.width);
+            extent[1] = extent[1].max(line.top + line.height);
+            for (bytes, x, advance, rtl) in &line.glyphs {
+                let glyph = placed.next().ok_or(TextError::InvalidValue)?;
                 if bytes.start > bytes.end
                     || !text.is_char_boundary(bytes.start)
                     || !text.is_char_boundary(bytes.end)
@@ -322,44 +540,40 @@ impl TextSystem {
                     return Err(TextError::InvalidValue);
                 }
                 let bounds = UiRect {
-                    x: glyph.x,
-                    y: run.line_top,
-                    width: glyph.w,
-                    height: run.line_height,
+                    x: *x,
+                    y: line.top,
+                    width: *advance,
+                    height: line.height,
                 };
                 if !bounds.valid() {
                     return Err(TextError::InvalidValue);
                 }
                 // Zero glyph IDs on visible text indicate missing coverage.
                 // Formatting controls and default-ignorable selectors need no ink.
-                let absent =
-                    glyph.glyph_id == 0 && text[bytes.clone()].chars().any(visible_character);
+                let absent = glyph.glyph == 0 && text[bytes.clone()].chars().any(visible_character);
                 if absent {
                     missing.insert((bytes.start, bytes.end));
                 }
                 clusters.push(UnicodeCluster {
-                    bytes,
+                    bytes: bytes.clone(),
                     bounds,
-                    right_to_left: glyph.level.is_rtl(),
+                    right_to_left: *rtl,
                     missing: absent,
                 });
             }
             // Map cluster geometry to extended-grapheme stops in linearithmic
-            // time. Avoid a cursor_position scan for every byte (quadratic on
-            // large input). This uses the layout's actual glyph advances.
+            // time, using the layout's actual glyph advances.
             let mut groups = std::collections::BTreeMap::<(usize, usize, bool), (f32, f32)>::new();
-            for glyph in run.glyphs {
+            for (bytes, x, advance, rtl) in &line.glyphs {
                 groups
-                    .entry((glyph.start, glyph.end, glyph.level.is_rtl()))
+                    .entry((bytes.start, bytes.end, *rtl))
                     .and_modify(|span| {
-                        span.0 = span.0.min(glyph.x);
-                        span.1 = span.1.max(glyph.x + glyph.w);
+                        span.0 = span.0.min(*x);
+                        span.1 = span.1.max(x + advance);
                     })
-                    .or_insert((glyph.x, glyph.x + glyph.w));
+                    .or_insert((*x, x + advance));
             }
             for ((start, end, rtl), (left, right)) in groups {
-                let start = start + line_offsets[run.line_i];
-                let end = end + line_offsets[run.line_i];
                 let first = boundaries.partition_point(|b| *b < start);
                 let last = boundaries.partition_point(|b| *b <= end);
                 let stops = &boundaries[first..last];
@@ -382,9 +596,9 @@ impl TextSystem {
                         bytes: boundaries[index]..boundaries[index + 1],
                         bounds: UiRect {
                             x,
-                            y: run.line_top,
+                            y: line.top,
                             width,
-                            height: run.line_height,
+                            height: line.height,
                         },
                         rtl,
                     });
@@ -405,9 +619,9 @@ impl TextSystem {
                     };
                     let rect = UiRect {
                         x,
-                        y: run.line_top,
+                        y: line.top,
                         width: 1.0,
-                        height: run.line_height,
+                        height: line.height,
                     };
                     if *byte != end {
                         carets.push(CaretStop {
@@ -429,49 +643,47 @@ impl TextSystem {
                     }
                 }
             }
-            if run.glyphs.is_empty() {
+            if line.glyphs.is_empty() {
                 carets.push(CaretStop {
                     cursor: TextCursor {
-                        byte: line_offsets[run.line_i],
+                        byte: line.start,
                         affinity: TextAffinity::After,
                     },
                     rect: UiRect {
                         x: 0.0,
-                        y: run.line_top,
+                        y: line.top,
                         width: 1.0,
-                        height: run.line_height,
+                        height: line.height,
                     },
                 });
             }
         }
+        if placed.next().is_some() {
+            return Err(TextError::InvalidValue);
+        }
         if extent.iter().any(|v| !v.is_finite() || *v > 16_777_216.0) {
             return Err(TextError::LimitExceeded);
         }
-        // Invisible-only lines can lack glyph stops; retain a legitimate
-        // original boundary at the nearest known line position.
+        // Invisible-only content can lack glyph stops; retain a legitimate
+        // original boundary at the start of the visual line that holds it.
         let present: std::collections::BTreeSet<_> =
             carets.iter().map(|stop| stop.cursor.byte).collect();
         for byte in &boundaries {
-            if !present.contains(byte) {
-                let line = line_offsets
-                    .partition_point(|offset| *offset <= *byte)
-                    .saturating_sub(1);
-                let c =
-                    Cursor::new_with_affinity(line, *byte - line_offsets[line], Affinity::After);
-                if let Some((x, y)) = buffer.cursor_position(&c) {
-                    carets.push(CaretStop {
-                        cursor: TextCursor {
-                            byte: *byte,
-                            affinity: TextAffinity::After,
-                        },
-                        rect: UiRect {
-                            x,
-                            y,
-                            width: 1.0,
-                            height: line_height,
-                        },
-                    });
-                }
+            if !present.contains(byte)
+                && let Some(line) = lines.iter().rev().find(|line| line.start <= *byte)
+            {
+                carets.push(CaretStop {
+                    cursor: TextCursor {
+                        byte: *byte,
+                        affinity: TextAffinity::After,
+                    },
+                    rect: UiRect {
+                        x: 0.0,
+                        y: line.top,
+                        width: 1.0,
+                        height: line.height,
+                    },
+                });
             }
         }
         carets.sort_by(|a, b| {
@@ -488,7 +700,8 @@ impl TextSystem {
             .saturating_mul(512)
             .saturating_add(clusters.len().saturating_mul(512));
         let layout = UnicodeLayout(Arc::new(LayoutData {
-            buffer,
+            glyphs,
+            lines: lines.len(),
             text: text.into(),
             font_size: size,
             width,
