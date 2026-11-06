@@ -3,7 +3,7 @@
 
 use super::*;
 
-fn legacy_pack() -> FontPack {
+pub(super) fn legacy_pack() -> FontPack {
     let bytes: Arc<[u8]> =
         Arc::from(include_bytes!("../../assets/RobotoMono-Regular.ttf").as_slice());
     let sha256 = Sha256::digest(&bytes).into();
@@ -62,7 +62,7 @@ fn digest_and_budget_fail_closed() {
     ));
 }
 
-fn explicit_pack() -> FontPack {
+pub(super) fn explicit_pack() -> FontPack {
     // Test-only explicit fixture root. Production text code never reads env/FS.
     let root = std::env::var_os("TILEWRIGHT_UNICODE_FONT_ROOT").expect(
         "Unicode acceptance tests require TILEWRIGHT_UNICODE_FONT_ROOT to name the explicit verified font-pack directory",

@@ -256,4 +256,6 @@ impl TextSystem {
 }
 
 #[cfg(test)]
+mod baseline;
+#[cfg(test)]
 mod tests;
