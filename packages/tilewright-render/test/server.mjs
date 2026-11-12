@@ -1,9 +1,9 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-// A static file server for the package directory, bound to the loopback
-// interface. Browsers treat http://localhost as a secure context, which
-// WebGPU requires.
+// A static file server for the package directory, or another root, bound to
+// the loopback interface. Browsers treat http://localhost as a secure
+// context, which WebGPU requires.
 
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
@@ -21,12 +21,12 @@ const TYPES = {
   '.wasm': 'application/wasm',
 };
 
-/** Serves the package; resolves to the server and its base URL. */
-export async function serve() {
+/** Serves `root`, by default the package; resolves to the server and its base URL. */
+export async function serve(root = ROOT) {
   const server = createServer(async (request, response) => {
     const path = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
-    const file = normalize(join(ROOT, path));
-    if (!file.startsWith(ROOT.endsWith(sep) ? ROOT : ROOT + sep)) {
+    const file = normalize(join(root, path));
+    if (!file.startsWith(root.endsWith(sep) ? root : root + sep)) {
       response.writeHead(403).end();
       return;
     }

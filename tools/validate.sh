@@ -8,7 +8,8 @@ cd "${repository}"
 export TILEWRIGHT_UNICODE_FONT_ROOT="${repository}/assets/unicode"
 
 test "$(rustc --version | cut -d' ' -f2)" = 1.97.1
-python3 -m unittest tools.test_crate_release
+python3 -m unittest tools.test_crate_release tools.test_web_package
+python3 tools/web_package.py check-source
 python3 tools/crate_prepare.py check-version --base "${CRATE_RELEASE_BASE:-$(git rev-parse HEAD)}"
 tools/check-architecture.sh
 tools/check-dependencies.sh
@@ -62,6 +63,10 @@ release_output=$(mktemp -d /tmp/tilewright-renderer-release.XXXXXX)
 rmdir "${release_output}"
 tools/package-release.sh "${release_output}"
 test -s "${release_output}/SHA256SUMS"
+# The dry run packs, checks and draws with the browser package tarball, and
+# SHA256SUMS lists it.
+grep -Ex '[0-9a-f]{64}  (\./)?seraphinastudios-tilewright-render-0\.0\.0-check\.tgz' \
+  "${release_output}/SHA256SUMS" >/dev/null
 rm -rf -- "${release_output}"
 
 git diff --check

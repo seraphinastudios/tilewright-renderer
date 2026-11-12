@@ -108,10 +108,21 @@ jobs:
         run: >-
           python3 tools/crate_release.py finalize --source-tag "v${EXPECTED_SOURCE_VERSION}"
           --archives build/release
+      - name: Verify the browser package tarball before attestation
+        env:
+          EXPECTED_SOURCE_VERSION: ${{ needs.source-package.outputs.version }}
+        run: python3 tools/web_package.py check-release build/release --version "${EXPECTED_SOURCE_VERSION}"
       - name: Bind manifest bytes to this exact source workflow invocation
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: build/release/crate-release.json
+          push-to-registry: false
+      # A separate statement, so the crate publisher's manifest attestation
+      # keeps its single subject.
+      - name: Bind browser package tarball bytes to this exact source workflow invocation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: build/release/seraphinastudios-tilewright-render-${{ needs.source-package.outputs.version }}.tgz
           push-to-registry: false
 
   release:

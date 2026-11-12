@@ -6,7 +6,7 @@
     "./scripts/release/crate-pending.cjs",
     ["@semantic-release/release-notes-generator", {"preset": "conventionalcommits"}],
     ["@semantic-release/exec", {
-      "prepareCmd": "python3 tools/crate_release.py finalize --source-tag v${nextRelease.version} --archives build/release",
+      "prepareCmd": "python3 tools/crate_release.py finalize --source-tag v${nextRelease.version} --archives build/release && python3 tools/web_package.py check-release build/release --version ${nextRelease.version}",
       "successCmd": "python3 tools/crate_release.py dispatch --source-tag v${nextRelease.version}"
     }],
     ["@semantic-release/github", {"assets": [
