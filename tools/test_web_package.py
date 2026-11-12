@@ -19,7 +19,7 @@ VERSION = '1.25.0'
 def manifest(**changes):
     value = {'name': W.NAME, 'version': VERSION, 'license': 'MIT', 'type': 'module',
              'repository': {'type': 'git', 'url': W.REPOSITORY, 'directory': 'packages/tilewright-render'},
-             'files': W.FILES_FIELD, 'scripts': {'test': 'node --test'}}
+             'exports': W.EXPORTS, 'files': W.FILES_FIELD, 'scripts': {'test': 'node --test'}}
     value.update(changes)
     return value
 
@@ -40,14 +40,20 @@ def contents(changes=None):
 
 
 def tarball(directory: Path, files: dict, name: str | None = None, members=None) -> Path:
+    """`members` adds raw entries: a TarInfo, or a (TarInfo, body) pair."""
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode='w') as archive:
         for path, body in files.items():
             info = tarfile.TarInfo(f'package/{path}')
             info.size = len(body)
             archive.addfile(info, io.BytesIO(body))
-        for info in members or ():
-            archive.addfile(info)
+        for member in members or ():
+            if isinstance(member, tuple):
+                info, body = member
+                info.size = len(body)
+                archive.addfile(info, io.BytesIO(body))
+            else:
+                archive.addfile(member)
     path = directory / (name or W.tarball_name(VERSION))
     path.write_bytes(gzip.compress(raw.getvalue()))
     return path
@@ -93,6 +99,34 @@ class TarballTests(unittest.TestCase):
         outside = tarfile.TarInfo('other/README.md')
         self.refused(tarball(self.directory, contents(), members=[outside]), 'outside package/')
 
+    def test_members_are_unique_bounded_and_non_empty(self):
+        again = tarfile.TarInfo('package/README.md')
+        self.refused(tarball(self.directory, contents(), members=[(again, b'again')]), 'appears twice')
+        self.refused(tarball(self.directory, contents({'README.md': b''})), 'is empty')
+        original = W.MAX_FILE_BYTES
+        try:
+            W.MAX_FILE_BYTES = 4
+            self.refused(tarball(self.directory, contents({'README.md': b'12345'})), 'exceeds 4 bytes')
+        finally:
+            W.MAX_FILE_BYTES = original
+
+    def test_source_maps_must_be_in_the_tarball(self):
+        body = b'export {};\n//# sourceMappingURL=index.js.map\n'
+        self.refused(tarball(self.directory, contents({'dist/index.js': body})), 'does not hold')
+        inline = b'export {};\n//# sourceMappingURL=data:application/json;base64,e30=\n'
+        W.check_tarball(tarball(self.directory, contents({'dist/index.js': inline})), VERSION)
+        # A map the tarball does hold resolves beside its file.
+        original = W.FILES
+        try:
+            W.FILES = original | {'dist/index.js.map'}
+            path = tarball(self.directory, contents({'dist/index.js': body, 'dist/index.js.map': b'{}'}))
+            W.check_tarball(path, VERSION)
+            self.refused(tarball(self.directory, contents(
+                {'dist/index.js': b'//# sourceMappingURL=../index.js.map\n', 'dist/index.js.map': b'{}'})),
+                'does not hold')
+        finally:
+            W.FILES = original
+
     def test_test_hooks_are_refused(self):
         for marker in W.TEST_HOOK_MARKERS:
             body = b'export function ' + marker + b'() {}'
@@ -112,6 +146,19 @@ class TarballTests(unittest.TestCase):
         body = json.dumps(manifest(license='GPL-3.0')).encode()
         self.refused(tarball(self.directory, contents({'package.json': body})), 'licence')
 
+    def test_manifest_identity_and_module_shape(self):
+        refusals = [
+            (manifest(name='@seraphinastudios/other'), 'package name'),
+            (manifest(repository={'type': 'git', 'url': 'git+https://example.invalid/fork.git'}), 'repository'),
+            (manifest(repository=W.REPOSITORY), 'repository'),
+            (manifest(type='commonjs'), 'ES module'),
+            (manifest(exports={'.': W.EXPORTS['.']}), 'exports differ'),
+            (manifest(exports={**W.EXPORTS, './src/*': './src/*'}), 'exports differ'),
+        ]
+        for value, message in refusals:
+            body = json.dumps(value).encode()
+            self.refused(tarball(self.directory, contents({'package.json': body})), message)
+
     def test_licence_is_the_repository_licence(self):
         self.refused(tarball(self.directory, contents({'LICENSE': b'other'})), 'LICENSE differs')
 
@@ -121,6 +168,9 @@ class TarballTests(unittest.TestCase):
         sums = self.directory / 'SHA256SUMS'
         sums.write_text(f'{digest}  {path.name}\n')
         self.assertEqual(W.check_release(self.directory, VERSION), path)
+        for version in (W.CHECK_VERSION, 'v1.25.0', '1.25'):
+            with self.assertRaisesRegex(W.PackageError, 'invalid release version'):
+                W.check_release(self.directory, version)
         with self.assertRaisesRegex(W.PackageError, 'expected exactly'):
             W.check_release(self.directory, '1.25.1')
         sums.write_text(f'{"0" * 64}  {path.name}\n')
@@ -153,6 +203,17 @@ class SourceTests(unittest.TestCase):
             with self.assertRaisesRegex(W.PackageError, 'release stamps'):
                 W.check_source(directory)
             stale['version'] = W.SOURCE_VERSION
+            (directory / 'package.json').write_text(json.dumps(stale))
+            for field in ('top', 'root'):
+                stale_lock = json.loads(json.dumps(lock))
+                if field == 'top':
+                    stale_lock['version'] = '0.5.0'
+                else:
+                    stale_lock['packages']['']['version'] = '0.5.0'
+                (directory / 'package-lock.json').write_text(json.dumps(stale_lock))
+                with self.assertRaisesRegex(W.PackageError, 'package-lock.json must also say'):
+                    W.check_source(directory)
+            (directory / 'package-lock.json').write_text(json.dumps(lock))
             stale['files'] = ['dist', 'wasm']
             (directory / 'package.json').write_text(json.dumps(stale))
             with self.assertRaisesRegex(W.PackageError, 'files differs'):

@@ -29,8 +29,11 @@ TILEWRIGHT_WEB_TEST_HOOKS=0 tools/build-web.sh >&2
 # Pack a copy, so the version stamp and notices never touch the tree.
 staging=$(mktemp -d "${TMPDIR:-/tmp}/tilewright-render-pack.XXXXXX")
 trap 'rm -rf -- "${staging}"' EXIT
-cp -R "${package}/package.json" "${package}/README.md" "${package}/dist" "${package}/wasm" \
-  "${staging}/"
+cp -R "${package}/package.json" "${package}/README.md" "${package}/wasm" "${staging}/"
+# The tarball holds no source maps or sources, so compile its copy of the
+# TypeScript without them; the in-tree development build keeps its maps.
+(cd "${package}" && node_modules/.bin/tsc -p tsconfig.json --sourceMap false \
+  --outDir "${staging}/dist")
 cp LICENSE THIRD_PARTY_NOTICES.md "${staging}/"
 cp crates/tilewright-render-ui/assets/OFL.txt "${staging}/OFL-RobotoMono.txt"
 jq --arg version "${version}" '.version = $version' "${package}/package.json" \

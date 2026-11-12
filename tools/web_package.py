@@ -20,7 +20,8 @@ import gzip
 import hashlib
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import sys
 import tarfile
@@ -56,6 +57,14 @@ FILES_FIELD = [
     *[f'wasm/{bundle}/{file}' for bundle in BUNDLES for file in BUNDLE_FILES],
     *NOTICES,
 ]
+# The `exports` map: the entry, the manifest, and the bundles' files by
+# subpath, for consumers that pass `wasm` URLs to `create` themselves.
+EXPORTS = {
+    '.': {'types': './dist/index.d.ts', 'default': './dist/index.js'},
+    './package.json': './package.json',
+    './wasm/*': './wasm/*',
+}
+SOURCE_MAPPING_URL = re.compile(rb'^//# sourceMappingURL=(\S+)\s*$', re.MULTILINE)
 # Exports of the browser tests' trap hooks (crates/tilewright-render-web,
 # feature `test-hooks`). A shipped bundle never carries them.
 TEST_HOOK_MARKERS = (b'panicForTest', b'panic_for_test', b'test panic at')
@@ -92,6 +101,7 @@ def check_manifest(manifest: object, version: str) -> None:
     require(isinstance(repository, dict) and repository.get('url') == REPOSITORY,
             'package repository is not this repository')
     require(manifest.get('type') == 'module', 'package is not an ES module package')
+    require(manifest.get('exports') == EXPORTS, 'package exports differ from tools/web_package.py EXPORTS')
     for field in ('dependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies',
                   'bundledDependencies'):
         require(not manifest.get(field), f'package declares {field}; the asset has no runtime dependencies')
@@ -132,6 +142,15 @@ def check_tarball(path: Path, version: str) -> dict:
         for marker in TEST_HOOK_MARKERS:
             require(marker not in body, f'{name} contains the test hook {marker.decode()}; '
                     'build without TILEWRIGHT_WEB_TEST_HOOKS')
+    for name, body in contents.items():
+        if not name.endswith('.js'):
+            continue
+        for match in SOURCE_MAPPING_URL.finditer(body):
+            target = match[1].decode(errors='replace')
+            if target.startswith('data:'):
+                continue
+            resolved = posixpath.normpath(str(PurePosixPath(name).parent / target))
+            require(resolved in contents, f'{name} names the source map {target}, which the tarball does not hold')
     for bundle in BUNDLES:
         wasm = contents[f'wasm/{bundle}/tilewright_render_web_bg.wasm']
         require(wasm.startswith(b'\0asm'), f'wasm/{bundle} is not WebAssembly')

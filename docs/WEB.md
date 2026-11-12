@@ -58,7 +58,9 @@ test` skips the trap tests.
 The build writes `packages/tilewright-render/wasm/{webgpu,full}/` and
 `packages/tilewright-render/dist/`; neither is committed. Bundlers that
 understand `new URL('…', import.meta.url)` find each `.wasm` file beside its
-JavaScript; otherwise pass `wasm` URLs to `create`.
+JavaScript; otherwise pass `wasm` URLs to `create`. The package exports the
+bundles' files by subpath for that, for example
+`@seraphinastudios/tilewright-render/wasm/full/tilewright_render_web_bg.wasm`.
 
 ## Release asset
 
@@ -103,6 +105,10 @@ gh attestation verify "${tarball}" -R seraphinastudios/tilewright-renderer \
 npm install "./${tarball}"
 ```
 
+`--source-ref refs/heads/main` is for releases cut from `main`. A release cut
+from a maintenance branch `N.N.x` is attested from that branch: verify it with
+`--source-ref refs/heads/N.N.x`, for example `refs/heads/1.24.x`.
+
 `npm install` records a `file:` dependency on the tarball; commit the
 tarball beside the lockfile, or depend on the release URL instead, which npm
 records with the tarball's integrity hash:
@@ -117,6 +123,10 @@ records with the tarball's integrity hash:
 
 Check the digest and the attestation whichever way you depend on it.
 Publishing to the npm registry is a separate decision and is off.
+
+The type declarations of the `wasm-bindgen` glue use `Symbol.dispose`, so
+TypeScript consumers need `esnext` (or `esnext.disposable`) in `lib`, or
+`skipLibCheck`.
 
 ## Use
 

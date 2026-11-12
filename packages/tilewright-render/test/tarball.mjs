@@ -56,6 +56,20 @@ try {
   ).trim();
   const entryPath = fileURLToPath(entry);
   assert.ok(entryPath.startsWith(join(project, 'node_modules') + sep), `${NAME} resolved outside the project: ${entry}`);
+  // Consumers that pass `wasm` URLs to `create` import the bundles' files by
+  // package subpath.
+  for (const bundle of ['full', 'webgpu']) {
+    const specifier = `${NAME}/wasm/${bundle}/tilewright_render_web_bg.wasm`;
+    const wasm = fileURLToPath(
+      execFileSync(
+        process.execPath,
+        ['--input-type=module', '--eval', `console.log(import.meta.resolve(${JSON.stringify(specifier)}))`],
+        { cwd: project, encoding: 'utf8' },
+      ).trim(),
+    );
+    assert.equal(wasm, join(project, 'node_modules', NAME, 'wasm', bundle, 'tilewright_render_web_bg.wasm'));
+    assert.deepEqual([...(await readFile(wasm)).subarray(0, 4)], [0, 0x61, 0x73, 0x6d], `${specifier} is not WebAssembly`);
+  }
   const types = JSON.parse(await readFile(join(project, 'node_modules', NAME, 'package.json'), 'utf8')).types;
   await readFile(join(project, 'node_modules', NAME, types));
 
