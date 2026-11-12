@@ -43,8 +43,11 @@ order, verifies standalone packages, and writes `crate-release.json` with the
 source revision, source tag, package inventory and exact SHA-256 checksums.
 The source release attaches each newly owned package archive, this manifest,
 source provenance and checksums before dispatching the publisher. The manifest selects only new
-crate versions; unchanged versions retain their original owning release. Preserve the CLI, corpus, SBOM and
-source archive assets in that release.
+crate versions; unchanged versions retain their original owning release. Preserve the CLI, corpus, SBOM,
+browser package tarball and source archive assets in that release. The browser package tarball
+(`seraphinastudios-tilewright-render-X.Y.Z.tgz`, see [the browser package](WEB.md#release-asset)) takes the
+source release version, never a crate version, and has its own provenance statement; the crate manifest's
+attestation is unchanged.
 
 `publish-crate.yml` runs from protected `main`. Its `automatic` dispatch accepts
 the exact source release ID, full source revision and manifest digest. The

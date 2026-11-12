@@ -44,6 +44,14 @@ cp LICENSE PROVENANCE.md THIRD_PARTY_NOTICES.md "${output}/"
 cp crates/tilewright-render-ui/assets/OFL.txt "${output}/OFL-RobotoMono.txt"
 cp crates/tilewright-render-ui/assets/manifest.json "${output}/ui-font-manifest.json"
 
+# The browser package tarball, checked and drawn with before SHA256SUMS lists
+# it. A dry run packs under a version no release can have.
+web_version=0.0.0-check
+if [[ $# -ge 2 ]]; then
+  web_version=${version}
+fi
+tools/pack-web.sh "${output}" "${web_version}" >/dev/null
+
 SYFT_CHECK_FOR_APP_UPDATE=false syft dir:. \
   --source-name tilewright-renderer --source-version "${version}" \
   --output "cyclonedx-json=${output}/sbom.cdx.json"

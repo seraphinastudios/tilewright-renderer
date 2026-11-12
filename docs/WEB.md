@@ -8,8 +8,9 @@ unavailable, behind a TypeScript API:
   store and the packed-scene decoder. Its version follows the workspace; it is
   not published to crates.io.
 - `packages/tilewright-render` is the TypeScript package
-  `@seraphinastudios/tilewright-render`. It is private for now: build it from
-  this repository and depend on the built directory.
+  `@seraphinastudios/tilewright-render`. It is not on the npm registry: every
+  source release carries it as an attested tarball (see
+  [Release asset](#release-asset)), or build it from this repository.
 
 Pages build scenes, never packs or content files. Consumers turn their state
 into quads, as native consumers do, and the renderer validates every scene
@@ -58,6 +59,64 @@ The build writes `packages/tilewright-render/wasm/{webgpu,full}/` and
 `packages/tilewright-render/dist/`; neither is committed. Bundlers that
 understand `new URL('…', import.meta.url)` find each `.wasm` file beside its
 JavaScript; otherwise pass `wasm` URLs to `create`.
+
+## Release asset
+
+Every source release `vX.Y.Z` attaches the package, packed with `npm pack`
+from the tagged commit, as `seraphinastudios-tilewright-render-X.Y.Z.tgz`:
+
+- **Version.** The package version is the source release version `X.Y.Z`,
+  so each release's tarball has its own name and version, and a consumer
+  pins one release. It is not the Rust crate version, which moves
+  independently of source releases (see [crate delivery](CRATE-RELEASE.md)).
+  The committed `package.json` keeps the placeholder `0.0.0-development`;
+  only the release stamps a version, and validation fails if a real one is
+  committed.
+- **Contents.** Both bundles and their glue, the compiled TypeScript and its
+  type declarations, `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md` and
+  `OFL-RobotoMono.txt`; nothing else. The bundles are built without the test
+  hooks. The package has no dependencies and no install scripts.
+- **Checks before release.** `tools/pack-web.sh` builds and packs it; then
+  `tools/web_package.py` checks the tarball's exact file list, its manifest
+  and the absence of test hooks, and `test/tarball.mjs` installs it into an
+  empty project with npm and draws a sprite from the installed files in
+  headless Chromium, with the `full` bundle on WebGL2 and the `webgpu` bundle
+  on WebGPU, against the CPU reference. `tools/package-release.sh` runs both
+  before it writes `SHA256SUMS`, which lists the tarball. Every validation
+  run does the same as a dry run, at the version `0.0.0-check`, which no
+  release can have.
+- **Provenance.** The release workflow's attest job checks the tarball again
+  and attests it with `actions/attest-build-provenance`, in its own
+  statement, before the release is created.
+
+Download, verify and depend on one release's tarball:
+
+```sh
+version=X.Y.Z
+tarball=seraphinastudios-tilewright-render-${version}.tgz
+gh release download "v${version}" -R seraphinastudios/tilewright-renderer \
+  --pattern "${tarball}" --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify "${tarball}" -R seraphinastudios/tilewright-renderer \
+  --signer-workflow seraphinastudios/tilewright-renderer/.github/workflows/release.yml \
+  --source-ref refs/heads/main
+npm install "./${tarball}"
+```
+
+`npm install` records a `file:` dependency on the tarball; commit the
+tarball beside the lockfile, or depend on the release URL instead, which npm
+records with the tarball's integrity hash:
+
+```json
+{
+  "dependencies": {
+    "@seraphinastudios/tilewright-render": "https://github.com/seraphinastudios/tilewright-renderer/releases/download/vX.Y.Z/seraphinastudios-tilewright-render-X.Y.Z.tgz"
+  }
+}
+```
+
+Check the digest and the attestation whichever way you depend on it.
+Publishing to the npm registry is a separate decision and is off.
 
 ## Use
 

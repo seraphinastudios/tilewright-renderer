@@ -1,8 +1,25 @@
 {
   "name": "@seraphinastudios/tilewright-render",
-  "version": "0.5.0",
+  "version": "0.0.0-development",
   "description": "WebGPU and WebGL2 browser renderer for Tilewright scenes",
   "license": "MIT",
+  "author": "Seraphina Studios",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seraphinastudios/tilewright-renderer.git",
+    "directory": "packages/tilewright-render"
+  },
+  "homepage": "https://github.com/seraphinastudios/tilewright-renderer/blob/main/docs/WEB.md",
+  "bugs": {
+    "url": "https://github.com/seraphinastudios/tilewright-renderer/issues"
+  },
+  "keywords": [
+    "tilewright",
+    "webgpu",
+    "webgl2",
+    "webassembly",
+    "renderer"
+  ],
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -11,11 +28,23 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
-    "dist",
-    "wasm"
+    "dist/*.js",
+    "dist/*.d.ts",
+    "wasm/full/tilewright_render_web.js",
+    "wasm/full/tilewright_render_web.d.ts",
+    "wasm/full/tilewright_render_web_bg.wasm",
+    "wasm/full/tilewright_render_web_bg.wasm.d.ts",
+    "wasm/webgpu/tilewright_render_web.js",
+    "wasm/webgpu/tilewright_render_web.d.ts",
+    "wasm/webgpu/tilewright_render_web_bg.wasm",
+    "wasm/webgpu/tilewright_render_web_bg.wasm.d.ts",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "OFL-RobotoMono.txt"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
