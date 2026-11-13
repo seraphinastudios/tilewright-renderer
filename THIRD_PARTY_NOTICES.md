@@ -3,7 +3,9 @@
 Rust dependencies retain their licenses as reported by Cargo metadata and the
 release SBOM. `policy/dependencies.json` records the approved SPDX licenses and
 exceptions, registry sources, and direct-dependency purposes; `Cargo.lock` fixes
-the exact resolved versions and checksums.
+the exact resolved versions and checksums. `deny.toml` applies the same licenses,
+exception and sources with cargo-deny, which also rejects known advisories,
+yanked crates and banned packages.
 
 The raw SDL window handle adapter in `tilewright-render-sdl3` is an independently
 adapted form of the public `sdl3` 0.18.4

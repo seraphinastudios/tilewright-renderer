@@ -1,0 +1,38 @@
+# cargo-deny policy for the locked graph, checked by tools/validate.sh.
+# policy/dependencies.json remains the reviewed dependency record; this file
+# adds advisories, yanked crates and bans, and checks licences and sources
+# against the same allowlists. Keep the two in step.
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+# No advisory is ignored. An ignore needs an advisory ID, a reason and a
+# review date, and is removed once a fixed version is locked.
+ignore = []
+
+[licenses]
+# policy/dependencies.json allowed_spdx.
+allow = ["Apache-2.0", "BSD-2-Clause", "ISC", "MIT", "Unicode-3.0", "Zlib"]
+# Font data only: never allow OFL-1.1 for any other package or any other
+# version. cargo-deny 0.20.2 package specs use @ for an exact version; move
+# this with the workspace crate version and policy/dependencies.json.
+exceptions = [{ crate = "tilewright-render-ui@0.7.1", allow = ["OFL-1.1"] }]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# The renderer never reaches the network on its own: resources arrive
+# through providers that consumers own.
+deny = [
+  { name = "reqwest" },
+  { name = "tokio" },
+  { name = "quinn" },
+]
+
+[sources]
+# policy/dependencies.json allowed_registry_sources: crates.io only.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []

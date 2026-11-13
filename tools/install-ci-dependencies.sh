@@ -27,6 +27,16 @@ printf '%s  %s\n' 61d4a7dc85acfa0d2354ccc0b8361928c7e52a746d17f28ebaa795ed3dc161
 tar -xzf "${RUNNER_TEMP}/wasm-bindgen.tar.gz" -C "${RUNNER_TEMP}/bin" \
   --strip-components=1 wasm-bindgen-0.2.127-x86_64-unknown-linux-musl/wasm-bindgen
 
+# cargo-deny checks advisories, licences, bans and sources in validate.sh;
+# the same pinned release the editor's CI uses.
+curl --fail --silent --show-error --location \
+  https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz \
+  --output "${RUNNER_TEMP}/cargo-deny.tar.gz"
+printf '%s  %s\n' 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f \
+  "${RUNNER_TEMP}/cargo-deny.tar.gz" | sha256sum --check --strict
+tar -xzf "${RUNNER_TEMP}/cargo-deny.tar.gz" -C "${RUNNER_TEMP}/bin" \
+  --strip-components=1 cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny
+
 curl --fail --silent --show-error --location \
   https://github.com/anchore/syft/releases/download/v1.50.0/syft_1.50.0_linux_amd64.tar.gz \
   --output "${RUNNER_TEMP}/syft.tar.gz"
