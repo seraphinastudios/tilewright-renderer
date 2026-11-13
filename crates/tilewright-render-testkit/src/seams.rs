@@ -606,7 +606,10 @@ fn tie_coordinate(zoom: f32, residue: i64, divisor: u32) -> f64 {
 
 /// Cameras whose position, at `zoom`, puts art edges exactly 1/128 px after
 /// a pixel centre along one axis or both, so the world compiler's 1/128 px
-/// tie offset puts the centre exactly on the edge.
+/// tie offset puts the centre exactly on the edge. That offset is private to
+/// `tilewright-render-world`; its own test
+/// `ground_tie_offset_and_margin_keep_their_reviewed_values` pins it to the
+/// 1/128 these residues assume.
 fn tie_centres(projection: Projection, zoom: f32) -> Vec<[f64; 2]> {
     let divisors = match projection {
         Projection::TopDown { tile_size } => [tile_size; 2],
@@ -701,36 +704,59 @@ fn terraced_ground_leaves_only_rare_holes_where_flat_meets_bent() {
     // flat art beside them stops half an art pixel short of its tips, so at
     // some zooms a few pixels where the two meet stay uncovered. That
     // residual is known and not fixed; this pins how many pixels it leaves
-    // over this sweep, none of them at whole zooms, so any change that opens
-    // more fails. Each case runs on its own thread.
-    let zooms = || (5_u16..=60).step_by(2).map(|step| f32::from(step) / 20.0);
+    // over this sweep, at fractional zooms and separately at whole zooms, so
+    // any change that opens more fails. Each case runs on its own thread.
+    let fractional: Vec<f32> = (5_u16..=59)
+        .step_by(2)
+        .map(|step| f32::from(step) / 20.0)
+        .collect();
+    let fractional = &fractional;
+    // Whole zooms see fewer distinct alignments, so they get more centres.
+    let mut fraction = fractions(0x9e37_79b9_7f4a_7c15);
+    let mut whole_centres = CENTRES.to_vec();
+    for whole in -6_i32..6 {
+        let whole = f64::from(whole);
+        whole_centres.push([whole + fraction(), 2.0 * whole - fraction()]);
+    }
+    let whole_centres = &whole_centres;
     // Projection, height units per terrace, and the most holes measured on
-    // the reference renderer over all cameras and at whole zooms. Every
-    // measured hole lies within 3 px of both flat and bent ground.
+    // the reference renderer at the fractional zooms 0.25 to 2.95 and at
+    // zooms 1, 2 and 3. Here terraces of 2 or 4 units leave none at whole
+    // zooms and terraces of 8 units leave a few. Every measured hole lies
+    // within 3 px of both flat and bent ground.
     let cases = [
         (ISO_48, 2, 1, 0),
         (ISO_48, 4, 3, 0),
-        (ISO_48, 8, 17, 0),
+        (ISO_48, 8, 17, 5),
         (ISO_64, 2, 0, 0),
         (ISO_64, 4, 0, 0),
-        (ISO_64, 8, 1, 0),
+        (ISO_64, 8, 1, 1),
     ];
     let results: Vec<_> = std::thread::scope(|scope| {
         let handles: Vec<_> = cases
             .map(|(projection, step, _, _)| {
                 scope.spawn(move || {
-                    let (mut holes, mut whole) = (0, 0);
-                    sweep_over(projection, zooms(), &[(121, 87)], &CENTRES, |camera| {
-                        let view = terraced(camera, step);
-                        let scene = compile(&view, SceneLimits::default()).unwrap();
-                        let bad = semantic_holes(&scene, camera, GroundArt::Diamond);
-                        holes += bad;
-                        if camera.zoom.fract() == 0.0 {
-                            whole += bad;
-                        }
-                        0
-                    });
-                    (holes, whole)
+                    let holes = |zooms: &[f32], sizes, centres| {
+                        let mut holes = 0;
+                        sweep_over(
+                            projection,
+                            zooms.iter().copied(),
+                            sizes,
+                            centres,
+                            |camera| {
+                                let scene =
+                                    compile(&terraced(camera, step), SceneLimits::default())
+                                        .unwrap();
+                                holes += semantic_holes(&scene, camera, GroundArt::Diamond);
+                                0
+                            },
+                        );
+                        holes
+                    };
+                    (
+                        holes(fractional, &[(121, 87)], &CENTRES),
+                        holes(&[1.0, 2.0, 3.0], &[(121, 87), (120, 86)], whole_centres),
+                    )
                 })
             })
             .into_iter()

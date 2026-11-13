@@ -1261,3 +1261,12 @@ fn ground_edges_at_the_view_origin_are_positive_zero() {
         assert_eq!(quad.positions[0], [0.0, 0.0], "zoom {zoom}");
     }
 }
+
+#[test]
+fn ground_tie_offset_and_margin_keep_their_reviewed_values() {
+    // The testkit's tie cameras (`tie_centres` in its seams tests) are
+    // built for exactly this offset, and the margin is what covers them:
+    // changing either needs new tie cameras there, not just a new value.
+    assert_eq!(super::GROUND_TIE_OFFSET_PX, 1.0 / 128.0);
+    assert_eq!(super::GROUND_UV_MARGIN, 1.0 / 65_536.0);
+}
