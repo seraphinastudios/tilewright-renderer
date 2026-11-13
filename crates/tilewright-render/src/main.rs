@@ -897,9 +897,19 @@ mod tests {
             (isometric(48, 24), GroundArt::Diamond),
             (isometric(64, 32), GroundArt::Diamond),
         ] {
-            for (zoom, center) in zooms.iter().flat_map(|zoom| {
-                [[0.0, 0.0], [0.5, 0.5], [3.37, 7.81]].map(|center| (*zoom, center))
-            }) {
+            // Cameras 1/128 tile off a round position at zoom 1.25 put pixel
+            // centres exactly on art edges once the ground's tie offset
+            // applies; there the UV margin keeps the GPU, which leaves UVs
+            // outside the art transparent, agreeing with the reference.
+            let ties = [[0.007_812_5, 0.0], [0.757_812_5, 0.0], [0.0, 0.007_812_5]]
+                .map(|center| (1.25, center));
+            for (zoom, center) in zooms
+                .iter()
+                .flat_map(|zoom| {
+                    [[0.0, 0.0], [0.5, 0.5], [3.37, 7.81]].map(|center| (*zoom, center))
+                })
+                .chain(ties)
+            {
                 let camera = Camera {
                     projection,
                     center,

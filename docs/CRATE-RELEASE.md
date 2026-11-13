@@ -18,6 +18,25 @@ independent of the semantic-release source tag. Change the workspace version and
 all exact internal dependency requirements together whenever packaged content
 changes after publication. Required validation compares packaged content with
 the accepted base and rejects changed content at an unchanged published version.
+
+A version bump changes these files together, as one reviewed set:
+
+- `Cargo.toml`: the workspace `version` and the eight exact
+  `tilewright-*` internal dependency requirements;
+- `Cargo.lock`, refreshed with `cargo update --workspace --offline`;
+- `policy/dependencies.json`: the `tilewright-render-ui` OFL-1.1 exception's
+  `version`;
+- `tools/fixtures/dependency-metadata.json`: the `tilewright-render-ui` id,
+  version and resolve node;
+- `tools/test-check-dependencies.sh`: the `wrong-version` mutation, set to the
+  previous version;
+- `deny.toml`: the `tilewright-render-ui@VERSION` licence exception. Until it
+  moves, `cargo deny` fails with "unmatched license exception" and rejects the
+  crate's OFL-1.1 licence.
+
+`python3 tools/crate_prepare.py check-version --base <base commit>` confirms
+the bump.
+
 For already published coordinates, preparation packages each candidate separately
 against the production registry twice. It compares the complete inventory and
 canonical contents, including `Cargo.lock`, with the original owning archive;
@@ -61,6 +80,31 @@ checksums in the sparse index before dependent uploads proceed. Existing exact
 packages are idempotent; a conflicting checksum stops publication. Hourly
 reconciliation revisits eligible releases to recover interrupted dispatches or
 index propagation delays.
+
+### cargo-deny in validation
+
+`tools/validate.sh` runs `cargo deny --locked check advisories bans licenses
+sources` with the pinned cargo-deny release that
+`tools/install-ci-dependencies.sh` installs. It checks the whole locked graph
+for all targets and features. The checks cover security advisories at every
+severity, unmaintained and unsound advisories (cargo-deny's defaults), yanked
+crates, the licence allowlist and exception, the banned packages, and crates.io
+as the only source. It fetches the RustSec advisory database each run.
+
+A newly published advisory against a locked crate, or a failure to fetch the
+database, therefore fails `Renderer validation` on every pull request, on
+`main` and in the release run, without any change in this repository. Recovery:
+
+- Prefer upgrading or replacing the affected crate.
+- Otherwise add a reviewed entry to `[advisories] ignore` in `deny.toml` with
+  the advisory ID, the reason it does not apply or cannot yet be fixed, and a
+  review date, and remove it once a fixed version is locked. `deny.toml` is not
+  packaged crate content, so this needs no crate version bump.
+- Re-run a run that failed only to fetch the database.
+
+A release run that fails validation creates no tag, release or publication.
+The next successful release run on `main` releases those commits with its own
+and prepares any crate version they bumped, as usual.
 
 ## Immutable source-release ownership
 

@@ -342,20 +342,28 @@ pub enum GroundArt {
 const MAXIMUM_TILE_SIDE: u32 = 1_024;
 
 /// The ground grid texture's size, or `None` for a tile side of 0 or over
-/// [`MAXIMUM_TILE_SIDE`].
+/// [`MAXIMUM_TILE_SIDE`]. The projection's tile sides are checked before
+/// the art's size is derived from them, so Diamond art, one texel shorter
+/// than its tile, cannot bring an over-tall tile back inside the bound.
 fn ground_grid_size(projection: Projection, art: GroundArt) -> Option<(u32, u32, bool)> {
-    let (width, height, diamond) = match projection {
-        Projection::TopDown { tile_size } => (tile_size, tile_size, false),
+    let (tile_width, tile_height) = match projection {
+        Projection::TopDown { tile_size } => (tile_size, tile_size),
         Projection::Isometric {
             tile_width,
             tile_height,
-        } => match art {
-            GroundArt::Full | GroundArt::Checker => (tile_width, tile_height, false),
-            GroundArt::Diamond => (tile_width, tile_height.saturating_sub(1).max(1), true),
-        },
+        } => (tile_width, tile_height),
     };
-    ((1..=MAXIMUM_TILE_SIDE).contains(&width) && (1..=MAXIMUM_TILE_SIDE).contains(&height))
-        .then_some((width, height, diamond))
+    if !((1..=MAXIMUM_TILE_SIDE).contains(&tile_width)
+        && (1..=MAXIMUM_TILE_SIDE).contains(&tile_height))
+    {
+        return None;
+    }
+    Some(match (projection, art) {
+        (Projection::Isometric { .. }, GroundArt::Diamond) => {
+            (tile_width, tile_height.saturating_sub(1).max(1), true)
+        }
+        _ => (tile_width, tile_height, false),
+    })
 }
 
 /// The ground grid's texture: its size and `ATX1` envelope with digest. At

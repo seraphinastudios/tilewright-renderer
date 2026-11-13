@@ -1296,7 +1296,10 @@ const GROUND_UV_MARGIN: f64 = 1.0 / 65_536.0;
 /// art. Moving the art by 1/128 px puts those centres just inside the later
 /// texel across the whole tile. Ties remain only for cameras exactly 1/128 px
 /// off a round position, and within art more than 512 px across, where the
-/// margin outgrows the offset near the art's edges.
+/// margin outgrows the offset near the art's edges. At such a camera a pixel
+/// centre can lie exactly on the edge between neighbouring art, and the
+/// margin keeps it inside both, so the ground still covers it.
+/// A power of two, so the move is exact in `f64`.
 const GROUND_TIE_OFFSET_PX: f64 = 1.0 / 128.0;
 
 /// Rows and columns of the mesh a bent isometric tile becomes.

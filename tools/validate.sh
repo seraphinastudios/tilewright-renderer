@@ -14,6 +14,7 @@ python3 tools/crate_prepare.py check-version --base "${CRATE_RELEASE_BASE:-$(git
 tools/check-architecture.sh
 tools/check-dependencies.sh
 tools/test-check-dependencies.sh
+cargo deny --locked check advisories bans licenses sources
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-targets --all-features
