@@ -721,9 +721,11 @@ fn terraced_ground_leaves_only_rare_holes_where_flat_meets_bent() {
     let whole_centres = &whole_centres;
     // Projection, height units per terrace, and the most holes measured on
     // the reference renderer at the fractional zooms 0.25 to 2.95 and at
-    // zooms 1, 2 and 3. Here terraces of 2 or 4 units leave none at whole
-    // zooms and terraces of 8 units leave a few. Every measured hole lies
-    // within 3 px of both flat and bent ground.
+    // zooms 1, 2 and 3. At these cameras terraces of 2 or 4 units leave none
+    // at whole zooms and terraces of 8 units leave a few. Only 2-unit
+    // terraces stay clean at every whole-zoom camera; 4-unit terraces can
+    // leave rare holes at cameras this sweep does not visit. Every measured
+    // hole lies within 3 px of both flat and bent ground.
     let cases = [
         (ISO_48, 2, 1, 0),
         (ISO_48, 4, 3, 0),
