@@ -22,5 +22,10 @@ actionlint .github/workflows/*.yml
 git diff --check
 ```
 
+`tools/validate.sh` includes `cargo deny`, which fetches the advisory database,
+so a new upstream advisory can fail validation without any change here. See
+[cargo-deny in validation](docs/CRATE-RELEASE.md#cargo-deny-in-validation) for
+the recovery path.
+
 Public scene, resource, rendering, semantic-output, fixture, and CLI behavior is
 versioned API. Pull-request titles and commits use Conventional Commits.
