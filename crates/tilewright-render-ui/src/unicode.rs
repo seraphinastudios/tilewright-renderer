@@ -22,7 +22,7 @@ use parley::{
 use sha2::{Digest, Sha256};
 use swash::scale::{ScaleContext, image::Image as SwashImage};
 
-use crate::UiError;
+use crate::{UiError, UiTexture};
 pub use layout::{TextAffinity, TextCursor, UnicodeCluster, UnicodeLayout, VisualMotion};
 use paint::GlyphKey;
 pub use paint::{CompiledUnicodeUi, UnicodeTexture};
@@ -150,6 +150,11 @@ pub(crate) struct RegisteredFont {
     pub(crate) index: u32,
 }
 
+/// How many atlas IDs keep their last identity for reuse. A host and a few
+/// embedded components each compiling under their own ID fit; an evicted ID
+/// only gets a fresh revision on its next compile.
+const RECENT_ATLASES: usize = 8;
+
 /// A renderer session's text engine. Mutability is confined to shaping scratch
 /// and bounded layout caches; returned layouts and textures remain immutable.
 pub struct TextSystem {
@@ -168,7 +173,13 @@ pub struct TextSystem {
     raster: HashMap<GlyphKey, Arc<SwashImage>>,
     raster_order: VecDeque<GlyphKey>,
     raster_bytes: usize,
-    last_atlas: Option<UnicodeTexture>,
+    /// Identities of the most recent atlas built for each of up to
+    /// `RECENT_ATLASES` atlas IDs, least recently used first. At most one entry
+    /// per ID. Only identities are kept: reuse compares digests, and the
+    /// caller already holds the bytes it was given.
+    recent_atlases: VecDeque<UiTexture>,
+    /// Shared by every atlas ID and never reset, so a revision issued by this
+    /// system is never issued again, even after eviction or `clear_cache`.
     next_revision: u64,
     shape_misses: u16,
 }
@@ -245,7 +256,7 @@ impl TextSystem {
             raster: HashMap::new(),
             raster_order: VecDeque::new(),
             raster_bytes: 0,
-            last_atlas: None,
+            recent_atlases: VecDeque::with_capacity(RECENT_ATLASES),
             next_revision: 1,
             shape_misses: 0,
         })
@@ -257,14 +268,16 @@ impl TextSystem {
     }
 
     /// Clears retained layouts and raster scratch, without affecting immutable
-    /// layouts/resources held by a consumer or in-flight frame.
+    /// layouts/resources held by a consumer or in-flight frame. It also forgets
+    /// the atlas identities kept for reuse, so the next atlas for every ID gets
+    /// a new revision; revisions keep rising and are never issued twice.
     pub fn clear_cache(&mut self) {
         self.layouts.clear();
         self.layout_bytes = 0;
         self.raster.clear();
         self.raster_order.clear();
         self.raster_bytes = 0;
-        self.last_atlas = None;
+        self.recent_atlases.clear();
         self.reset_shaping();
     }
 
