@@ -173,13 +173,14 @@ pub struct TextSystem {
     raster: HashMap<GlyphKey, Arc<SwashImage>>,
     raster_order: VecDeque<GlyphKey>,
     raster_bytes: usize,
-    /// Identities of the most recent atlas built for each of up to
+    /// Identities of the most recent atlas returned for each of up to
     /// `RECENT_ATLASES` atlas IDs, least recently used first. At most one entry
     /// per ID. Only identities are kept: reuse compares digests, and the
     /// caller already holds the bytes it was given.
     recent_atlases: VecDeque<UiTexture>,
-    /// Shared by every atlas ID and never reset, so a revision issued by this
-    /// system is never issued again, even after eviction or `clear_cache`.
+    /// Shared by every atlas ID and never reset, even by eviction or
+    /// `clear_cache`: it hands out each revision once, so a revision never
+    /// names different bytes or another ID.
     next_revision: u64,
     shape_misses: u16,
 }
@@ -270,7 +271,8 @@ impl TextSystem {
     /// Clears retained layouts and raster scratch, without affecting immutable
     /// layouts/resources held by a consumer or in-flight frame. It also forgets
     /// the atlas identities kept for reuse, so the next atlas for every ID gets
-    /// a new revision; revisions keep rising and are never issued twice.
+    /// a new revision. The revision counter is not reset: it hands out each
+    /// revision once, so a revision never names different bytes or another ID.
     pub fn clear_cache(&mut self) {
         self.layouts.clear();
         self.layout_bytes = 0;

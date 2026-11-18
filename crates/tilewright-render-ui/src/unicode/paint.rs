@@ -76,7 +76,7 @@ impl TextSystem {
     /// resources. A text engine owns that resource's monotonically increasing
     /// revisions for its lifetime. Caller must retire it before reusing the ID
     /// with another engine. Unchanged atlas bytes reuse their exact identity:
-    /// an atlas whose bytes equal the last atlas this engine built for the same
+    /// an atlas whose bytes equal the last atlas this engine returned for the same
     /// ID keeps that revision, whatever other IDs were compiled in between.
     /// The engine remembers a small fixed number of recently used IDs; a
     /// forgotten ID, or any ID after `clear_cache`, gets a new revision.

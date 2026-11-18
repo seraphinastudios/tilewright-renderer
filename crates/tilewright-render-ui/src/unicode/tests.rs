@@ -241,7 +241,7 @@ fn alternating_atlas_ids_keep_their_unchanged_identities() {
 #[test]
 fn atlas_ids_beyond_the_reuse_capacity_get_fresh_revisions() {
     let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
-    let ids: Vec<u64> = (0..u64::try_from(RECENT_ATLASES).unwrap() + 2)
+    let ids: Vec<u64> = (0..u64::try_from(RECENT_ATLASES).unwrap() + 1)
         .map(|index| 3 + index)
         .collect();
     let mut issued =
@@ -266,31 +266,35 @@ fn atlas_ids_beyond_the_reuse_capacity_get_fresh_revisions() {
         *last = identity.revision;
         identity
     };
-    let first: Vec<_> = ids
+    // Fill the reuse memory exactly: ids[0] is the least recently used.
+    let first: Vec<_> = ids[..RECENT_ATLASES]
         .iter()
         .map(|id| record(atlas_identity(&mut system, "W.i", *id)))
         .collect();
-    // The most recent IDs still reuse their identity.
-    let newest = *ids.last().unwrap();
-    assert_eq!(
-        record(atlas_identity(&mut system, "W.i", newest)),
-        *first.last().unwrap()
-    );
-    // The least recently used IDs were forgotten: new revisions, same bytes.
     let maximum = first
         .iter()
         .map(|identity| identity.revision)
         .max()
         .unwrap();
-    for (index, id) in ids.iter().take(2).enumerate() {
-        let again = record(atlas_identity(&mut system, "W.i", *id));
-        assert_eq!(again.digest, first[index].digest);
-        assert!(again.revision > maximum);
+    // A hit reuses the identity and makes ids[0] the most recently used, so
+    // the next new ID evicts ids[1] instead.
+    assert_eq!(record(atlas_identity(&mut system, "W.i", ids[0])), first[0]);
+    let added = record(atlas_identity(&mut system, "W.i", ids[RECENT_ATLASES]));
+    assert!(added.revision > maximum);
+    // Exactly the RECENT_ATLASES most recently used IDs still reuse. These
+    // checks are hits, so they evict nothing.
+    for (index, id) in ids.iter().enumerate().filter(|(index, _)| *index != 1) {
+        let expected = first.get(index).copied().unwrap_or(added);
+        assert_eq!(record(atlas_identity(&mut system, "W.i", *id)), expected);
     }
-    // Changed bytes on an evicted ID also get a new revision.
+    // The next most recent was forgotten: a new revision for the same bytes.
+    let again = record(atlas_identity(&mut system, "W.i", ids[1]));
+    assert_eq!(again.digest, first[1].digest);
+    assert!(again.revision > added.revision);
+    // Changed bytes always get a new revision.
     for id in &ids {
         let changed = record(atlas_identity(&mut system, "different", *id));
-        assert!(changed.revision > maximum);
+        assert!(changed.revision > again.revision);
     }
 }
 
