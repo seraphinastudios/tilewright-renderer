@@ -241,7 +241,7 @@ fn alternating_atlas_ids_keep_their_unchanged_identities() {
 #[test]
 fn atlas_ids_beyond_the_reuse_capacity_get_fresh_revisions() {
     let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
-    let ids: Vec<u64> = (0..u64::try_from(RECENT_ATLASES).unwrap() + 1)
+    let ids: Vec<u64> = (0..=u64::try_from(RECENT_ATLASES).unwrap())
         .map(|index| 3 + index)
         .collect();
     let mut issued =
