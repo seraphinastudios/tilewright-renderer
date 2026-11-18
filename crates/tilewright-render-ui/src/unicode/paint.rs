@@ -75,7 +75,11 @@ impl TextSystem {
     /// `first_resource` reserves one atlas ID, distinct from `solid` and World
     /// resources. A text engine owns that resource's monotonically increasing
     /// revisions for its lifetime. Caller must retire it before reusing the ID
-    /// with another engine. Unchanged atlas bytes reuse their exact identity.
+    /// with another engine. Unchanged atlas bytes reuse their exact identity:
+    /// an atlas whose bytes equal the last atlas this engine returned for the same
+    /// ID keeps that revision, whatever other IDs were compiled in between.
+    /// The engine remembers a small fixed number of recently used IDs; a
+    /// forgotten ID, or any ID after `clear_cache`, gets a new revision.
     ///
     /// # Errors
     /// Returns no partial frame on invalid input, missing role, exceeded budgets,
@@ -231,25 +235,10 @@ impl TextSystem {
             let bytes = atlas.finish()?;
             let digest = Digest256(Sha256::digest(&bytes).into());
             let id = ResourceId(first_resource);
-            let texture = if let Some(previous) = self
-                .last_atlas
-                .as_ref()
-                .filter(|p| p.identity.id == id && p.identity.digest == digest)
-            {
-                previous.clone()
-            } else {
-                let revision = self.next_revision;
-                let next = revision.checked_add(1).ok_or(TextError::LimitExceeded)?;
-                let texture = UnicodeTexture {
-                    identity: UiTexture {
-                        id,
-                        revision,
-                        digest,
-                    },
-                    bytes: bytes.into(),
-                };
-                self.next_revision = next;
-                texture
+            let identity = self.atlas_identity(id, digest)?;
+            let texture = UnicodeTexture {
+                identity,
+                bytes: bytes.into(),
             };
             for item in pending {
                 let PendingQuad::Image(image) = item else {
@@ -271,7 +260,7 @@ impl TextSystem {
                     output.quads.push(quad);
                 }
             }
-            self.last_atlas = Some(texture.clone());
+            self.remember_atlas(texture.identity);
             output.resources.push(texture);
         } else {
             output
@@ -282,6 +271,40 @@ impl TextSystem {
                 }));
         }
         Ok(output)
+    }
+
+    /// The identity for an atlas with these bytes: the last one built for `id`
+    /// when its digest matches, otherwise a new revision from the counter
+    /// shared by all IDs.
+    fn atlas_identity(
+        &mut self,
+        id: ResourceId,
+        digest: Digest256,
+    ) -> Result<UiTexture, TextError> {
+        if let Some(known) = self
+            .recent_atlases
+            .iter()
+            .find(|known| known.id == id && known.digest == digest)
+        {
+            return Ok(*known);
+        }
+        let revision = self.next_revision;
+        self.next_revision = revision.checked_add(1).ok_or(TextError::LimitExceeded)?;
+        Ok(UiTexture {
+            id,
+            revision,
+            digest,
+        })
+    }
+
+    /// Records the identity of a returned atlas as its ID's latest, making that
+    /// ID the most recently used and evicting the least recently used ID.
+    fn remember_atlas(&mut self, identity: UiTexture) {
+        self.recent_atlases.retain(|known| known.id != identity.id);
+        if self.recent_atlases.len() >= super::RECENT_ATLASES {
+            self.recent_atlases.pop_front();
+        }
+        self.recent_atlases.push_back(identity);
     }
 
     fn raster_image(&mut self, key: &GlyphKey) -> Result<Option<Arc<SwashImage>>, TextError> {

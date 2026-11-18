@@ -132,6 +132,10 @@ fn explicit_font_pack_shapes_multilingual_original_text() {
 }
 
 fn compile_label(system: &mut TextSystem, text: &str) -> CompiledUnicodeUi {
+    compile_label_at(system, text, 3)
+}
+
+fn compile_label_at(system: &mut TextSystem, text: &str, atlas: u64) -> CompiledUnicodeUi {
     let rect = crate::UiRect {
         x: 0.0,
         y: 0.0,
@@ -158,15 +162,21 @@ fn compile_label(system: &mut TextSystem, text: &str) -> CompiledUnicodeUi {
                     text,
                 }],
             },
-            crate::UiTexture {
+            UiTexture {
                 id: tilewright_scene::ResourceId(2),
                 revision: 1,
                 digest: tilewright_scene::Digest256(crate::builtin::SOLID_SHA256),
             },
-            3,
+            atlas,
             crate::UiLimits::default(),
         )
         .unwrap()
+}
+
+fn atlas_identity(system: &mut TextSystem, text: &str, atlas: u64) -> UiTexture {
+    let frame = compile_label_at(system, text, atlas);
+    assert_eq!(frame.resources.len(), 1);
+    frame.resources[0].identity
 }
 
 #[test]
@@ -193,6 +203,115 @@ fn atlas_is_immutable_deterministic_and_keeps_larger_previous_glyphs() {
         first.resources[0].identity.digest.0,
         <[u8; 32]>::from(Sha256::digest(bytes))
     );
+}
+
+#[test]
+fn one_atlas_id_issues_the_same_revisions_as_before() {
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let revisions: Vec<u64> = ["W.i", "W.i", "different", "W.i", "W.i"]
+        .into_iter()
+        .map(|text| atlas_identity(&mut system, text, 3).revision)
+        .collect();
+    // Only the last atlas built for the ID is reused, as with one ID before.
+    assert_eq!(revisions, [1, 1, 2, 3, 3]);
+}
+
+#[test]
+fn alternating_atlas_ids_keep_their_unchanged_identities() {
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let host = atlas_identity(&mut system, "host label", 3);
+    let field = atlas_identity(&mut system, "field text", 4);
+    assert_ne!(host.revision, field.revision);
+    for _ in 0..3 {
+        assert_eq!(atlas_identity(&mut system, "host label", 3), host);
+        assert_eq!(atlas_identity(&mut system, "field text", 4), field);
+    }
+    // Only the ID whose bytes changed gets a new revision.
+    let edited = atlas_identity(&mut system, "field text!", 4);
+    assert_ne!(edited.digest, field.digest);
+    assert!(edited.revision > field.revision && edited.revision > host.revision);
+    assert_eq!(atlas_identity(&mut system, "host label", 3), host);
+    assert_eq!(atlas_identity(&mut system, "field text!", 4), edited);
+    // Returning to older bytes never revives an older revision.
+    let reverted = atlas_identity(&mut system, "field text", 4);
+    assert_eq!(reverted.digest, field.digest);
+    assert!(reverted.revision > edited.revision);
+}
+
+#[test]
+fn atlas_ids_beyond_the_reuse_capacity_get_fresh_revisions() {
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let ids: Vec<u64> = (0..=u64::try_from(RECENT_ATLASES).unwrap())
+        .map(|index| 3 + index)
+        .collect();
+    let mut issued =
+        HashMap::<(tilewright_scene::ResourceId, u64), tilewright_scene::Digest256>::new();
+    let mut latest = HashMap::<tilewright_scene::ResourceId, u64>::new();
+    let mut record = |identity: UiTexture| {
+        // A revision for an ID never repeats with different bytes, never goes
+        // down, and revisions are never shared between IDs.
+        assert_eq!(
+            *issued
+                .entry((identity.id, identity.revision))
+                .or_insert(identity.digest),
+            identity.digest
+        );
+        assert!(
+            issued
+                .keys()
+                .all(|(id, revision)| *revision != identity.revision || *id == identity.id)
+        );
+        let last = latest.entry(identity.id).or_insert(identity.revision);
+        assert!(identity.revision >= *last);
+        *last = identity.revision;
+        identity
+    };
+    // Fill the reuse memory exactly: ids[0] is the least recently used.
+    let first: Vec<_> = ids[..RECENT_ATLASES]
+        .iter()
+        .map(|id| record(atlas_identity(&mut system, "W.i", *id)))
+        .collect();
+    let maximum = first
+        .iter()
+        .map(|identity| identity.revision)
+        .max()
+        .unwrap();
+    // A hit reuses the identity and makes ids[0] the most recently used, so
+    // the next new ID evicts ids[1] instead.
+    assert_eq!(record(atlas_identity(&mut system, "W.i", ids[0])), first[0]);
+    let added = record(atlas_identity(&mut system, "W.i", ids[RECENT_ATLASES]));
+    assert!(added.revision > maximum);
+    // Exactly the RECENT_ATLASES most recently used IDs still reuse. These
+    // checks are hits, so they evict nothing.
+    for (index, id) in ids.iter().enumerate().filter(|(index, _)| *index != 1) {
+        let expected = first.get(index).copied().unwrap_or(added);
+        assert_eq!(record(atlas_identity(&mut system, "W.i", *id)), expected);
+    }
+    // The next most recent was forgotten: a new revision for the same bytes.
+    let again = record(atlas_identity(&mut system, "W.i", ids[1]));
+    assert_eq!(again.digest, first[1].digest);
+    assert!(again.revision > added.revision);
+    // Changed bytes always get a new revision.
+    for id in &ids {
+        let changed = record(atlas_identity(&mut system, "different", *id));
+        assert!(changed.revision > again.revision);
+    }
+}
+
+#[test]
+fn clear_cache_forgets_every_atlas_identity_without_reissuing() {
+    let mut system = TextSystem::new(legacy_pack(), TextLimits::default()).unwrap();
+    let host = atlas_identity(&mut system, "host label", 3);
+    let field = atlas_identity(&mut system, "field text", 4);
+    system.clear_cache();
+    let host_after = atlas_identity(&mut system, "host label", 3);
+    let field_after = atlas_identity(&mut system, "field text", 4);
+    assert_eq!(host_after.digest, host.digest);
+    assert_eq!(field_after.digest, field.digest);
+    assert!(host_after.revision > field.revision);
+    assert!(field_after.revision > host_after.revision);
+    assert_eq!(atlas_identity(&mut system, "host label", 3), host_after);
+    assert_eq!(atlas_identity(&mut system, "field text", 4), field_after);
 }
 
 #[test]
@@ -301,7 +420,7 @@ fn unknown_roles_limits_and_missing_scalars_are_explicit() {
         logical_size: [128, 128],
         physical_size: [128, 128],
     };
-    let solid = crate::UiTexture {
+    let solid = UiTexture {
         id: tilewright_scene::ResourceId(2),
         revision: 1,
         digest: tilewright_scene::Digest256(crate::builtin::SOLID_SHA256),
@@ -407,7 +526,7 @@ fn primitive_order_survives_equal_painter_order_and_clipping() {
             crate::UiDisplayList {
                 primitives: &primitives,
             },
-            crate::UiTexture {
+            UiTexture {
                 id: tilewright_scene::ResourceId(2),
                 revision: 1,
                 digest: tilewright_scene::Digest256(crate::builtin::SOLID_SHA256),
@@ -570,7 +689,7 @@ fn performance_international_ui() {
         logical_size: [2048, 2048],
         physical_size: [2048, 2048],
     };
-    let solid = crate::UiTexture {
+    let solid = UiTexture {
         id: tilewright_scene::ResourceId(2),
         revision: 1,
         digest: tilewright_scene::Digest256(crate::builtin::SOLID_SHA256),
@@ -611,7 +730,7 @@ fn performance_international_ui() {
     assert_eq!(system.cached_layouts(), 101);
     assert!(system.raster.len() <= 4096);
     assert!(system.raster_bytes <= 16 * 1024 * 1024);
-    let font = crate::builtin::builtin_font(crate::UiTexture {
+    let font = crate::builtin::builtin_font(UiTexture {
         id: tilewright_scene::ResourceId(1),
         revision: 1,
         digest: tilewright_scene::Digest256(crate::builtin::ATLAS_SHA256),
