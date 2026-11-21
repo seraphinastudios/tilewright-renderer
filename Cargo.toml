@@ -26,7 +26,7 @@ version = "0.7.2"
 # Text layout without the "system" feature in this workspace. Independently,
 # every collection disables system fonts and rejects runs from non-pack fonts,
 # so a consumer that unifies the feature on still loads only FontPack bytes.
-parley = { version = "=0.12.0", default-features = false, features = ["std"] }
+parley = { version = "=0.13.0", default-features = false, features = ["std"] }
 swash = { version = "=0.2.10", default-features = false, features = ["std", "render", "scale"] }
 unicode-segmentation = "=1.13.3"
 tilewright-render-api = { path = "crates/tilewright-render-api", version = "=0.7.2" }
