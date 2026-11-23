@@ -766,7 +766,8 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn('\npermissions:\n  contents: read\n\n', workflow)
         job = workflow[workflow.index('\n  source-package:\n'):workflow.index('\n  attest:\n')]
         self.assertFalse('permissions:' in job, 'the build job must keep the read-only workflow permissions')
-        readers = ('Plan source version without publication authorization',)
+        readers = ('Plan source version without publication authorization',
+                   'Prepare complete exact-byte source release')
         for name in readers:
             with self.subTest(step=name):
                 environment = workflow_step_environment(workflow, name)
@@ -774,6 +775,13 @@ class BoundaryTests(unittest.TestCase):
                 self.assertFalse({'GH_TOKEN', 'GITHUB_TOKEN', 'GH_INTENT_TOKEN'} & environment.keys())
         # No other step or job-wide setting in this build job receives the token.
         self.assertEqual(job.count('github.token'), len(readers))
+        # The packager withholds it from everything but crate preparation, whose
+        # Cargo subprocesses run without it (clean_environment above).
+        script = [line for line in (RELEASE_WORKFLOW.parents[2] / 'tools/package-release.sh').read_text().splitlines()
+                  if line and not line.startswith('#')]
+        self.assertEqual(script[:3], ['set -euo pipefail', 'read_token=${GH_READ_TOKEN-}', 'unset GH_READ_TOKEN'])
+        self.assertEqual([line for line in script[3:] if 'GH_READ_TOKEN' in line or 'read_token' in line],
+                         ['GH_READ_TOKEN=${read_token} python3 tools/crate_prepare.py prepare "${prepare_options[@]}" \\'])
 
     def test_required_checks_exact_revision_name_app_and_latest_success(self):
         check = {'name': 'Example validation', 'head_sha': REVISION, 'app': {'slug': 'github-actions'},

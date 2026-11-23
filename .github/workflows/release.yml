@@ -75,6 +75,9 @@ jobs:
         if: steps.plan.outputs.release == 'true'
         env:
           SOURCE_VERSION: ${{ steps.plan.outputs.version }}
+          # Preparation pages the same catalog. package-release.sh hands the
+          # token to crate_prepare.py alone, never to builds or scanners.
+          GH_READ_TOKEN: ${{ github.token }}
         run: tools/package-release.sh build/release "$SOURCE_VERSION"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.plan.outputs.release == 'true'

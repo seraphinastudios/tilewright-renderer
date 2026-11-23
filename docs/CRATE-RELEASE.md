@@ -81,11 +81,13 @@ packages are idempotent; a conflicting checksum stops publication. Hourly
 reconciliation revisits eligible releases to recover interrupted dispatches or
 index propagation delays.
 
-In that read-only job, source version planning reads the release catalog
-through the GitHub API with the job's Actions token as `GH_READ_TOKEN`.
-Unauthenticated API reads share 60 requests per hour per runner address, and an
-exhausted address fails the release. The helper sends the token only to
-`api.github.com`, never to release downloads or crates.io.
+In that read-only job, source version planning and crate preparation read the
+release catalog through the GitHub API with the job's Actions token as
+`GH_READ_TOKEN`. Unauthenticated API reads share 60 requests per hour per runner
+address, and an exhausted address fails the release. The helper sends the token
+only to `api.github.com`, never to release downloads or crates.io.
+`tools/package-release.sh` passes it to `crate_prepare.py` alone, which strips
+it from Cargo, so builds, packers and scanners never see it.
 
 ### cargo-deny in validation
 
