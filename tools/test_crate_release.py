@@ -28,6 +28,7 @@ CONFIG = {'schema_version': 1, 'repository': 'seraphinastudios/example', 'reposi
           'workflow': 'publish-crate.yml', 'environment': 'crates-io-release', 'toolchain': '1.97.1',
           'required_checks': ['Example validation'], 'crates': [{'name': 'example', 'path': 'crates/example'}], 'historical': [],
           'excluded': []}
+RELEASE_WORKFLOW = Path(__file__).resolve().parent.parent / '.github/workflows/release.yml'
 
 
 def files():
@@ -382,7 +383,7 @@ class AttestationTests(unittest.TestCase):
         self.assertEqual(sleep.call_count, 23)
 
     def test_evidence_job_names_match_the_release_workflow(self):
-        workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/release.yml').read_text()
+        workflow = RELEASE_WORKFLOW.read_text()
         for name in R.EVIDENCE_JOBS:
             self.assertIn(f'\n    name: {name}\n', workflow)
 
@@ -622,9 +623,6 @@ class IntentReadTests(unittest.TestCase):
             build.assert_not_called()
 
 
-RELEASE_WORKFLOW = Path(__file__).resolve().parent.parent / '.github/workflows/release.yml'
-
-
 def workflow_step_environment(workflow, name):
     """The env entries of the release workflow step with this exact name."""
     lines = workflow.splitlines()
@@ -773,8 +771,10 @@ class BoundaryTests(unittest.TestCase):
                 environment = workflow_step_environment(workflow, name)
                 self.assertEqual(environment.get('GH_READ_TOKEN'), '${{ github.token }}')
                 self.assertFalse({'GH_TOKEN', 'GITHUB_TOKEN', 'GH_INTENT_TOKEN'} & environment.keys())
-        # No other step or job-wide setting in this build job receives the token.
+        # No other step or job-wide setting in this build job receives the token,
+        # under either spelling, and the job reads no secret at all.
         self.assertEqual(job.count('github.token'), len(readers))
+        self.assertFalse('secrets.' in job, 'the build job must not read secrets')
         # The packager withholds it from everything but crate preparation, whose
         # Cargo subprocesses run without it (clean_environment above).
         script = [line for line in (RELEASE_WORKFLOW.parents[2] / 'tools/package-release.sh').read_text().splitlines()
