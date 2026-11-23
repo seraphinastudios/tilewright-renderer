@@ -622,6 +622,27 @@ class IntentReadTests(unittest.TestCase):
             build.assert_not_called()
 
 
+RELEASE_WORKFLOW = Path(__file__).resolve().parent.parent / '.github/workflows/release.yml'
+
+
+def workflow_step_environment(workflow, name):
+    """The env entries of the release workflow step with this exact name."""
+    lines = workflow.splitlines()
+    start = lines.index(f'      - name: {name}') + 1
+    end = start
+    while end < len(lines) and (not lines[end] or lines[end].startswith('        ')):
+        end += 1
+    step = lines[start:end]
+    entries = {}
+    for line in step[step.index('        env:') + 1:]:
+        if not line.startswith('          '):
+            break
+        if not line.lstrip().startswith('#'):
+            key, value = line.strip().split(':', 1)
+            entries[key] = value.strip()
+    return entries
+
+
 class BoundaryTests(unittest.TestCase):
     def test_no_registry_or_oidc_credentials_during_preparation(self):
         for name in ['CARGO_REGISTRY_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'GH_TOKEN', 'GH_INTENT_TOKEN']:
@@ -737,6 +758,22 @@ class BoundaryTests(unittest.TestCase):
             R.registry_source_branch()
         with patch.dict(os.environ, {'GH_READ_TOKEN': 'read-only-secret'}, clear=True):
             self.assertNotIn('GH_READ_TOKEN', P.clean_environment())
+
+    def test_release_catalog_readers_use_only_the_read_only_actions_token(self):
+        # Unauthenticated GitHub API reads share 60 requests per hour per runner
+        # address; an exhausted address failed a main release while planning.
+        workflow = RELEASE_WORKFLOW.read_text()
+        self.assertIn('\npermissions:\n  contents: read\n\n', workflow)
+        job = workflow[workflow.index('\n  source-package:\n'):workflow.index('\n  attest:\n')]
+        self.assertFalse('permissions:' in job, 'the build job must keep the read-only workflow permissions')
+        readers = ('Plan source version without publication authorization',)
+        for name in readers:
+            with self.subTest(step=name):
+                environment = workflow_step_environment(workflow, name)
+                self.assertEqual(environment.get('GH_READ_TOKEN'), '${{ github.token }}')
+                self.assertFalse({'GH_TOKEN', 'GITHUB_TOKEN', 'GH_INTENT_TOKEN'} & environment.keys())
+        # No other step or job-wide setting in this build job receives the token.
+        self.assertEqual(job.count('github.token'), len(readers))
 
     def test_required_checks_exact_revision_name_app_and_latest_success(self):
         check = {'name': 'Example validation', 'head_sha': REVISION, 'app': {'slug': 'github-actions'},

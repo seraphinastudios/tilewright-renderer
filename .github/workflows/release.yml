@@ -56,6 +56,9 @@ jobs:
         env:
           NODE_PATH: ${{ runner.temp }}/crate-analysis/node_modules
           TILEWRIGHT_RELEASE_BRANCH: ${{ github.ref_name }}
+          # Read-only (this job has contents: read). Unauthenticated catalog
+          # reads share 60 GitHub API requests per hour per runner address.
+          GH_READ_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           node scripts/release/source-version.mjs > "$RUNNER_TEMP/source-plan.json"
