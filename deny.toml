@@ -18,7 +18,7 @@ allow = ["Apache-2.0", "BSD-2-Clause", "ISC", "MIT", "Unicode-3.0", "Zlib"]
 # Font data only: never allow OFL-1.1 for any other package or any other
 # version. cargo-deny 0.20.2 package specs use @ for an exact version; move
 # this with the workspace crate version and policy/dependencies.json.
-exceptions = [{ crate = "tilewright-render-ui@0.7.2", allow = ["OFL-1.1"] }]
+exceptions = [{ crate = "tilewright-render-ui@0.7.3", allow = ["OFL-1.1"] }]
 
 [bans]
 multiple-versions = "allow"
