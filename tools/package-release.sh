@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Only crate preparation reads the GitHub API. Keep the read token from the
+# builds, packers and scanners below; crate_prepare.py strips it from Cargo.
+read_token=${GH_READ_TOKEN-}
+unset GH_READ_TOKEN
+
 repository=$(git rev-parse --show-toplevel)
 cd "${repository}"
 
@@ -29,7 +34,7 @@ if [[ $# -lt 2 ]]; then
 else
   source_tag="v${version}"
 fi
-python3 tools/crate_prepare.py prepare "${prepare_options[@]}" \
+GH_READ_TOKEN=${read_token} python3 tools/crate_prepare.py prepare "${prepare_options[@]}" \
   --source-tag "${source_tag}" --output "$(realpath "${output}")" \
   --archives "$(realpath "${output}")"
 cargo build --locked --release --package tilewright-render --features sdl3

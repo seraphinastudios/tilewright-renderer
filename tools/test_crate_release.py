@@ -28,6 +28,7 @@ CONFIG = {'schema_version': 1, 'repository': 'seraphinastudios/example', 'reposi
           'workflow': 'publish-crate.yml', 'environment': 'crates-io-release', 'toolchain': '1.97.1',
           'required_checks': ['Example validation'], 'crates': [{'name': 'example', 'path': 'crates/example'}], 'historical': [],
           'excluded': []}
+RELEASE_WORKFLOW = Path(__file__).resolve().parent.parent / '.github/workflows/release.yml'
 
 
 def files():
@@ -382,7 +383,7 @@ class AttestationTests(unittest.TestCase):
         self.assertEqual(sleep.call_count, 23)
 
     def test_evidence_job_names_match_the_release_workflow(self):
-        workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/release.yml').read_text()
+        workflow = RELEASE_WORKFLOW.read_text()
         for name in R.EVIDENCE_JOBS:
             self.assertIn(f'\n    name: {name}\n', workflow)
 
@@ -622,6 +623,24 @@ class IntentReadTests(unittest.TestCase):
             build.assert_not_called()
 
 
+def workflow_step_environment(workflow, name):
+    """The env entries of the release workflow step with this exact name."""
+    lines = workflow.splitlines()
+    start = lines.index(f'      - name: {name}') + 1
+    end = start
+    while end < len(lines) and (not lines[end] or lines[end].startswith('        ')):
+        end += 1
+    step = lines[start:end]
+    entries = {}
+    for line in step[step.index('        env:') + 1:]:
+        if not line.startswith('          '):
+            break
+        if not line.lstrip().startswith('#'):
+            key, value = line.strip().split(':', 1)
+            entries[key] = value.strip()
+    return entries
+
+
 class BoundaryTests(unittest.TestCase):
     def test_no_registry_or_oidc_credentials_during_preparation(self):
         for name in ['CARGO_REGISTRY_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'GH_TOKEN', 'GH_INTENT_TOKEN']:
@@ -737,6 +756,32 @@ class BoundaryTests(unittest.TestCase):
             R.registry_source_branch()
         with patch.dict(os.environ, {'GH_READ_TOKEN': 'read-only-secret'}, clear=True):
             self.assertNotIn('GH_READ_TOKEN', P.clean_environment())
+
+    def test_release_catalog_readers_use_only_the_read_only_actions_token(self):
+        # Unauthenticated GitHub API reads share 60 requests per hour per runner
+        # address; an exhausted address failed a main release while planning.
+        workflow = RELEASE_WORKFLOW.read_text()
+        self.assertIn('\npermissions:\n  contents: read\n\n', workflow)
+        job = workflow[workflow.index('\n  source-package:\n'):workflow.index('\n  attest:\n')]
+        self.assertFalse('permissions:' in job, 'the build job must keep the read-only workflow permissions')
+        readers = ('Plan source version without publication authorization',
+                   'Prepare complete exact-byte source release')
+        for name in readers:
+            with self.subTest(step=name):
+                environment = workflow_step_environment(workflow, name)
+                self.assertEqual(environment.get('GH_READ_TOKEN'), '${{ github.token }}')
+                self.assertFalse({'GH_TOKEN', 'GITHUB_TOKEN', 'GH_INTENT_TOKEN'} & environment.keys())
+        # No other step or job-wide setting in this build job receives the token,
+        # under either spelling, and the job reads no secret at all.
+        self.assertEqual(job.count('github.token'), len(readers))
+        self.assertFalse('secrets.' in job, 'the build job must not read secrets')
+        # The packager withholds it from everything but crate preparation, whose
+        # Cargo subprocesses run without it (clean_environment above).
+        script = [line for line in (RELEASE_WORKFLOW.parents[2] / 'tools/package-release.sh').read_text().splitlines()
+                  if line and not line.startswith('#')]
+        self.assertEqual(script[:3], ['set -euo pipefail', 'read_token=${GH_READ_TOKEN-}', 'unset GH_READ_TOKEN'])
+        self.assertEqual([line for line in script[3:] if 'GH_READ_TOKEN' in line or 'read_token' in line],
+                         ['GH_READ_TOKEN=${read_token} python3 tools/crate_prepare.py prepare "${prepare_options[@]}" \\'])
 
     def test_required_checks_exact_revision_name_app_and_latest_success(self):
         check = {'name': 'Example validation', 'head_sha': REVISION, 'app': {'slug': 'github-actions'},
