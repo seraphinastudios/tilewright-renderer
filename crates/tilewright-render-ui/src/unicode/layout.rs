@@ -307,10 +307,11 @@ fn build(
         builder.push(StyleProperty::LetterSpacing(*extra), range.clone());
     }
     let mut layout = builder.build(text);
-    layout.break_all_lines(width);
     // Start alignment right-aligns right-to-left paragraphs within the wrap
-    // width, or within their widest line when unwrapped.
-    layout.align(Alignment::Start, AlignmentOptions::default());
+    // width, or within their widest line when unwrapped. Line breaking applies
+    // the alignment set before it.
+    layout.set_alignment(Alignment::Start, AlignmentOptions::default());
+    layout.break_all_lines(width);
     layout
 }
 

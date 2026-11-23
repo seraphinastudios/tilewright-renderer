@@ -67,7 +67,7 @@ and retained OFL notice for the full record.
 ## Unicode text layout engine
 
 Unicode shaping, bidi, line breaking, font fallback and glyph rasterization
-use the crates.io packages `parley` 0.12.0 (with `fontique`) and `swash`
+use the crates.io packages `parley` 0.13.0 (with `fontique`) and `swash`
 0.2.10 as ordinary pinned dependencies. Versions and checksums are fixed by
 `Cargo.lock`; no upstream source is copied, vendored or modified. This
 workspace builds `fontique` without its `system` feature. Independently of
