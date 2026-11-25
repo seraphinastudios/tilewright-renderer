@@ -334,7 +334,7 @@ Chromium.
 
 | Where | WebGL2 | WebGPU |
 | --- | --- | --- |
-| CI (GitHub `ubuntu-24.04`, no GPU, inside `Renderer validation`) | Chrome, SwiftShader | Chrome, SwiftShader |
+| CI (GitHub `ubuntu-24.04`, no GPU, in the `Validate web-and-release` job, which `Renderer validation` requires) | Chrome, SwiftShader | Chrome, SwiftShader |
 | Any developer machine | Chrome, SwiftShader | Chrome, SwiftShader |
 
 Both backends are required, by `npm test` as by `tools/validate-web.sh`.

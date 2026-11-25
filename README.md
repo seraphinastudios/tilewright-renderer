@@ -52,6 +52,9 @@ build, SBOM creation, a release dry run, and the browser package's build and
 headless Chromium WebGPU/WebGL2 tests. The SDL bridge is an explicit
 `sdl3` feature so the default proof CLI remains portable to the native Windows
 toolchain while Linux validation exercises a real window under Xvfb.
+With no argument it runs everything; `tools/validate.sh native` and
+`tools/validate.sh web-and-release` run its two independent parts, which CI
+runs as parallel jobs before the required `Renderer validation` check.
 
 ## Offscreen proof
 

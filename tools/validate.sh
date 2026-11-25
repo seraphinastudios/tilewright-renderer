@@ -1,6 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The full renderer validation. With no argument, or `all`, it runs every
+# part in order; that is the local contract. CI runs each part in its own
+# parallel job, then `Renderer validation` requires all of them. The parts
+# share no state: each writes only to temporary files, Cargo's target
+# directory and the browser package's ignored build output, and
+# tools/pack-web.sh rebuilds the bundles it packs.
+#
+#   tools/validate.sh [all|native|web-and-release]
+#
+# native           everything before the browser package, in order: the
+#                  policy, version and dependency checks (cargo-deny too),
+#                  formatting, Clippy, tests, the release build, the corpus,
+#                  the Linux Vulkan and Xvfb proofs, the frame-time harness,
+#                  the offscreen proof and the Windows cross-check
+# web-and-release  the browser package (tools/validate-web.sh) and the
+#                  release dry run (tools/package-release.sh)
+usage="usage: tools/validate.sh [all|native|web-and-release]"
+if [[ $# -gt 1 ]]; then
+  echo "${usage}" >&2
+  exit 2
+fi
+case "${1:-all}" in
+  all) selected=(native web-and-release) ;;
+  native | web-and-release) selected=("$1") ;;
+  *)
+    echo "${usage}" >&2
+    exit 2
+    ;;
+esac
+
 repository=$(git rev-parse --show-toplevel)
 cd "${repository}"
 
@@ -8,66 +38,75 @@ cd "${repository}"
 export TILEWRIGHT_UNICODE_FONT_ROOT="${repository}/assets/unicode"
 
 test "$(rustc --version | cut -d' ' -f2)" = 1.97.1
-python3 -m unittest tools.test_crate_release tools.test_web_package
-python3 tools/web_package.py check-source
-python3 tools/crate_prepare.py check-version --base "${CRATE_RELEASE_BASE:-$(git rev-parse HEAD)}"
-tools/check-architecture.sh
-tools/check-dependencies.sh
-tools/test-check-dependencies.sh
-cargo deny --locked check advisories bans licenses sources
-cargo fmt --all --check
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-targets --all-features
-cargo test --locked --workspace --doc
-cargo build --locked --release --package tilewright-render --features sdl3
-cargo run --locked --quiet --package tilewright-render -- --version
 
-tools/check-provenance.sh
-jq empty corpus/*.json policy/*.json
+validate_native() {
+  python3 -m unittest tools.test_crate_release tools.test_web_package
+  python3 tools/web_package.py check-source
+  python3 tools/crate_prepare.py check-version --base "${CRATE_RELEASE_BASE:-$(git rev-parse HEAD)}"
+  tools/check-architecture.sh
+  tools/check-dependencies.sh
+  tools/test-check-dependencies.sh
+  cargo deny --locked check advisories bans licenses sources
+  cargo fmt --all --check
+  cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+  cargo test --locked --workspace --all-targets --all-features
+  cargo test --locked --workspace --doc
+  cargo build --locked --release --package tilewright-render --features sdl3
+  cargo run --locked --quiet --package tilewright-render -- --version
 
-corpus_actual=$(mktemp /tmp/tilewright-renderer-corpus.XXXXXX)
-proof_output=$(mktemp /tmp/tilewright-renderer-proof.XXXXXX)
-proof_error=$(mktemp /tmp/tilewright-renderer-proof-error.XXXXXX)
-rm -f -- "${proof_output}"
-trap 'rm -f -- "${corpus_actual}" "${proof_output}" "${proof_error}"' EXIT
-cargo run --locked --quiet --package tilewright-render-testkit --example corpus \
-  >"${corpus_actual}"
-# The runner emits each fixture texture's identity and digest; the manifest
-# records them beside their provenance.
-diff -u \
-  <(jq -S '{schema_version, cases, resources: [.resources[]
-    | {name, resource_id, revision, width, height, sha256}]}' corpus/manifest.json) \
-  <(jq -S . "${corpus_actual}")
+  tools/check-provenance.sh
+  jq empty corpus/*.json policy/*.json
 
-cargo run --locked --quiet --package tilewright-render -- probe
-cargo run --locked --quiet --package tilewright-render -- corpus
-SDL_VIDEO_DRIVER=x11 xvfb-run -a -s '-screen 0 1024x768x24' \
-  cargo run --locked --quiet --package tilewright-render --features sdl3 -- window
-# Keep the native frame-time harness working; its numbers are not checked.
-cargo run --locked --quiet --release --package tilewright-render-wgpu --example frame_time -- \
-  --width 320 --height 180 --characters 50 --frames 5 --warmup 1
-cargo run --locked --quiet --package tilewright-render -- offscreen "${proof_output}"
-test "$(wc -c <"${proof_output}")" -eq 16407
-if cargo run --locked --quiet --package tilewright-render -- offscreen "${proof_output}" \
-  2>"${proof_error}"; then
-  echo "offscreen proof overwrote an existing output" >&2
-  exit 1
-fi
-grep -F "without overwriting" "${proof_error}" >/dev/null
+  corpus_actual=$(mktemp /tmp/tilewright-renderer-corpus.XXXXXX)
+  proof_output=$(mktemp /tmp/tilewright-renderer-proof.XXXXXX)
+  proof_error=$(mktemp /tmp/tilewright-renderer-proof-error.XXXXXX)
+  rm -f -- "${proof_output}"
+  trap 'rm -f -- "${corpus_actual}" "${proof_output}" "${proof_error}"' EXIT
+  cargo run --locked --quiet --package tilewright-render-testkit --example corpus \
+    >"${corpus_actual}"
+  # The runner emits each fixture texture's identity and digest; the manifest
+  # records them beside their provenance.
+  diff -u \
+    <(jq -S '{schema_version, cases, resources: [.resources[]
+      | {name, resource_id, revision, width, height, sha256}]}' corpus/manifest.json) \
+    <(jq -S . "${corpus_actual}")
 
-cargo check --locked --workspace --target x86_64-pc-windows-gnu \
-  --exclude tilewright-render-sdl3
+  cargo run --locked --quiet --package tilewright-render -- probe
+  cargo run --locked --quiet --package tilewright-render -- corpus
+  SDL_VIDEO_DRIVER=x11 xvfb-run -a -s '-screen 0 1024x768x24' \
+    cargo run --locked --quiet --package tilewright-render --features sdl3 -- window
+  # Keep the native frame-time harness working; its numbers are not checked.
+  cargo run --locked --quiet --release --package tilewright-render-wgpu --example frame_time -- \
+    --width 320 --height 180 --characters 50 --frames 5 --warmup 1
+  cargo run --locked --quiet --package tilewright-render -- offscreen "${proof_output}"
+  test "$(wc -c <"${proof_output}")" -eq 16407
+  if cargo run --locked --quiet --package tilewright-render -- offscreen "${proof_output}" \
+    2>"${proof_error}"; then
+    echo "offscreen proof overwrote an existing output" >&2
+    exit 1
+  fi
+  grep -F "without overwriting" "${proof_error}" >/dev/null
 
-tools/validate-web.sh
+  cargo check --locked --workspace --target x86_64-pc-windows-gnu \
+    --exclude tilewright-render-sdl3
+}
 
-release_output=$(mktemp -d /tmp/tilewright-renderer-release.XXXXXX)
-rmdir "${release_output}"
-tools/package-release.sh "${release_output}"
-test -s "${release_output}/SHA256SUMS"
-# The dry run packs, checks and draws with the browser package tarball, and
-# SHA256SUMS lists it.
-grep -Ex '[0-9a-f]{64}  (\./)?seraphinastudios-tilewright-render-0\.0\.0-check\.tgz' \
-  "${release_output}/SHA256SUMS" >/dev/null
-rm -rf -- "${release_output}"
+validate_web_and_release() {
+  tools/validate-web.sh
+
+  release_output=$(mktemp -d /tmp/tilewright-renderer-release.XXXXXX)
+  rmdir "${release_output}"
+  tools/package-release.sh "${release_output}"
+  test -s "${release_output}/SHA256SUMS"
+  # The dry run packs, checks and draws with the browser package tarball, and
+  # SHA256SUMS lists it.
+  grep -Ex '[0-9a-f]{64}  (\./)?seraphinastudios-tilewright-render-0\.0\.0-check\.tgz' \
+    "${release_output}/SHA256SUMS" >/dev/null
+  rm -rf -- "${release_output}"
+}
+
+for part in "${selected[@]}"; do
+  "validate_${part//-/_}"
+done
 
 git diff --check
