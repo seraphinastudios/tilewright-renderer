@@ -53,8 +53,10 @@ jobs:
           VALIDATION_PART: ${{ matrix.part }}
         run: tools/validate.sh "${VALIDATION_PART}"
 
+      # The browser package's npm install is in this part's tree, as it was
+      # when one job ran every part before the scan.
       - name: Scan locked dependencies
-        if: matrix.part == 'native'
+        if: matrix.part == 'web-and-release'
         run: >-
           trivy fs --scanners vuln --severity HIGH,CRITICAL
           --exit-code 1 --ignore-unfixed .
