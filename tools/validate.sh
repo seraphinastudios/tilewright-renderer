@@ -10,8 +10,11 @@ set -euo pipefail
 #
 #   tools/validate.sh [all|native|web-and-release]
 #
-# native           policy, formatting, Clippy, tests, the corpus, the Linux
-#                  Vulkan and Xvfb proofs and the Windows cross-check
+# native           everything before the browser package, in order: the
+#                  policy, version and dependency checks (cargo-deny too),
+#                  formatting, Clippy, tests, the release build, the corpus,
+#                  the Linux Vulkan and Xvfb proofs, the frame-time harness,
+#                  the offscreen proof and the Windows cross-check
 # web-and-release  the browser package (tools/validate-web.sh) and the
 #                  release dry run (tools/package-release.sh)
 usage="usage: tools/validate.sh [all|native|web-and-release]"

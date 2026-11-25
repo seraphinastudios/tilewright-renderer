@@ -62,7 +62,8 @@ jobs:
           --exit-code 1 --ignore-unfixed .
 
   # The required check. It needs every job above and passes only when each
-  # one succeeded: a failed, skipped or cancelled job fails it.
+  # one succeeded: a failed, skipped or cancelled job fails it. Add every
+  # new job to `needs`, or this check passes without it.
   result:
     name: Renderer validation
     needs:
