@@ -4,9 +4,14 @@ set -euo pipefail
 test -n "${RUNNER_TEMP:-}"
 test -n "${GITHUB_PATH:-}"
 
+# No MinGW cross compiler. The Windows cross-check in tools/validate.sh is a
+# `cargo check` that excludes the SDL bridge: it links nothing for Windows,
+# and the only C build in the locked graph (`cc`, through SDL's source build)
+# is outside it, so the Rust target below is all it needs. MinGW was about
+# 115 MB of this download and its slowest part whenever the mirror was slow.
 sudo apt-get update
 sudo apt-get install --no-install-recommends --yes \
-  gcc-mingw-w64-x86-64 libasound2-dev libdbus-1-dev libdecor-0-dev \
+  libasound2-dev libdbus-1-dev libdecor-0-dev \
   libdrm-dev libegl1-mesa-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
   libibus-1.0-dev libpipewire-0.3-dev libpulse-dev libsndio-dev libudev-dev \
   liburing-dev libvulkan-dev libwayland-dev libx11-dev libxcursor-dev \

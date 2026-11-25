@@ -14,8 +14,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # tools/validate.sh runs every part in order locally; here each part runs
+  # in its own job, in parallel.
   validate:
-    name: Renderer validation
+    name: Validate ${{ matrix.part }}
+    strategy:
+      fail-fast: false
+      matrix:
+        part:
+          - native
+          - web-and-release
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -41,9 +49,30 @@ jobs:
         run: cargo fetch --locked
 
       - name: Validate renderer contracts and release
-        run: tools/validate.sh
+        env:
+          VALIDATION_PART: ${{ matrix.part }}
+        run: tools/validate.sh "${VALIDATION_PART}"
 
       - name: Scan locked dependencies
+        if: matrix.part == 'native'
         run: >-
           trivy fs --scanners vuln --severity HIGH,CRITICAL
           --exit-code 1 --ignore-unfixed .
+
+  # The required check. It needs every job above and passes only when each
+  # one succeeded: a failed, skipped or cancelled job fails it.
+  result:
+    name: Renderer validation
+    needs:
+      - validate
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every validation job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"${NEEDS}"
+          jq -e 'length > 0 and all(.[]; .result == "success")' <<<"${NEEDS}" >/dev/null
